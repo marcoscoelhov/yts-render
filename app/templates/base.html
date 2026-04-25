@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ settings.app_name }}</title>
+    <link rel="stylesheet" href="/static/styles.css">
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Harness Engineering</p>
+        <h1><a href="/">{{ settings.app_name }}</a></h1>
+      </div>
+      <div class="tailnet-box">
+        <span>Loopback: {{ settings.app_host }}:{{ settings.app_port }}</span>
+        <span>Tailnet alvo: https://{{ settings.tailscale_hostname }}.{{ settings.tailnet_domain }}</span>
+      </div>
+    </header>
+    <main class="page-shell">
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

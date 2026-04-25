@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% block content %}
+{% set job = details.job %}
+{% set request_data = details.topic_request %}
+{% set topic_plan = details.topic_plan %}
+{% set script = details.script %}
+{% set scene_plan = details.scene_plan %}
+{% set narration = details.narration %}
+{% set subtitles = details.subtitles %}
+{% set render = details.render %}
+<section class="detail-grid" {% if job.status in ["queued", "running"] %}hx-get="/jobs/{{ job.job_id }}" hx-trigger="every 2s" hx-select=".detail-grid" hx-swap="outerHTML"{% endif %}>
+  <div class="main-column">
+    <section class="panel">
+      <div class="detail-header">
+        <div>
+          <p class="eyebrow">Job {{ job.job_id }}</p>
+          <h2>{{ request_data.seed_theme }}</h2>
+        </div>
+        <span class="badge {{ job.status }}">{{ job.status }}</span>
+      </div>
+      <div class="tab-strip">
+        <a href="#overview">Overview</a>
+        <a href="#script">Script</a>
+        <a href="#scenes">Scenes</a>
+        <a href="#assets">Assets</a>
+        <a href="#audio">Audio &amp; Subtitles</a>
+        <a href="#render">Render</a>
+        <a href="#logs">Logs</a>
+      </div>
+    </section>
+
+    <section id="featured-render" class="panel featured-render">
+      <div class="featured-copy">
+        <p class="eyebrow">Video Final</p>
+        <h3>Pronto para revisão humana</h3>
+        <p>O render final fica destacado aqui para reduzir navegação e acelerar a validação editorial.</p>
+        {% if render %}
+        <div class="featured-meta">
+          <span>{{ render.resolution }}</span>
+          <span>{{ render.video_codec }} + {{ render.audio_codec }}</span>
+          <span>{{ (render.duration_ms / 1000)|round(1) }} s</span>
+        </div>
+        <div class="featured-actions">
+          <a class="button-link" href="{{ artifact_url(render.video_uri) }}" target="_blank" rel="noopener">Abrir vídeo</a>
+          <a class="button-link ghost-link" href="{{ artifact_url(render.poster_uri) }}" target="_blank" rel="noopener">Abrir poster</a>
+          <a class="button-link ghost-link" href="{{ artifact_url(render.ffmpeg_log_uri) }}" target="_blank" rel="noopener">Ver log FFmpeg</a>
+        </div>
+        {% else %}
+        <p>Aguardando render.</p>
+        {% endif %}
+      </div>
+      <div class="featured-player-shell">
+        {% if render %}
+        <video class="featured-player" controls preload="metadata" poster="{{ artifact_url(render.poster_uri) }}" src="{{ artifact_url(render.video_uri) }}"></video>
+        {% endif %}
+      </div>
+    </section>
+
+    <section id="overview" class="panel">
+      <h3>Overview</h3>
+      <div class="stats-grid">
+        <div><strong>Nicho</strong><span>{{ job.niche_id }}</span></div>
+        <div><strong>Idioma</strong><span>{{ job.language }}</span></div>
+        <div><strong>Duracao alvo</strong><span>{{ job.target_duration_sec }} s</span></div>
+        <div><strong>Resumo</strong><span>{{ job.topic_summary or "-" }}</span></div>
+      </div>
+      <pre>{{ job.quality_summary or {} }}</pre>
+    </section>
+
+    <section id="script" class="panel">
+      <h3>Script</h3>
+      {% if topic_plan %}
+      <p><strong>Topico:</strong> {{ topic_plan.canonical_topic }}</p>
+      <p><strong>Angulo:</strong> {{ topic_plan.angle }}</p>
+      {% endif %}
+      {% if script %}
+      <p><strong>Titulo:</strong> {{ script.title }}</p>
+      <p><strong>Hook:</strong> {{ script.hook }}</p>
+      <pre>{{ script.full_narration }}</pre>
+      <pre>{{ script.qa_metrics }}</pre>
+      {% else %}
+      <p>Aguardando script.</p>
+      {% endif %}
+    </section>
+
+    <section id="scenes" class="panel">
+      <h3>Scenes</h3>
+      {% if scene_plan %}
+      <div class="scene-list">
+        {% for scene in scene_plan.scenes %}
+        <article class="scene-card">
+          <header>
+            <strong>Cena {{ scene.order }}</strong>
+            <span>{{ scene.visual_intent }}</span>
+          </header>
+          <p>{{ scene.narration_text }}</p>
+          <p><strong>Tokens:</strong> {{ scene.token_start }}-{{ scene.token_end }}</p>
+          <p><strong>Prompt:</strong> {{ scene.image_prompt }}</p>
+        </article>
+        {% endfor %}
+      </div>
+      {% else %}
+      <p>Aguardando scene plan.</p>
+      {% endif %}
+    </section>
+
+    <section id="assets" class="panel">
+      <h3>Assets</h3>
+      <div class="asset-grid">
+        {% for asset in details.assets %}
+        <article class="asset-card {% if asset.selected %}selected{% endif %}">
+          <img src="{{ artifact_url(asset.uri) }}" alt="asset {{ asset.scene_id }}">
+          <div>
+            <p><strong>{{ asset.scene_id }}</strong> · {{ asset.provider }}</p>
+            <p>semantic={{ asset.scores.semantic_match }} total={{ asset.scores.total_score }}</p>
+            {% if asset.fallback_used %}<span class="badge fallback">fallback</span>{% endif %}
+            {% if asset.attribution %}<p>{{ asset.attribution }}</p>{% endif %}
+          </div>
+        </article>
+        {% else %}
+        <p>Nenhum asset ainda.</p>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section id="audio" class="panel">
+      <h3>Audio &amp; Subtitles</h3>
+      {% if narration %}
+      <audio controls src="{{ artifact_url(narration.audio_uri) }}"></audio>
+      <p><strong>Voice:</strong> {{ narration.voice }} · {{ (narration.duration_ms / 1000)|round(1) }} s</p>
+      {% endif %}
+      {% if subtitles %}
+      <pre>{{ subtitles.items }}</pre>
+      <a href="{{ artifact_url(subtitles.ass_uri) }}">Download ASS</a>
+      {% endif %}
+    </section>
+
+    <section id="render" class="panel">
+      <h3>Render</h3>
+      {% if render %}
+      <video controls preload="metadata" poster="{{ artifact_url(render.poster_uri) }}" src="{{ artifact_url(render.video_uri) }}"></video>
+      <p>{{ render.resolution }} · {{ render.video_codec }} + {{ render.audio_codec }} · {{ (render.duration_ms / 1000)|round(1) }} s</p>
+      <a href="{{ artifact_url(render.ffmpeg_log_uri) }}">FFmpeg log</a>
+      {% else %}
+      <p>Aguardando render.</p>
+      {% endif %}
+    </section>
+
+    <section id="logs" class="panel">
+      <h3>Logs</h3>
+      <h4>Fallbacks</h4>
+      <pre>{% for event in details.fallbacks %}{{ event.created_at }} {{ event.scene_id }} {{ event.reason_code }}
+{% endfor %}</pre>
+      <h4>Erros</h4>
+      <pre>{% for error in details.errors %}{{ error.created_at }} {{ error.step }} {{ error.message }}
+{% endfor %}</pre>
+      <h4>Eventos</h4>
+      <pre>{{ details.events }}</pre>
+    </section>
+  </div>
+
+  <aside class="side-column">
+    <section class="panel sticky">
+      <h3>Review</h3>
+      <form method="post" action="/jobs/{{ job.job_id }}/review" class="review-form">
+        <input type="hidden" name="reviewer_identity" value="tailscale:local-reviewer">
+        <label for="reason_codes">Reason codes</label>
+        <input id="reason_codes" name="reason_codes" placeholder="weak_hook,visual_incoherence">
+        <label for="notes">Notes</label>
+        <textarea id="notes" name="notes" rows="4"></textarea>
+        <div class="button-row">
+          <button type="submit" name="action" value="approve">Approve</button>
+          <button type="submit" name="action" value="reject" class="secondary">Reject</button>
+        </div>
+        <label for="retry_step">Retry from step</label>
+        <select id="retry_step" name="retry_step">
+          <option value="">pipeline completo</option>
+          {% for step in ["topic_plan","script","scene_plan","asset_generation","tts","subtitle_alignment","render"] %}
+          <option value="{{ step }}">{{ step }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit" name="action" value="retry_from_step" class="ghost">Criar novo retry job</button>
+      </form>
+      <h3>Artefatos</h3>
+      <pre>{{ job.artifact_index or {} }}</pre>
+    </section>
+  </aside>
+</section>
+{% endblock %}

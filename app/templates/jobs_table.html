@@ -1,0 +1,30 @@
+<table class="jobs-table">
+  <thead>
+    <tr>
+      <th>Job</th>
+      <th>Tema</th>
+      <th>Status</th>
+      <th>Criado em</th>
+      <th>Duracao</th>
+      <th>Fallbacks</th>
+      <th>Review</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for job, seed_theme, duration_ms, fallback_count, asset_count in rows %}
+    <tr>
+      <td><a href="/jobs/{{ job.job_id }}">{{ job.job_id[:8] }}</a></td>
+      <td>{{ seed_theme }}</td>
+      <td><span class="badge {{ job.status }}">{{ job.status }}</span></td>
+      <td>{{ job.created_at }}</td>
+      <td>{% if duration_ms %}{{ (duration_ms / 1000)|round(1) }} s{% else %}-{% endif %}</td>
+      <td>{{ fallback_count }}</td>
+      <td>{{ job.review_state or "-" }}</td>
+    </tr>
+    {% else %}
+    <tr>
+      <td colspan="7">Nenhum job encontrado.</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

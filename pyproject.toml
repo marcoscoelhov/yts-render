@@ -1,0 +1,26 @@
+[project]
+name = "yts-render"
+version = "0.1.0"
+description = "MVP de geracao de YouTube Shorts por IA com hub de revisao."
+requires-python = ">=3.12"
+dependencies = [
+  "aiofiles==24.1.0",
+  "anthropic==0.67.0",
+  "edge-tts==7.2.3",
+  "fastapi==0.116.1",
+  "httpx==0.28.1",
+  "imageio==2.37.0",
+  "imageio-ffmpeg==0.6.0",
+  "jinja2==3.1.6",
+  "openai==1.107.1",
+  "pillow==11.3.0",
+  "pydantic==2.11.7",
+  "pydantic-settings==2.10.1",
+  "python-multipart==0.0.20",
+  "sqlalchemy==2.0.43",
+  "uvicorn==0.35.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

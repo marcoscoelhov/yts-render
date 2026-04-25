@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel create-panel">
+  <form method="post" action="/jobs" class="job-form">
+    <div class="field wide">
+      <label for="seed_theme">Tema</label>
+      <input id="seed_theme" name="seed_theme" value="polvos" required>
+    </div>
+    <div class="field">
+      <label for="target_duration_sec">Duracao</label>
+      <input id="target_duration_sec" name="target_duration_sec" type="number" min="25" max="45" value="35">
+    </div>
+    <div class="field">
+      <label for="tone">Tom</label>
+      <input id="tone" name="tone" value="intrigante_direto">
+    </div>
+    <div class="field">
+      <label for="requested_angle">Angulo</label>
+      <input id="requested_angle" name="requested_angle" placeholder="opcional">
+    </div>
+    <button type="submit">Criar job</button>
+  </form>
+</section>
+
+<section class="panel filters-panel">
+  <form class="filters-grid" hx-get="/jobs" hx-target="#jobs-table" hx-trigger="change, keyup delay:300ms">
+    <input type="hidden" name="niche" value="curiosidades">
+    <div class="field">
+      <label for="status">Status</label>
+      <select id="status" name="status">
+        <option value="">Todos</option>
+        {% for value in ["queued","running","waiting_review","approved","rejected","failed"] %}
+        <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ value }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field wide">
+      <label for="search">Busca</label>
+      <input id="search" name="search" value="{{ filters.search }}" placeholder="job_id ou tema">
+    </div>
+    <div class="field">
+      <label for="fallback">Fallback</label>
+      <select id="fallback" name="fallback">
+        <option value="">Todos</option>
+        <option value="yes" {% if filters.fallback == "yes" %}selected{% endif %}>Sim</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="review">Review</label>
+      <select id="review" name="review">
+        <option value="">Todos</option>
+        <option value="approved" {% if filters.review == "approved" %}selected{% endif %}>approved</option>
+        <option value="rejected" {% if filters.review == "rejected" %}selected{% endif %}>rejected</option>
+      </select>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <div id="jobs-table" hx-get="/jobs?status={{ filters.status }}&search={{ filters.search }}&fallback={{ filters.fallback }}&review={{ filters.review }}" hx-trigger="load, every 5s">
+    {% include "jobs_table.html" %}
+  </div>
+</section>
+{% endblock %}

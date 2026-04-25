@@ -1,0 +1,9 @@
+.env
+.claude/
+.venv/
+node_modules/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+data/
+data-test/
