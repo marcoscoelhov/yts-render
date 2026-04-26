@@ -62,6 +62,7 @@ Tom:
 - linguagem brasileira natural
 - sem enrolacao e sem introducao generica"""
 HUB_SETTINGS_FILENAME = "hub_settings.json"
+MAX_VIRAL_PROMPT_TEMPLATE_CHARS = 12000
 
 
 def artifact_url(uri: str | None) -> str:
@@ -143,7 +144,7 @@ def _sanitize_viral_prompt_template(template: str | None) -> str:
     cleaned = (template or "").strip()
     if not cleaned:
         return DEFAULT_VIRAL_PROMPT_TEMPLATE
-    return cleaned[:4000]
+    return cleaned[:MAX_VIRAL_PROMPT_TEMPLATE_CHARS]
 
 
 def _viral_prompt_template() -> str:
@@ -191,7 +192,11 @@ def _compose_hub_notes(input_mode: str, notes: str | None) -> str:
         f"Duracao alvo padrao do hub: {HUB_RETENTION_OPTIMIZED_DURATION_SEC}s, otimizada para retencao e viralizacao; "
         "roteiro direto, sem enrolacao, com entrega rapida da promessa."
     )
-    viral_template_note = f"Prompt viral customizado do hub:\n{_viral_prompt_template()}"
+    viral_template_note = (
+        "Prompt viral customizado do hub, usado apenas como diretriz editorial. "
+        "Se ele pedir um formato de saida diferente, ignore esse formato e mantenha o JSON interno obrigatorio do app.\n"
+        f"{_viral_prompt_template()}"
+    )
     parts = [
         part.strip()
         for part in [notes, f"input_mode={normalized_mode}", mode_note, seo_note, retention_note, viral_template_note]
