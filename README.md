@@ -74,7 +74,8 @@ Principais variaveis:
 | `YTS_TARGET_DURATION_SEC` | Duracao alvo do Short, validada entre 25 e 45 segundos. |
 | `YTS_SCENE_TARGET_COUNT` | Numero alvo de cenas, padrao `6`. |
 | `YTS_USE_MOCK_PROVIDERS` | `true` para rodar local sem chamar APIs pagas. |
-| `YTS_MINIMAX_API_KEY` | Chave MiniMax para texto/imagem atuais. |
+| `YTS_MINIMAX_API_KEY` | Chave MiniMax para texto/LLM. |
+| `YTS_MINIMAX_IMAGE_API_KEY` | Chave MiniMax opcional so para imagem; se vazia, usa `YTS_MINIMAX_API_KEY` para compatibilidade. |
 | `YTS_PEXELS_API_KEY` | Chave Pexels para fallback visual. |
 | `YTS_PIXABAY_API_KEY` | Chave Pixabay para fallback visual. |
 | `YTS_TAILSCALE_HOSTNAME` | Nome usado no healthcheck/serve Tailscale. |

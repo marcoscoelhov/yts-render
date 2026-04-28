@@ -26,6 +26,7 @@ class Settings(BaseSettings):
 
     use_mock_providers: bool = False
     minimax_api_key: str | None = None
+    minimax_image_api_key: str | None = None
     minimax_text_base_url: str = "https://api.minimax.io/v1"
     minimax_image_base_url: str = "https://api.minimax.io/v1/image_generation"
     pexels_api_key: str | None = None

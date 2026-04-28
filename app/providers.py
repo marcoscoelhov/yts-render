@@ -727,10 +727,11 @@ class LocalSemanticImageProvider:
 class MinimaxImageProvider:
     def __init__(self) -> None:
         settings = get_settings()
-        if not settings.minimax_api_key:
-            raise ProviderFailure("minimax_image", "missing minimax api key")
+        image_api_key = settings.minimax_image_api_key or settings.minimax_api_key
+        if not image_api_key:
+            raise ProviderFailure("minimax_image", "missing minimax image api key")
         self.url = settings.minimax_image_base_url
-        self.key = settings.minimax_api_key
+        self.key = image_api_key
 
     def generate(self, scene: dict[str, Any], output_path: Path) -> dict[str, Any]:
         last_error: Exception | None = None
