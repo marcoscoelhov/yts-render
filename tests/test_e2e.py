@@ -7,6 +7,7 @@ import shutil
 import time
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -19,8 +20,8 @@ import app.main as main_module  # noqa: E402
 from app.db import SessionLocal, init_db  # noqa: E402
 from app.main import app, artifact_url  # noqa: E402
 from app.models import Job, RenderOutput, SceneAsset, SubtitleTrack, TopicRegistry, TopicRequest  # noqa: E402
-from app.orchestrator import orchestrator  # noqa: E402
-from app.providers import LocalSpeechFallbackProvider, MinimaxCreativeProvider, MockCreativeProvider  # noqa: E402
+from app.orchestrator import normalize_script_metrics, orchestrator  # noqa: E402
+from app.providers import LocalSpeechFallbackProvider, MinimaxCreativeProvider, MinimaxImageProvider, MockCreativeProvider  # noqa: E402
 from app.utils import split_caption_chunks, wrap_caption  # noqa: E402
 
 
@@ -212,6 +213,56 @@ def test_minimax_scene_prompt_keeps_image_prompt_english_exception(monkeypatch) 
     assert "image_prompt MUST be written in English only" in prompt
 
 
+def test_minimax_text_and_image_providers_use_dedicated_keys(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_openai(**kwargs):
+        captured["text_api_key"] = kwargs["api_key"]
+        captured["text_base_url"] = kwargs["base_url"]
+        return object()
+
+    settings = SimpleNamespace(
+        resolved_minimax_text_api_key="text-key",
+        resolved_minimax_image_api_key="image-key",
+        minimax_text_base_url="https://text.example/v1",
+        minimax_image_base_url="https://image.example/v1/image_generation",
+        minimax_text_timeout_sec=30,
+    )
+
+    monkeypatch.setattr("app.providers.get_settings", lambda: settings)
+    monkeypatch.setattr("app.providers.OpenAI", fake_openai)
+
+    creative = MinimaxCreativeProvider()
+    image = MinimaxImageProvider()
+
+    assert creative.client is not None
+    assert captured == {
+        "text_api_key": "text-key",
+        "text_base_url": "https://text.example/v1",
+    }
+    assert image.key == "image-key"
+    assert image.url == "https://image.example/v1/image_generation"
+
+
+def test_script_metrics_normalize_zero_to_ten_provider_scores() -> None:
+    metrics = normalize_script_metrics(
+        {
+            "hook_score": 9.2,
+            "clarity_score": 8.8,
+            "information_density_score": 8.5,
+            "repetition_score": 2,
+            "ending_strength_score": 8,
+            "avg_words_per_sentence": 12.5,
+        }
+    )
+
+    assert metrics["hook_score"] == 0.92
+    assert metrics["information_density_score"] == 0.85
+    assert metrics["repetition_score"] == 0.2
+    assert metrics["ending_strength_score"] == 0.8
+    assert metrics["avg_words_per_sentence"] == 12.5
+
+
 def test_hub_uses_curiosidades_random_theme_and_retention_duration_defaults(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
@@ -354,6 +405,34 @@ def test_speech_envelope_normalization_levels_caption_cues(tmp_path: Path) -> No
     assert ratio < 1.15
 
 
+def test_final_loudness_normalization_uses_ffmpeg_loudnorm(tmp_path: Path, monkeypatch) -> None:
+    audio_path = tmp_path / "voice.wav"
+    sample_rate = 24_000
+    with wave.open(str(audio_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        frames = bytearray()
+        for idx in range(sample_rate):
+            sample = int(1200 * math.sin(2 * math.pi * 220 * idx / sample_rate))
+            frames.extend(sample.to_bytes(2, "little", signed=True))
+        wav_file.writeframes(frames)
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        shutil.copyfile(command[3], command[-1])
+        return object()
+
+    monkeypatch.setattr("app.providers.subprocess.run", fake_run)
+    LocalSpeechFallbackProvider()._apply_final_loudness_normalization(audio_path)
+
+    command_text = " ".join(captured["command"])
+    assert "loudnorm=I=-16:LRA=11:TP=-1.5" in command_text
+    assert audio_path.exists()
+
+
 def test_scene_semantics_keeps_image_prompt_in_english() -> None:
     normalized = orchestrator._normalize_scene_semantics(
         {
@@ -371,6 +450,8 @@ def test_scene_semantics_keeps_image_prompt_in_english() -> None:
     assert "no letters" in prompt
     assert "no logo" in prompt
     assert "no typography" in prompt
+    assert "no text printed on objects" in prompt
+    assert "blank packages" in prompt
     assert "sem texto" not in prompt
 
 
@@ -392,6 +473,45 @@ def test_scene_semantics_rebuilds_generic_portuguese_prompt_from_narration() -> 
     assert "polvos" not in prompt
     assert "ilustracao" not in prompt
     assert "sem texto" not in prompt
+
+
+def test_scene_semantics_adds_caffeine_specific_visuals_and_blank_objects() -> None:
+    normalized = orchestrator._normalize_scene_semantics(
+        {
+            "scene_id": "scene-2",
+            "primary_subject": "cafeina e foco",
+            "narration_text": "A cafeina ocupa receptores de adenosina e reduz a sonolencia por alguns minutos.",
+            "visual_intent": "process_or_mechanism",
+            "image_prompt": "vertical cinematic image of coffee, no readable text anywhere",
+            "fallback_queries": ["cafeina foco"],
+        },
+        "cafeina e foco",
+    )
+    prompt = normalized["image_prompt"].lower()
+    assert "caffeine molecules" in prompt
+    assert "adenosine receptors" in prompt
+    assert "plain unbranded" in prompt or "blank cups" in prompt
+    assert "no text on cups" in prompt
+    assert "no labels or lettering on any object surface" in prompt
+    assert "cafeina" not in prompt
+
+
+def test_scene_semantics_translates_long_caffeine_topic_to_english_subject() -> None:
+    normalized = orchestrator._normalize_scene_semantics(
+        {
+            "scene_id": "scene-1",
+            "primary_subject": "Cafeína e foco: a ciência por trás do efeito do café na concentração matinal",
+            "narration_text": "Cafeína e foco dependem da adenosina pela manhã.",
+            "visual_intent": "subject_closeup",
+            "image_prompt": "soft morning coffee scene, no readable text anywhere",
+            "fallback_queries": ["cafeina foco"],
+        },
+        "Cafeína e foco",
+    )
+    prompt = normalized["image_prompt"].lower()
+    assert "central subject: caffeine and focus" in prompt
+    assert "cafeína" not in prompt
+    assert "café" not in prompt
 
 
 def test_scene_semantics_rebuilds_generic_cat_prompt_from_narration() -> None:

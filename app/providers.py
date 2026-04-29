@@ -4,6 +4,7 @@ import asyncio
 import audioop
 import base64
 import colorsys
+import concurrent.futures
 import json
 import math
 import shutil
@@ -176,11 +177,14 @@ class MockCreativeProvider:
 class MinimaxCreativeProvider:
     def __init__(self) -> None:
         settings = get_settings()
-        if not settings.minimax_api_key:
-            raise ProviderFailure("minimax_text", "missing minimax api key")
+        api_key = settings.resolved_minimax_text_api_key
+        if not api_key:
+            raise ProviderFailure("minimax_text", "missing minimax text api key")
+        self.timeout_sec = settings.minimax_text_timeout_sec
         self.client = OpenAI(
-            api_key=settings.minimax_api_key,
+            api_key=api_key,
             base_url=settings.minimax_text_base_url,
+            timeout=self.timeout_sec,
         )
 
     def plan_topic(
@@ -286,7 +290,7 @@ Regras obrigatorias para image_prompt:
                     {"role": "system", "content": "Return valid JSON only. No markdown fences."},
                     {"role": "user", "content": prompt},
                 ],
-                timeout=180,
+                timeout=self.timeout_sec,
             )
         except Exception as exc:  # noqa: BLE001
             raise ProviderFailure("minimax_text", str(exc)) from exc
@@ -333,7 +337,8 @@ Regras obrigatorias para image_prompt:
 
 class ResilientCreativeProvider:
     def __init__(self) -> None:
-        self.primary = None if get_settings().use_mock_providers else MinimaxCreativeProvider()
+        self.settings = get_settings()
+        self.primary = None if self.settings.use_mock_providers else MinimaxCreativeProvider()
         self.fallback = MockCreativeProvider()
 
     def plan_topic(
@@ -368,13 +373,26 @@ class ResilientCreativeProvider:
 
     def plan_scenes(self, script: dict[str, Any], target_scene_count: int) -> list[dict[str, Any]]:
         if self.primary:
+            executor: concurrent.futures.ThreadPoolExecutor | None = None
             try:
-                return self.primary.plan_scenes(script, target_scene_count)
+                executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                future = executor.submit(self.primary.plan_scenes, script, target_scene_count)
+                return future.result(timeout=self.settings.minimax_scene_plan_timeout_sec)
+            except concurrent.futures.TimeoutError:
+                scenes = self.fallback.plan_scenes(script, target_scene_count)
+                for scene in scenes:
+                    scene["provider_fallback_reason"] = (
+                        f"minimax_text scene planner timed out after {self.settings.minimax_scene_plan_timeout_sec}s"
+                    )
+                return scenes
             except ProviderFailure as exc:
                 scenes = self.fallback.plan_scenes(script, target_scene_count)
                 for scene in scenes:
                     scene["provider_fallback_reason"] = str(exc)
                 return scenes
+            finally:
+                if executor is not None:
+                    executor.shutdown(wait=False, cancel_futures=True)
         return self.fallback.plan_scenes(script, target_scene_count)
 
 
@@ -382,8 +400,9 @@ class SemanticVerifier:
     def __init__(self) -> None:
         settings = get_settings()
         self.use_mock_providers = settings.use_mock_providers
-        self.enabled = not settings.use_mock_providers and bool(settings.minimax_api_key)
-        self.api_key = settings.minimax_api_key or ""
+        text_api_key = settings.resolved_minimax_text_api_key
+        self.enabled = not settings.use_mock_providers and bool(text_api_key)
+        self.api_key = text_api_key or ""
         self.mmx_path = shutil.which("mmx")
         self._cache: dict[str, dict[str, Any]] = {}
         self._vision_disabled_reason: str | None = None
@@ -727,11 +746,11 @@ class LocalSemanticImageProvider:
 class MinimaxImageProvider:
     def __init__(self) -> None:
         settings = get_settings()
-        image_api_key = settings.minimax_image_api_key or settings.minimax_api_key
-        if not image_api_key:
+        api_key = settings.resolved_minimax_image_api_key
+        if not api_key:
             raise ProviderFailure("minimax_image", "missing minimax image api key")
         self.url = settings.minimax_image_base_url
-        self.key = image_api_key
+        self.key = api_key
 
     def generate(self, scene: dict[str, Any], output_path: Path) -> dict[str, Any]:
         last_error: Exception | None = None
@@ -897,6 +916,7 @@ class LocalSpeechFallbackProvider:
         cues = self._build_cues(text, duration_ms)
         srt_path.write_text(self._render_srt(cues), encoding="utf-8")
         self._normalize_speech_envelope(audio_path, srt_path)
+        self._apply_final_loudness_normalization(audio_path)
         duration_ms = self._measure_audio_ms(audio_path)
         provider = "espeak_ng" if mode == "espeak_ng" else "synthetic_wav"
         return {
@@ -907,7 +927,14 @@ class LocalSpeechFallbackProvider:
             "duration_ms": duration_ms,
             "sample_rate_hz": 24000,
             "channels": 1,
-            "provider_metadata": {"mode": mode, "cue_count": len(cues), "fallback_used": True},
+            "provider_metadata": {
+                "mode": mode,
+                "cue_count": len(cues),
+                "fallback_used": True,
+                "loudness_normalized": True,
+                "loudness_target_lufs": -16.0,
+                "true_peak_limit_db": -1.5,
+            },
         }
 
     def _build_cues(self, text: str, duration_ms: int) -> list[dict[str, Any]]:
@@ -1042,6 +1069,31 @@ class LocalSpeechFallbackProvider:
             target.writeframes(bytes(audio))
         temp_path.replace(audio_path)
 
+    def _apply_final_loudness_normalization(self, audio_path: Path) -> None:
+        temp_path = audio_path.with_suffix(".loudnorm.wav")
+        try:
+            subprocess.run(
+                [
+                    imageio_ffmpeg.get_ffmpeg_exe(),
+                    "-y",
+                    "-i",
+                    str(audio_path),
+                    "-af",
+                    "highpass=f=80,lowpass=f=12000,loudnorm=I=-16:LRA=11:TP=-1.5",
+                    "-ar",
+                    "24000",
+                    "-ac",
+                    "1",
+                    str(temp_path),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            temp_path.replace(audio_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
     def _render_srt(self, cues: list[dict[str, Any]]) -> str:
         blocks = []
         for cue in cues:
@@ -1058,10 +1110,18 @@ class LocalSpeechFallbackProvider:
 
 
 class EdgeTTSProvider(LocalSpeechFallbackProvider):
+    rate = "+12%"
+
     async def _run(self, text: str, audio_path: Path, srt_path: Path) -> dict[str, Any]:
         import edge_tts
 
-        communicate = edge_tts.Communicate(text=text, voice=self.voice, connect_timeout=20, receive_timeout=120)
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=self.voice,
+            rate=self.rate,
+            connect_timeout=20,
+            receive_timeout=120,
+        )
         submaker = edge_tts.SubMaker()
         temp_audio = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
         temp_audio_path = Path(temp_audio.name)
@@ -1077,6 +1137,7 @@ class EdgeTTSProvider(LocalSpeechFallbackProvider):
         temp_audio_path.unlink(missing_ok=True)
         srt_path.write_text(submaker.get_srt(), encoding="utf-8")
         self._normalize_speech_envelope(audio_path, srt_path)
+        self._apply_final_loudness_normalization(audio_path)
         duration_ms = self._measure_audio_ms(audio_path)
         return {
             "provider": "edge_tts",
@@ -1086,7 +1147,14 @@ class EdgeTTSProvider(LocalSpeechFallbackProvider):
             "duration_ms": duration_ms,
             "sample_rate_hz": 24000,
             "channels": 1,
-            "provider_metadata": {"mode": "edge", "fallback_used": False},
+            "provider_metadata": {
+                "mode": "edge",
+                "rate": self.rate,
+                "fallback_used": False,
+                "loudness_normalized": True,
+                "loudness_target_lufs": -16.0,
+                "true_peak_limit_db": -1.5,
+            },
         }
 
     def synthesize(self, text: str, audio_path: Path, srt_path: Path) -> dict[str, Any]:

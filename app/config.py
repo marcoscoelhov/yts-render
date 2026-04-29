@@ -26,9 +26,12 @@ class Settings(BaseSettings):
 
     use_mock_providers: bool = False
     minimax_api_key: str | None = None
+    minimax_text_api_key: str | None = None
     minimax_image_api_key: str | None = None
     minimax_text_base_url: str = "https://api.minimax.io/v1"
     minimax_image_base_url: str = "https://api.minimax.io/v1/image_generation"
+    minimax_text_timeout_sec: float = 120.0
+    minimax_scene_plan_timeout_sec: float = 90.0
     pexels_api_key: str | None = None
     pixabay_api_key: str | None = None
     tailscale_hostname: str = "shorts-hub"
@@ -51,6 +54,14 @@ class Settings(BaseSettings):
     @property
     def static_dir(self) -> Path:
         return Path(__file__).resolve().parent / "static"
+
+    @property
+    def resolved_minimax_text_api_key(self) -> str | None:
+        return self.minimax_text_api_key or self.minimax_api_key
+
+    @property
+    def resolved_minimax_image_api_key(self) -> str | None:
+        return self.minimax_image_api_key or self.minimax_api_key
 
     @property
     def artifacts_dir(self) -> Path:

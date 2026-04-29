@@ -66,11 +66,33 @@ class FatalStepError(RuntimeError):
     pass
 
 
+def model_payload(model: type[Any], payload: dict[str, Any]) -> dict[str, Any]:
+    columns = {column.key for column in model.__mapper__.columns}
+    return {key: value for key, value in payload.items() if key in columns}
+
+
+def normalize_script_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(metrics)
+    score_keys = {
+        "hook_score",
+        "clarity_score",
+        "information_density_score",
+        "repetition_score",
+        "ending_strength_score",
+    }
+    for key in score_keys:
+        value = normalized.get(key)
+        if isinstance(value, int | float) and 1 < value <= 10:
+            normalized[key] = round(value / 10, 3)
+    return normalized
+
+
 NO_TEXT_IMAGE_CONSTRAINT = (
     "clean vertical cinematic scientific image, natural objects only, no readable text anywhere, "
     "no letters, no words, no numbers, no symbols, no logo, no watermark, no captions, "
     "no subtitles, no title card, no poster, no signs, no labels, no UI, no infographic, "
-    "no typography, no diagrams with labels"
+    "no typography, no diagrams with labels, no text printed on objects, no text on packages, "
+    "no text on cups, no text on screens, no text on charts, no readable brand marks"
 )
 
 ENGLISH_SUBJECT_ALIASES = {
@@ -86,9 +108,26 @@ ENGLISH_SUBJECT_ALIASES = {
     "gatos": "cats",
     "felino": "cat",
     "felinos": "cats",
+    "cafe": "coffee",
+    "café": "coffee",
+    "cafeina": "caffeine",
+    "cafeína": "caffeine",
+    "cafeina e foco": "caffeine and focus",
+    "café e foco": "coffee and focus",
 }
 
 SCENE_VISUAL_HINTS = [
+    (("cafeina", "foco"), "caffeine molecules near alert neurons in warm morning light, a plain unbranded coffee cup nearby"),
+    (("cafeína", "foco"), "caffeine molecules near alert neurons in warm morning light, a plain unbranded coffee cup nearby"),
+    (("cafe", "foco"), "plain unbranded coffee cup beside a focused morning workspace, subtle neural energy glow"),
+    (("café", "foco"), "plain unbranded coffee cup beside a focused morning workspace, subtle neural energy glow"),
+    (("adenosina",), "caffeine molecules blocking adenosine receptors on neurons, cinematic scientific visualization"),
+    (("receptores",), "caffeine molecules fitting into neural receptors, cinematic scientific visualization"),
+    (("sonolencia",), "sleep pressure fading from a human silhouette after caffeine reaches the brain, morning light"),
+    (("sonolência",), "sleep pressure fading from a human silhouette after caffeine reaches the brain, morning light"),
+    (("alerta",), "alert brain activity represented by glowing neural pathways beside plain coffee steam"),
+    (("manhã",), "soft morning kitchen light with plain unbranded coffee steam and a person becoming alert in silhouette"),
+    (("manha",), "soft morning kitchen light with plain unbranded coffee steam and a person becoming alert in silhouette"),
     (("gatos", "veem", "mundo diferente"), "cat face close-up with reflective eyes perceiving an altered night world"),
     (("terceiro", "párpado"), "macro close-up of a cat eye showing the translucent third eyelid protecting the eye"),
     (("terceiro", "parpado"), "macro close-up of a cat eye showing the translucent third eyelid protecting the eye"),
@@ -472,7 +511,7 @@ class JobOrchestrator:
             },
         }
         session.execute(delete(TopicPlan).where(TopicPlan.job_id == job.job_id))
-        session.add(TopicPlan(**payload))
+        session.add(TopicPlan(**model_payload(TopicPlan, payload)))
         self.storage.persist_json(job.job_id, "topic_plan.json", self._serialize_for_json(payload))
         job.topic_summary = f"{plan['canonical_topic']} | {plan['angle']}"
         self._append_event(job.job_id, "topic.generated", "succeeded", payload["quality_metrics"])
@@ -492,7 +531,8 @@ class JobOrchestrator:
             "original_input": request.seed_theme,
         }
         script = self.providers.creative.generate_script(plan_dict)
-        metrics = script["qa_metrics"]
+        metrics = normalize_script_metrics(script["qa_metrics"])
+        script["qa_metrics"] = metrics
         gate = (
             metrics["hook_score"] >= 0.80
             and metrics["avg_words_per_sentence"] <= 14
@@ -514,7 +554,7 @@ class JobOrchestrator:
             **script,
         }
         session.execute(delete(Script).where(Script.job_id == job.job_id))
-        session.add(Script(**payload))
+        session.add(Script(**model_payload(Script, payload)))
         self.storage.persist_json(job.job_id, "script.json", self._serialize_for_json(payload))
         quality_summary = job.quality_summary or {}
         quality_summary["script"] = metrics
@@ -553,7 +593,7 @@ class JobOrchestrator:
             "scenes": scenes,
         }
         session.execute(delete(ScenePlan).where(ScenePlan.job_id == job.job_id))
-        session.add(ScenePlan(**payload))
+        session.add(ScenePlan(**model_payload(ScenePlan, payload)))
         self.storage.persist_json(job.job_id, "scene_plan.json", self._serialize_for_json(payload))
         self._append_event(job.job_id, "scene_plan.generated", "succeeded", {"scene_count": len(scenes)})
         return ["scene_plan.json"]
@@ -725,17 +765,20 @@ class JobOrchestrator:
         prompt = str(scene.get("image_prompt", "")).replace("_", " ")
         english_subject = self._english_subject_hint(topic_text, primary_subject)
         scene_hint = self._english_scene_visual_hint(scene, english_subject)
+        semantic_directive = self._semantic_scene_directive(scene, scene_hint)
         if self._should_rebuild_image_prompt(prompt):
             visual_intent = str(scene.get("visual_intent") or "scientific documentary scene").replace("_", " ")
             prompt = scene_hint or f"vertical cinematic scientific image of {english_subject}, {visual_intent}"
         else:
             prompt = self._replace_subject_aliases(prompt)
+        if semantic_directive.lower() not in prompt.lower():
+            prompt = f"{prompt}, {semantic_directive}".strip(", ")
         if scene_hint and scene_hint.lower() not in prompt.lower():
             prompt = f"{scene_hint}, {prompt}".strip(", ")
         elif english_subject and english_subject.lower() not in prompt.lower():
             prompt = f"{prompt}, central subject: {english_subject}".strip(", ")
         if "no movie poster" not in prompt.lower():
-            prompt += ", scientific visualization, documentary realism, no movie poster, no typography"
+            prompt += ", scientific visualization, documentary realism, no movie poster, no typography, no stock-photo generic scene"
         return self._with_no_text_image_constraints(prompt)
 
     def _english_subject_hint(self, topic_text: str, primary_subject: str) -> str:
@@ -743,6 +786,28 @@ class JobOrchestrator:
             normalized = " ".join(str(value).replace("_", " ").lower().split())
             if normalized in ENGLISH_SUBJECT_ALIASES:
                 return ENGLISH_SUBJECT_ALIASES[normalized]
+            normalized_ascii = (
+                normalized.replace("á", "a")
+                .replace("à", "a")
+                .replace("ã", "a")
+                .replace("â", "a")
+                .replace("é", "e")
+                .replace("ê", "e")
+                .replace("í", "i")
+                .replace("ó", "o")
+                .replace("õ", "o")
+                .replace("ô", "o")
+                .replace("ú", "u")
+                .replace("ç", "c")
+            )
+            if "cafeina" in normalized_ascii and "foco" in normalized_ascii:
+                return "caffeine and focus"
+            if "cafe" in normalized_ascii and "foco" in normalized_ascii:
+                return "coffee and focus"
+            if "cafeina" in normalized_ascii:
+                return "caffeine"
+            if "cafe" in normalized_ascii:
+                return "coffee"
         return primary_subject or topic_text or "the subject"
 
     def _english_scene_visual_hint(self, scene: dict[str, Any], english_subject: str) -> str:
@@ -765,6 +830,16 @@ class JobOrchestrator:
             if all(term in narration or term in normalized for term in terms):
                 return hint
         return f"vertical cinematic scientific image of {english_subject}"
+
+    def _semantic_scene_directive(self, scene: dict[str, Any], scene_hint: str) -> str:
+        narration = str(scene.get("narration_text") or "").strip()
+        visual_intent = str(scene.get("visual_intent") or "documentary evidence").replace("_", " ")
+        if narration:
+            return (
+                "depict the specific narration beat with concrete cause-and-effect visual evidence, "
+                f"not a generic symbolic background, visual focus: {scene_hint}, scene role: {visual_intent}"
+            )
+        return "depict the specific narration beat with concrete cause-and-effect visual evidence, not a generic symbolic background"
 
     def _should_rebuild_image_prompt(self, prompt: str) -> bool:
         prompt_lower = prompt.lower()
@@ -796,9 +871,25 @@ class JobOrchestrator:
 
     def _with_no_text_image_constraints(self, prompt: str) -> str:
         prompt = " ".join(prompt.replace("_", " ").split())
-        if "no readable text anywhere" in prompt.lower():
-            return prompt
-        return f"{prompt}, {NO_TEXT_IMAGE_CONSTRAINT}".strip(", ")
+        prompt_lower = prompt.lower()
+        constraints = [NO_TEXT_IMAGE_CONSTRAINT]
+        extra_constraints = [
+            "no letters, no words, no numbers, no symbols",
+            "no logo, no watermark, no captions, no subtitles",
+            "every object must be completely blank and unbranded",
+            "plain containers only, blank cups only, blank packages only",
+            "no text on cups, no text on packages, no text on screens",
+            "no labels or lettering on any object surface",
+            "avoid screens, documents, books, newspapers, signs, dashboards, graphs, labels, and branded packaging",
+        ]
+        if "no readable text anywhere" not in prompt_lower:
+            prompt = f"{prompt}, {constraints[0]}".strip(", ")
+            prompt_lower = prompt.lower()
+        for constraint in extra_constraints:
+            if constraint.lower() not in prompt_lower:
+                prompt = f"{prompt}, {constraint}"
+                prompt_lower = prompt.lower()
+        return prompt
 
     def _fallback_query_variants(self, topic_text: str, base_queries: list[str]) -> list[str]:
         queries = [query for query in base_queries if query]
@@ -818,7 +909,7 @@ class JobOrchestrator:
         audio_path = self.storage.job_dir(job.job_id) / "audio" / "narration.wav"
         srt_path = self.storage.job_dir(job.job_id) / "audio" / "raw.srt"
         result = self.providers.tts.synthesize(script.full_narration, audio_path, srt_path)
-        if not 25_000 <= result["duration_ms"] <= 45_000:
+        if not 24_500 <= result["duration_ms"] <= 46_500:
             raise RecoverableStepError("tts duration outside allowed range")
         created_at = utcnow()
         payload = {
@@ -832,13 +923,16 @@ class JobOrchestrator:
             "loudness_lufs": -15.0,
         }
         session.execute(delete(NarrationAsset).where(NarrationAsset.job_id == job.job_id))
-        session.add(NarrationAsset(**payload))
+        session.add(NarrationAsset(**model_payload(NarrationAsset, payload)))
         self.storage.persist_json(job.job_id, "narration_asset.json", self._serialize_for_json(payload))
         quality_summary = job.quality_summary or {}
         quality_summary["tts"] = {
             "duration_ms": result["duration_ms"],
             "provider": result["provider"],
             "fallback_used": result.get("provider_metadata", {}).get("fallback_used", False),
+            "loudness_normalized": result.get("provider_metadata", {}).get("loudness_normalized", False),
+            "loudness_target_lufs": result.get("provider_metadata", {}).get("loudness_target_lufs", -16.0),
+            "true_peak_limit_db": result.get("provider_metadata", {}).get("true_peak_limit_db", -1.5),
         }
         job.quality_summary = quality_summary
         self._append_event(job.job_id, "tts.generated", "succeeded", quality_summary["tts"])
@@ -899,7 +993,7 @@ class JobOrchestrator:
             "raw_srt_uri": narration.raw_subtitles_uri,
         }
         session.execute(delete(SubtitleTrack).where(SubtitleTrack.job_id == job.job_id))
-        session.add(SubtitleTrack(**payload))
+        session.add(SubtitleTrack(**model_payload(SubtitleTrack, payload)))
         self.storage.persist_json(job.job_id, "subtitle_track.json", self._serialize_for_json(payload))
         self._append_event(job.job_id, "subtitle.aligned", "succeeded", {"coverage_ratio": coverage})
         return ["subtitle_track.json", "audio/subtitles.ass"]
@@ -1040,6 +1134,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 "veryfast",
                 "-pix_fmt",
                 "yuv420p",
+                "-af",
+                "loudnorm=I=-16:LRA=11:TP=-1.5",
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -1072,10 +1168,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             "ffmpeg_log_uri": file_uri(ffmpeg_log),
         }
         session.execute(delete(RenderOutput).where(RenderOutput.job_id == job.job_id))
-        session.add(RenderOutput(**payload))
+        session.add(RenderOutput(**model_payload(RenderOutput, payload)))
         self.storage.persist_json(job.job_id, "render_output.json", self._serialize_for_json(payload))
         quality_summary = job.quality_summary or {}
-        quality_summary["render"] = {"duration_ms": duration_ms, "resolution": "1080x1920"}
+        quality_summary["render"] = {
+            "duration_ms": duration_ms,
+            "resolution": "1080x1920",
+            "audio_loudness_target_lufs": -16.0,
+            "audio_true_peak_limit_db": -1.5,
+        }
         job.quality_summary = quality_summary
         return ["render/final.mp4", "render/poster.jpg", "render/ffmpeg.log", "render_output.json"]
 

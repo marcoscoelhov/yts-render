@@ -12,7 +12,8 @@ O projeto cria um `job` a partir de um tema, gera pauta, roteiro, plano de cenas
 - Banco padrao local em SQLite, configuravel para PostgreSQL por `.env`.
 - Artefatos de runtime em `data/artifacts/<job_id>/`.
 - Provedores atuais:
-  - texto e imagem: MiniMax, quando `YTS_MINIMAX_API_KEY` esta configurado;
+  - texto: MiniMax, quando `YTS_MINIMAX_TEXT_API_KEY` ou `YTS_MINIMAX_API_KEY` esta configurado;
+  - imagem: MiniMax dedicado, quando `YTS_MINIMAX_IMAGE_API_KEY` ou `YTS_MINIMAX_API_KEY` esta configurado;
   - TTS: Edge TTS, com fallback local;
   - imagem fallback: imagem semantica local, Pexels e Pixabay quando houver chaves;
   - mock providers para teste com `YTS_USE_MOCK_PROVIDERS=true`.
@@ -74,8 +75,11 @@ Principais variaveis:
 | `YTS_TARGET_DURATION_SEC` | Duracao alvo do Short, validada entre 25 e 45 segundos. |
 | `YTS_SCENE_TARGET_COUNT` | Numero alvo de cenas, padrao `6`. |
 | `YTS_USE_MOCK_PROVIDERS` | `true` para rodar local sem chamar APIs pagas. |
-| `YTS_MINIMAX_API_KEY` | Chave MiniMax para texto/LLM. |
-| `YTS_MINIMAX_IMAGE_API_KEY` | Chave MiniMax opcional so para imagem; se vazia, usa `YTS_MINIMAX_API_KEY` para compatibilidade. |
+| `YTS_MINIMAX_API_KEY` | Chave MiniMax legada usada como fallback para texto e imagem. |
+| `YTS_MINIMAX_TEXT_API_KEY` | Chave MiniMax dedicada para pauta, roteiro e plano de cenas. |
+| `YTS_MINIMAX_IMAGE_API_KEY` | Chave MiniMax dedicada para geracao de imagens. |
+| `YTS_MINIMAX_TEXT_TIMEOUT_SEC` | Timeout por chamada do provider de texto. |
+| `YTS_MINIMAX_SCENE_PLAN_TIMEOUT_SEC` | Timeout especifico do planejamento de cenas antes de fallback local. |
 | `YTS_PEXELS_API_KEY` | Chave Pexels para fallback visual. |
 | `YTS_PIXABAY_API_KEY` | Chave Pixabay para fallback visual. |
 | `YTS_TAILSCALE_HOSTNAME` | Nome usado no healthcheck/serve Tailscale. |
@@ -163,7 +167,8 @@ Configure `.env` com pelo menos:
 
 ```env
 YTS_USE_MOCK_PROVIDERS=false
-YTS_MINIMAX_API_KEY=...
+YTS_MINIMAX_TEXT_API_KEY=...
+YTS_MINIMAX_IMAGE_API_KEY=...
 ```
 
 Opcionalmente:
