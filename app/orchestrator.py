@@ -640,6 +640,8 @@ class JobOrchestrator:
             needs_quality_fallback = not candidates or (
                 self.settings.use_mock_providers and all(not self._asset_scores_pass(scores) for _, scores in candidates)
             )
+            if not candidates and not self.settings.use_mock_providers:
+                raise RecoverableStepError(f"primary image provider returned no candidate for {scene['scene_id']}")
             if needs_quality_fallback:
                 fallback_used = True
                 fallback_reason_code = "low_semantic_score" if candidates else "no_primary_image_candidate"
@@ -909,6 +911,7 @@ class JobOrchestrator:
         audio_path = self.storage.job_dir(job.job_id) / "audio" / "narration.wav"
         srt_path = self.storage.job_dir(job.job_id) / "audio" / "raw.srt"
         result = self.providers.tts.synthesize(script.full_narration, audio_path, srt_path)
+        result = self._fit_tts_duration(audio_path, srt_path, result)
         if not 24_500 <= result["duration_ms"] <= 46_500:
             raise RecoverableStepError("tts duration outside allowed range")
         created_at = utcnow()
@@ -937,6 +940,71 @@ class JobOrchestrator:
         job.quality_summary = quality_summary
         self._append_event(job.job_id, "tts.generated", "succeeded", quality_summary["tts"])
         return ["audio/narration.wav", "audio/raw.srt", "narration_asset.json"]
+
+    def _fit_tts_duration(self, audio_path: Path, srt_path: Path, result: dict[str, Any]) -> dict[str, Any]:
+        duration_ms = int(result["duration_ms"])
+        target_ms: int | None = None
+        if duration_ms > 46_500:
+            target_ms = 43_500
+        elif duration_ms < 24_500:
+            target_ms = 25_500
+        if target_ms is None:
+            return result
+        speed = duration_ms / target_ms
+        if not 0.5 <= speed <= 2.0:
+            return result
+        temp_audio = audio_path.with_suffix(".fit.wav")
+        try:
+            subprocess.run(
+                [
+                    imageio_ffmpeg.get_ffmpeg_exe(),
+                    "-y",
+                    "-i",
+                    str(audio_path),
+                    "-filter:a",
+                    f"atempo={speed:.6f},loudnorm=I=-16:LRA=11:TP=-1.5",
+                    "-ar",
+                    "24000",
+                    "-ac",
+                    "1",
+                    str(temp_audio),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            temp_audio.replace(audio_path)
+            self._scale_srt_timings(srt_path, speed)
+        finally:
+            temp_audio.unlink(missing_ok=True)
+        adjusted = dict(result)
+        adjusted["duration_ms"] = self._measure_audio_ms(audio_path)
+        provider_metadata = dict(adjusted.get("provider_metadata") or {})
+        provider_metadata.update(
+            {
+                "duration_fit_applied": True,
+                "duration_fit_original_ms": duration_ms,
+                "duration_fit_target_ms": target_ms,
+                "duration_fit_speed": round(speed, 6),
+            }
+        )
+        adjusted["provider_metadata"] = provider_metadata
+        return adjusted
+
+    def _scale_srt_timings(self, srt_path: Path, speed: float) -> None:
+        cues = parse_srt(srt_path.read_text(encoding="utf-8"))
+        blocks = []
+        for cue in cues:
+            start_ms = max(0, round(int(cue["start_ms"]) / speed))
+            end_ms = max(start_ms + 1, round(int(cue["end_ms"]) / speed))
+            blocks.append(f"{cue['idx']}\n{ms_to_srt(start_ms)} --> {ms_to_srt(end_ms)}\n{cue['text']}")
+        srt_path.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+
+    def _measure_audio_ms(self, audio_path: Path) -> int:
+        import wave
+
+        with wave.open(str(audio_path), "rb") as wav_file:
+            return int(wav_file.getnframes() / wav_file.getframerate() * 1000)
 
     def _step_subtitles(self, session: Session, job: Job, attempt: int) -> list[str]:
         script = session.scalar(select(Script).where(Script.job_id == job.job_id))

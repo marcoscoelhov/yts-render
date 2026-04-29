@@ -22,7 +22,7 @@ from app.main import app, artifact_url  # noqa: E402
 from app.models import Job, RenderOutput, SceneAsset, SubtitleTrack, TopicRegistry, TopicRequest  # noqa: E402
 from app.orchestrator import normalize_script_metrics, orchestrator  # noqa: E402
 from app.providers import LocalSpeechFallbackProvider, MinimaxCreativeProvider, MinimaxImageProvider, MockCreativeProvider  # noqa: E402
-from app.utils import split_caption_chunks, wrap_caption  # noqa: E402
+from app.utils import parse_srt, split_caption_chunks, wrap_caption  # noqa: E402
 
 
 def wait_for_status(job_id: str, expected: str, timeout: float = 90.0) -> None:
@@ -431,6 +431,38 @@ def test_final_loudness_normalization_uses_ffmpeg_loudnorm(tmp_path: Path, monke
     command_text = " ".join(captured["command"])
     assert "loudnorm=I=-16:LRA=11:TP=-1.5" in command_text
     assert audio_path.exists()
+
+
+def test_tts_duration_fit_compresses_audio_and_subtitle_timings(tmp_path: Path) -> None:
+    audio_path = tmp_path / "voice.wav"
+    srt_path = tmp_path / "voice.srt"
+    sample_rate = 24_000
+    duration_sec = 48
+    with wave.open(str(audio_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        frames = bytearray()
+        for idx in range(sample_rate * duration_sec):
+            sample = int(1200 * math.sin(2 * math.pi * 220 * idx / sample_rate))
+            frames.extend(sample.to_bytes(2, "little", signed=True))
+        wav_file.writeframes(frames)
+    srt_path.write_text(
+        "1\n00:00:00,000 --> 00:00:24,000\nprimeira metade\n\n"
+        "2\n00:00:24,000 --> 00:00:48,000\nsegunda metade\n",
+        encoding="utf-8",
+    )
+
+    result = orchestrator._fit_tts_duration(
+        audio_path,
+        srt_path,
+        {"duration_ms": 48_000, "provider_metadata": {"mode": "edge"}},
+    )
+    cues = parse_srt(srt_path.read_text(encoding="utf-8"))
+
+    assert 43_000 <= result["duration_ms"] <= 44_000
+    assert result["provider_metadata"]["duration_fit_applied"] is True
+    assert cues[-1]["end_ms"] <= 43_600
 
 
 def test_scene_semantics_keeps_image_prompt_in_english() -> None:
