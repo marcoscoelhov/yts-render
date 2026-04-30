@@ -210,13 +210,13 @@ class MockCreativeProvider:
         )
         scenes: list[dict[str, Any]] = []
         cursor = 0
-        narration_sentences = sentence_split(script["full_narration"])
         for idx in range(scene_count):
             start = cursor
             end = min(total_words, start + chunk_size)
             if idx == scene_count - 1:
                 end = total_words
-            sentence = narration_sentences[min(idx, len(narration_sentences) - 1)]
+            chunk_words = words[start:end]
+            sentence = " ".join(chunk_words) or script["full_narration"]
             scenes.append(
                 {
                     "scene_id": f"scene-{idx + 1}",
@@ -357,11 +357,23 @@ Sem markdown.
 Divida este roteiro em {target_scene_count} cenas renderizáveis.
 Roteiro JSON: {json.dumps(script, ensure_ascii=False)}
 
+Fonte da verdade editorial:
+- O prompt viral do hub orienta a geração do roteiro.
+- A partir daqui, a fonte da verdade é full_narration + key_facts + hook/body_beats/ending do roteiro já aprovado.
+- Não reescreva, aumente, encurte, dramatize ou invente novos beats narrativos.
+- Cenas, imagens e legendas devem apenas segmentar e visualizar o roteiro aprovado.
+
 Retorne apenas um JSON array.
 Cada item precisa ter:
 scene_id, order, narration_text, token_start, token_end, estimated_duration_sec, visual_intent, primary_subject, image_prompt, fallback_queries
 Visual intents permitidos: {json.dumps(VISUAL_INTENTS)}
 Cobertura total dos tokens.
+Regras de segmentação obrigatórias:
+- narration_text deve corresponder ao trecho de full_narration coberto por token_start/token_end.
+- cada cena deve ter pelo menos 5 palavras em narration_text, exceto se for a última CTA curta.
+- não crie cena só com punchline, negação ou frase retórica curta, como "Oito não."; junte com a frase anterior ou próxima.
+- prefira 5 a 9 cenas com blocos visualmente completos, cada um contendo um fato concreto ou uma ação visualizável.
+- preserve a ordem exata do roteiro.
 Todos os campos textuais devem estar em portugues do Brasil (pt-BR), exceto image_prompt.
 Nao use chines, espanhol ou outro idioma em narration_text, primary_subject ou fallback_queries.
 Excecoes permitidas: nomes proprios, nomes cientificos, siglas, marcas e nomes de fontes.

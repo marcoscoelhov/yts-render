@@ -496,6 +496,7 @@ class JobOrchestrator:
             "step": step_name,
             "job_id": job.job_id,
             "request": request.seed_theme if request else None,
+            "request_notes_hash": stable_hash(request.notes or "") if request else None,
             "topic_plan": topic_plan.content_hash if topic_plan else None,
             "script": script.content_hash if script else None,
             "scene_plan": scene_plan.content_hash if scene_plan else None,
@@ -587,6 +588,8 @@ class JobOrchestrator:
         }
         script = self.providers.creative.generate_script(plan_dict)
         script, metrics = self._validate_or_repair_script(script, plan_dict, job.target_duration_sec)
+        script = self._attach_editorial_source(script, plan_dict)
+        metrics = {**metrics, "editorial_source": "hub_viral_prompt", "downstream_source_of_truth": "script_full_narration"}
         created_at = utcnow()
         payload = {
             "schema_version": self.settings.schema_version,
@@ -604,6 +607,22 @@ class JobOrchestrator:
         job.quality_summary = quality_summary
         self._append_event(job.job_id, "script.generated", "succeeded", metrics)
         return ["script.json"]
+
+    def _attach_editorial_source(self, script: dict[str, Any], plan_dict: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(script)
+        metrics = dict(enriched.get("qa_metrics") or {})
+        metrics.update(
+            {
+                "editorial_source": "hub_viral_prompt",
+                "downstream_source_of_truth": "script_full_narration",
+                "original_input": plan_dict.get("original_input"),
+                "requested_angle": plan_dict.get("requested_angle"),
+                "tone": plan_dict.get("tone"),
+                "hub_notes_hash": stable_hash(plan_dict.get("hub_notes") or ""),
+            }
+        )
+        enriched["qa_metrics"] = metrics
+        return enriched
 
     def _validate_or_repair_script(
         self,
@@ -654,12 +673,21 @@ class JobOrchestrator:
         script = session.scalar(select(Script).where(Script.job_id == job.job_id))
         topic_plan = session.scalar(select(TopicPlan).where(TopicPlan.job_id == job.job_id))
         assert script and topic_plan
+        request = session.scalar(select(TopicRequest).where(TopicRequest.job_id == job.job_id))
         script_dict = {
             "title": script.title,
+            "hook": script.hook,
+            "body_beats": script.body_beats,
+            "ending": script.ending,
+            "cta": script.cta,
             "full_narration": script.full_narration,
             "estimated_duration_sec": script.estimated_duration_sec,
+            "key_facts": script.key_facts,
+            "qa_metrics": script.qa_metrics,
             "canonical_topic": topic_plan.canonical_topic,
             "angle": topic_plan.angle,
+            "hub_viral_prompt_source": request.notes if request else None,
+            "downstream_rule": "Scenes, images, subtitles and TTS must derive from full_narration. Do not invent new beats or split tiny punchlines into standalone render scenes.",
         }
         scenes = self.providers.creative.plan_scenes(script_dict, self.settings.scene_target_count)
         tokens = word_tokens(script.full_narration)
