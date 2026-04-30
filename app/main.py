@@ -60,7 +60,10 @@ SEO:
 Tom:
 - rapido, intrigante e confiavel
 - linguagem brasileira natural
-- sem enrolacao e sem introducao generica"""
+- sem enrolacao e sem introducao generica
+Proibido:
+- nao comece com "voce sabia", "você sabia", "ja imaginou", "já imaginou", "nesse video" ou aberturas genericas equivalentes
+- o hook deve abrir direto com contraste, consequencia, conflito ou fato especifico"""
 HUB_SETTINGS_FILENAME = "hub_settings.json"
 MAX_VIRAL_PROMPT_TEMPLATE_CHARS = 12000
 

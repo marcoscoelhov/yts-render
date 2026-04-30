@@ -35,6 +35,10 @@ SUSPICIOUS_GLUED_PATTERN = re.compile(
     r"\b(?:um|uma|o|a|os|as|de|do|da|dos|das|no|na|nos|nas|e|que)(?:mini|micro|macro|super|ultra)[a-záàãâéêíóõôúç-]*\b",
     re.IGNORECASE,
 )
+GENERIC_HOOK_OPENING_PATTERN = re.compile(
+    r"^\s*(?:você\s+sabia|voce\s+sabia|já\s+imaginou|ja\s+imaginou|nesse\s+v[ií]deo|neste\s+v[ií]deo)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -62,6 +66,8 @@ class ScriptQualityGate:
             reasons.append("foreign_language_detected")
         if SUSPICIOUS_GLUED_PATTERN.search(combined_text.replace("-", "")):
             reasons.append("suspicious_glued_words")
+        if GENERIC_HOOK_OPENING_PATTERN.search(str(script.get("hook") or "")) or GENERIC_HOOK_OPENING_PATTERN.search(full_narration):
+            reasons.append("generic_hook_opening")
 
         word_count = len(word_tokens(full_narration))
         estimated_duration = float(script.get("estimated_duration_sec") or max(0, word_count / 2.55))

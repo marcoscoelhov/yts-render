@@ -310,6 +310,8 @@ Regras:
 - key_facts deve ser uma lista em pt-BR, sem trechos em outros alfabetos ou idiomas
 - title deve ser otimizado para SEO e copywriting viral, com promessa especifica e palavra-chave cedo quando natural
 - hook deve abrir com curiosidade ou tensão imediata, sem introducao generica
+- proibido começar hook ou full_narration com "você sabia", "voce sabia", "já imaginou", "ja imaginou", "nesse vídeo", "nesse video" ou fórmulas genéricas equivalentes
+- comece direto por contraste, consequência, conflito ou fato específico
 - cada body_beat deve entregar um fato concreto que sustente a promessa do titulo
 - mantenha o tom selecionado na Entrada JSON, sem exagerar sensacionalismo
 - se a Entrada JSON indicar titulo completo do usuario, preserve a promessa central e refine a formulacao
@@ -340,6 +342,7 @@ Regras obrigatórias:
 - primeira frase com no máximo 12 palavras
 - média por frase <= 14 e frase máxima <= 20 palavras
 - preserve a promessa central e os fatos úteis, mas reescreva o necessário
+- se o hook ou full_narration começar com "você sabia", "voce sabia", "já imaginou", "ja imaginou", "nesse vídeo" ou equivalente, reescreva para começar direto por contraste, consequência, conflito ou fato específico
 - qa_metrics deve incluir hook_score, clarity_score, information_density_score, repetition_score, ending_strength_score, estimated_duration_sec, avg_words_per_sentence, max_words_single_sentence, words_per_second, script_gate_pass
 Sem markdown.
 """

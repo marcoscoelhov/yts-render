@@ -189,6 +189,26 @@ def test_minimax_script_prompt_requires_pt_br_for_all_text_fields(monkeypatch) -
     assert "ignore esse formato e mantenha exatamente o JSON estrito" in prompt
 
 
+def test_script_quality_gate_blocks_generic_hook_opening() -> None:
+    script = {
+        "title": "Polvos pensam com os braços",
+        "hook": "Você sabia que os braços do polvo pensam sozinhos?",
+        "full_narration": "Você sabia que os braços do polvo pensam sozinhos? Cada braço processa sinais e reage ao ambiente de forma independente. Isso torna o polvo um animal muito diferente do nosso corpo centralizado.",
+        "estimated_duration_sec": 30,
+        "language": "pt-BR",
+        "qa_metrics": {
+            "hook_score": 0.9,
+            "clarity_score": 0.9,
+            "information_density_score": 0.9,
+            "repetition_score": 0.2,
+            "ending_strength_score": 0.9,
+        },
+    }
+    result = ScriptQualityGate().validate(script, target_duration_sec=32)
+    assert not result.passed
+    assert "generic_hook_opening" in result.reasons
+
+
 def test_script_quality_gate_blocks_mixed_language_markup_and_glued_words() -> None:
     script = {
         "title": "Polvo pensa com os braços",
