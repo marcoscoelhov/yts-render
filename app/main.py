@@ -16,6 +16,7 @@ from app.db import SessionLocal, init_db
 from app.models import FallbackEvent, Job, RenderOutput, SceneAsset, TopicRequest
 from app.orchestrator import FatalStepError, orchestrator
 from app.schemas import ReviewActionPayload, TopicRequestCreate
+from app.trends import TrendResearcher
 from app.utils import path_from_uri
 
 
@@ -188,6 +189,13 @@ def _default_seed_theme() -> str:
     return random.choice(candidates or HUB_RANDOM_THEME_POOL)
 
 
+def _trend_seed_theme(niche_id: str) -> tuple[str, str | None, str | None]:
+    trend = TrendResearcher().find_topic(niche_id)
+    if trend is None:
+        return _default_seed_theme(), None, None
+    return trend.topic, trend.requested_angle, trend.as_notes()
+
+
 def _compose_hub_notes(input_mode: str, notes: str | None) -> str:
     normalized_mode = "title" if input_mode == "title" else "theme"
     mode_note = (
@@ -234,7 +242,8 @@ def jobs_page(
             "filters": {"status": status or "", "search": search or "", "fallback": fallback or "", "review": review or ""},
             "hub_defaults": {
                 "niche_id": HUB_DEFAULT_NICHE,
-                "seed_theme": _default_seed_theme(),
+                "seed_theme": "",
+                "suggested_seed_theme": _default_seed_theme(),
                 "target_duration_sec": HUB_RETENTION_OPTIMIZED_DURATION_SEC,
             },
             "viral_prompt_template": _viral_prompt_template(),
@@ -287,15 +296,22 @@ def create_job(
     selected_angle = (custom_angle or "").strip() or (requested_angle or "").strip()
     if selected_angle == "auto":
         selected_angle = ""
-    selected_seed_theme = seed_theme.strip() or _default_seed_theme()
+    selected_niche = niche_id or HUB_DEFAULT_NICHE
+    trend_notes = None
+    if seed_theme.strip():
+        selected_seed_theme = seed_theme.strip()
+    else:
+        selected_seed_theme, trend_angle, trend_notes = _trend_seed_theme(selected_niche)
+        selected_angle = selected_angle or trend_angle or ""
+    combined_notes = "\n\n".join(part for part in [trend_notes, notes] if part)
     payload = TopicRequestCreate(
         seed_theme=selected_seed_theme,
-        niche_id=niche_id or HUB_DEFAULT_NICHE,
+        niche_id=selected_niche,
         language=language,
         target_duration_sec=target_duration_sec,
         tone=tone,
         cta_style=cta_style,
-        notes=_compose_hub_notes(input_mode, notes),
+        notes=_compose_hub_notes(input_mode, combined_notes),
         requested_angle=selected_angle or None,
     )
     job_id = orchestrator.create_job(payload.model_dump())

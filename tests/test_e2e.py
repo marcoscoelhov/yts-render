@@ -379,7 +379,7 @@ def test_script_metrics_normalize_zero_to_ten_provider_scores() -> None:
     assert metrics["avg_words_per_sentence"] == 12.5
 
 
-def test_hub_uses_curiosidades_random_theme_and_retention_duration_defaults(monkeypatch) -> None:
+def test_hub_uses_trends_for_empty_theme_and_retention_duration_defaults(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     def fake_create_job(payload: dict[str, object]) -> str:
@@ -387,18 +387,30 @@ def test_hub_uses_curiosidades_random_theme_and_retention_duration_defaults(monk
         return "job-defaults"
 
     monkeypatch.setattr(main_module, "_default_seed_theme", lambda: "abelhas")
+    monkeypatch.setattr(
+        main_module,
+        "_trend_seed_theme",
+        lambda niche_id: (
+            "Por que flamingos estão em alta?",
+            "Transformar tendência real em curiosidade verificável.",
+            "trend_research=real_source\ntrend_source=wikipedia_pageviews_pt",
+        ),
+    )
     monkeypatch.setattr(main_module.orchestrator, "create_job", fake_create_job)
     client = TestClient(app)
 
     page = client.get("/")
     assert page.status_code == 200
     assert 'name="niche_id" value="curiosidades"' in page.text
-    assert 'name="seed_theme" value="abelhas"' in page.text
+    assert 'name="seed_theme" value=""' in page.text
+    assert "Vazio = pesquisar tendências reais" in page.text
     assert 'name="target_duration_sec" type="number" min="25" max="45" value="32"' in page.text
 
     response = client.post("/jobs", data={"seed_theme": "", "input_mode": "theme"}, follow_redirects=False)
     assert response.status_code == 303
-    assert captured["seed_theme"] == "abelhas"
+    assert captured["seed_theme"] == "Por que flamingos estão em alta?"
+    assert captured["requested_angle"] == "Transformar tendência real em curiosidade verificável."
+    assert "trend_research=real_source" in str(captured["notes"])
     assert captured["niche_id"] == "curiosidades"
     assert captured["target_duration_sec"] == 32
 
@@ -925,3 +937,14 @@ def test_publish_readiness_blocks_limited_fact_pack_with_invented_source_ids() -
     assert readiness["passed"] is False
     assert "invented_source_fact_ids" in readiness["reasons"]
     assert "manual_review_required" in readiness["reasons"]
+
+
+def test_trend_researcher_filters_wikipedia_candidates() -> None:
+    from app.trends import TrendResearcher
+
+    researcher = TrendResearcher()
+
+    assert researcher._clean_wikipedia_title("Flamingo") == "Flamingo"
+    assert researcher._is_curiosity_candidate("Flamingo") is True
+    assert researcher._is_curiosity_candidate("Main_Page") is False
+    assert researcher._is_curiosity_candidate("Lista de episódios") is False
