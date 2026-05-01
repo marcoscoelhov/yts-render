@@ -5,6 +5,7 @@ import re
 import subprocess
 import threading
 import time
+import httpx
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -599,6 +600,9 @@ class JobOrchestrator:
             "hub_notes": request.notes,
             "original_input": request.seed_theme,
         }
+        fact_pack = self._build_fact_pack(topic_plan, request)
+        plan_dict["fact_pack"] = fact_pack
+        self.storage.persist_json(job.job_id, "fact_pack.json", self._serialize_for_json(fact_pack))
         script = self.providers.creative.generate_script(plan_dict)
         script, metrics = self._validate_or_repair_script(script, plan_dict, job.target_duration_sec, request.cta_style or "none")
         script = self._attach_editorial_source(script, plan_dict)
@@ -619,7 +623,109 @@ class JobOrchestrator:
         quality_summary["script"] = metrics
         job.quality_summary = quality_summary
         self._append_event(job.job_id, "script.generated", "succeeded", metrics)
-        return ["script.json"]
+        return ["fact_pack.json", "script.json"]
+
+    def _build_fact_pack(self, topic_plan: TopicPlan, request: TopicRequest) -> dict[str, Any]:
+        if self.settings.use_mock_providers:
+            return {
+                "status": "limited",
+                "query_used": request.seed_theme,
+                "facts": [],
+                "sources": [],
+                "editorial_rule": "Mock-provider test mode: no external fact retrieval.",
+            }
+        queries = [request.seed_theme, topic_plan.canonical_topic, *(topic_plan.title_candidates or [])]
+        seen: set[str] = set()
+        cleaned_queries = []
+        for query in queries:
+            normalized = " ".join(str(query or "").split())
+            if normalized and normalized.lower() not in seen:
+                cleaned_queries.append(normalized)
+                seen.add(normalized.lower())
+        for query in cleaned_queries[:4]:
+            pack = self._wikipedia_fact_pack(query)
+            if pack.get("facts"):
+                pack["query_used"] = query
+                pack["status"] = "verified"
+                return pack
+        return {
+            "status": "limited",
+            "query_used": cleaned_queries[0] if cleaned_queries else request.seed_theme,
+            "facts": [],
+            "sources": [],
+            "editorial_rule": "No source facts were retrieved. Script must avoid precise numbers, dates, medical/scientific/engineering causality, and absolute claims unless already present in the user input.",
+        }
+
+    def _wikipedia_fact_pack(self, query: str) -> dict[str, Any]:
+        for language in ["pt", "en"]:
+            try:
+                with httpx.Client(timeout=httpx.Timeout(8.0, connect=3.0), headers={"User-Agent": "yts-render/1.0 fact-pack"}) as client:
+                    search = client.get(
+                        f"https://{language}.wikipedia.org/w/api.php",
+                        params={"action": "opensearch", "search": query, "limit": 1, "namespace": 0, "format": "json"},
+                    )
+                    search.raise_for_status()
+                    payload = search.json()
+                    titles = payload[1] if len(payload) > 1 else []
+                    if not titles:
+                        continue
+                    title = str(titles[0])
+                    summary = client.get(f"https://{language}.wikipedia.org/api/rest_v1/page/summary/{title.replace(' ', '_')}")
+                    summary.raise_for_status()
+                    data = summary.json()
+            except Exception:  # noqa: BLE001
+                continue
+            extract = str(data.get("extract") or "").strip()
+            if not extract:
+                continue
+            sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", extract) if len(part.strip()) > 30]
+            facts = [
+                {
+                    "fact_id": f"F{index}",
+                    "claim": sentence[:260],
+                    "source_id": "S1",
+                }
+                for index, sentence in enumerate(sentences[:5], start=1)
+            ]
+            source_url = str(data.get("content_urls", {}).get("desktop", {}).get("page") or data.get("content_urls", {}).get("mobile", {}).get("page") or "")
+            return {
+                "status": "verified",
+                "language": language,
+                "query_used": query,
+                "topic_title": data.get("title") or title,
+                "facts": facts,
+                "sources": [
+                    {
+                        "source_id": "S1",
+                        "title": data.get("title") or title,
+                        "url": source_url,
+                        "provider": f"wikipedia_{language}",
+                    }
+                ],
+                "editorial_rule": "Use facts as source material only. Preserve viral pacing, but every precise number, date, technical cause, history claim, or scientific claim must be grounded in fact_id references or rewritten conservatively.",
+            }
+        return {"status": "limited", "facts": [], "sources": []}
+
+
+    def _fact_pack_consistency_reasons(self, script: dict[str, Any], fact_pack: Any) -> list[str]:
+        if not isinstance(fact_pack, dict) or fact_pack.get("status") != "verified":
+            return []
+        facts = fact_pack.get("facts") or []
+        valid_ids = {str(fact.get("fact_id")) for fact in facts if fact.get("fact_id")}
+        if not valid_ids:
+            return []
+        source_ids = script.get("source_fact_ids") or script.get("qa_metrics", {}).get("source_fact_ids") or []
+        if isinstance(source_ids, str):
+            source_ids = [source_ids]
+        used_ids = {str(item) for item in source_ids if str(item) in valid_ids}
+        minimum = min(2, len(valid_ids))
+        reasons: list[str] = []
+        if len(used_ids) < minimum:
+            reasons.append("fact_pack_source_ids_missing")
+        fact_risk = self.script_gate._fact_risk_report(script)  # noqa: SLF001
+        if fact_risk.get("blocked") and len(used_ids) < len(valid_ids):
+            reasons.append("high_risk_claims_need_fact_pack_grounding")
+        return reasons
 
     def _apply_cta_policy(self, script: dict[str, Any], cta_style: str) -> dict[str, Any]:
         if cta_style != "none":
@@ -668,41 +774,46 @@ class JobOrchestrator:
         script = self._apply_cta_policy(dict(script), cta_style)
         script["qa_metrics"] = normalize_script_metrics(dict(script.get("qa_metrics") or {}))
         gate_result = self.script_gate.validate(script, target_duration_sec)
-        if gate_result.passed:
-            script["qa_metrics"] = gate_result.metrics
-            return script, gate_result.metrics
+        consistency_reasons = self._fact_pack_consistency_reasons(script, plan_dict.get("fact_pack"))
+        if gate_result.passed and not consistency_reasons:
+            script["qa_metrics"] = {**gate_result.metrics, "fact_pack_consistency_pass": True}
+            return script, script["qa_metrics"]
 
         repair_attempts = max(0, self.settings.llm_script_repair_attempts)
-        last_reasons = gate_result.reasons
+        last_reasons = [*gate_result.reasons, *consistency_reasons]
         for _ in range(repair_attempts):
             repaired = self.providers.creative.repair_script(script, last_reasons, plan_dict)
             repaired = self._apply_cta_policy(repaired, cta_style)
             repaired["qa_metrics"] = normalize_script_metrics(dict(repaired.get("qa_metrics") or {}))
             repaired_gate = self.script_gate.validate(repaired, target_duration_sec)
-            if repaired_gate.passed:
+            repaired_consistency_reasons = self._fact_pack_consistency_reasons(repaired, plan_dict.get("fact_pack"))
+            if repaired_gate.passed and not repaired_consistency_reasons:
                 repaired["qa_metrics"] = {
                     **repaired_gate.metrics,
+                    "fact_pack_consistency_pass": True,
                     "script_repair_used": True,
-                    "script_repair_initial_reasons": gate_result.reasons,
+                    "script_repair_initial_reasons": [*gate_result.reasons, *consistency_reasons],
                 }
                 return repaired, repaired["qa_metrics"]
             script = repaired
-            last_reasons = repaired_gate.reasons
+            last_reasons = [*repaired_gate.reasons, *repaired_consistency_reasons]
 
         fallback_repaired = self.providers.creative.repair_script_with_fallback(script, last_reasons, plan_dict)
         if fallback_repaired is not None:
             fallback_repaired = self._apply_cta_policy(fallback_repaired, cta_style)
             fallback_repaired["qa_metrics"] = normalize_script_metrics(dict(fallback_repaired.get("qa_metrics") or {}))
             fallback_gate = self.script_gate.validate(fallback_repaired, target_duration_sec)
-            if fallback_gate.passed:
+            fallback_consistency_reasons = self._fact_pack_consistency_reasons(fallback_repaired, plan_dict.get("fact_pack"))
+            if fallback_gate.passed and not fallback_consistency_reasons:
                 fallback_repaired["qa_metrics"] = {
                     **fallback_gate.metrics,
+                    "fact_pack_consistency_pass": True,
                     "script_repair_used": True,
                     "script_repair_fallback_used": True,
-                    "script_repair_initial_reasons": gate_result.reasons,
+                    "script_repair_initial_reasons": [*gate_result.reasons, *consistency_reasons],
                 }
                 return fallback_repaired, fallback_repaired["qa_metrics"]
-            last_reasons = fallback_gate.reasons
+            last_reasons = [*fallback_gate.reasons, *fallback_consistency_reasons]
 
         raise RecoverableStepError(f"script quality gate failed: {', '.join(last_reasons)}")
 

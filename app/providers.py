@@ -298,7 +298,7 @@ Escreva um roteiro viral de curiosidades em pt-BR.
 Entrada JSON: {json.dumps(topic_plan, ensure_ascii=False)}
 
 Retorne JSON estrito com:
-title, hook, body_beats, ending, cta, full_narration, estimated_duration_sec, key_facts, token_count, language, qa_metrics, prompt_version
+title, hook, body_beats, ending, cta, full_narration, estimated_duration_sec, key_facts, source_fact_ids, token_count, language, qa_metrics, prompt_version
 
 Regras:
 - 25 a 45 segundos
@@ -320,6 +320,9 @@ Regras:
 - fatos acima de viralidade: não invente números, nacionalidades, planos, materiais, causas técnicas ou soluções de engenharia se eles não estiverem na Entrada JSON ou forem conhecimento extremamente consolidado
 - se houver incerteza factual, use formulação conservadora e geral em vez de precisão falsa; prefira “engenheiros reduziram a inclinação removendo solo sob a base” a números específicos não verificados
 - evite frases absolutas/enganosas como “está garantida”, “a física prova”, “domina a física”, “desafia a física” ou “a inclinação sustenta”
+- se a Entrada JSON tiver fact_pack.status="verified", use o fact_pack como fonte factual obrigatória: toda afirmação de número, data, causa técnica, evento histórico, ciência, saúde ou engenharia deve derivar de facts[].claim
+- source_fact_ids deve listar os fact_id usados no roteiro; inclua pelo menos 2 quando houver 2+ fatos disponíveis
+- não cite fontes no texto narrado; use os fatos como bastidor e mantenha retenção viral
 - key_facts deve listar apenas fatos que o roteiro realmente usa, sem exagero e sem detalhe técnico duvidoso
 - ending deve fechar o loop mental do hook e recontextualizar o tema com uma frase memoravel
 - se cta_style for "none", cta deve ser null e full_narration não deve incluir pedido de inscrição, like, comentário, compartilhamento ou ativar sininho
@@ -341,7 +344,7 @@ Contexto da pauta JSON: {json.dumps(topic_plan, ensure_ascii=False)}
 Motivos de reprovação: {json.dumps(gate_reasons, ensure_ascii=False)}
 
 Retorne JSON estrito com os mesmos campos:
-title, hook, body_beats, ending, cta, full_narration, estimated_duration_sec, key_facts, token_count, language, qa_metrics, prompt_version
+title, hook, body_beats, ending, cta, full_narration, estimated_duration_sec, key_facts, source_fact_ids, token_count, language, qa_metrics, prompt_version
 
 Regras obrigatórias:
 - todos os campos textuais devem estar em portugues do Brasil (pt-BR)
@@ -357,6 +360,7 @@ Regras obrigatórias:
 - fatos acima de viralidade: remova números, nacionalidades, planos, materiais, causas técnicas ou soluções de engenharia que não estejam bem sustentados pelo contexto
 - evite frases absolutas/enganosas como “está garantida”, “a física prova”, “domina a física”, “desafia a física” ou “a inclinação sustenta”
 - se os motivos incluírem factual_risk_requires_conservative_rewrite, reescreva TODA afirmação de risco factual: números precisos, datas, porcentagens, medidas, causalidade técnica, claims médicos/biológicos, engenharia e frases absolutas
+- se os motivos incluírem fact_pack_source_ids_missing ou high_risk_claims_need_fact_pack_grounding, use apenas facts[].claim do fact_pack no Contexto da pauta JSON e preencha source_fact_ids com os fact_id usados
 - para afirmações de alto risco sem fonte explícita, use linguagem conservadora: “pode”, “tende a”, “em geral”, “uma das explicações”, “cerca de”, ou remova o detalhe específico
 - se um detalhe técnico parecer duvidoso, substitua por formulação conservadora e verificável
 - qa_metrics deve incluir hook_score, clarity_score, information_density_score, repetition_score, ending_strength_score, estimated_duration_sec, avg_words_per_sentence, max_words_single_sentence, words_per_second, script_gate_pass

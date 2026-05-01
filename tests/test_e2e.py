@@ -817,3 +817,36 @@ def test_script_gate_allows_conservative_factual_language() -> None:
 
     assert result.passed
     assert result.metrics["fact_risk"]["blocked"] is False
+
+
+def test_fact_pack_consistency_requires_source_fact_ids_when_verified() -> None:
+    fact_pack = {
+        "status": "verified",
+        "facts": [
+            {"fact_id": "F1", "claim": "O tema começou em 1173.", "source_id": "S1"},
+            {"fact_id": "F2", "claim": "A inclinação foi estabilizada por intervenção moderna.", "source_id": "S1"},
+        ],
+    }
+    script = _base_script(
+        "A obra começou em 1173. Engenheiros estabilizaram a inclinação com uma intervenção moderna."
+    )
+
+    reasons = orchestrator._fact_pack_consistency_reasons(script, fact_pack)
+
+    assert "fact_pack_source_ids_missing" in reasons
+
+
+def test_fact_pack_consistency_accepts_grounded_source_fact_ids() -> None:
+    fact_pack = {
+        "status": "verified",
+        "facts": [
+            {"fact_id": "F1", "claim": "O tema começou em 1173.", "source_id": "S1"},
+            {"fact_id": "F2", "claim": "A inclinação foi estabilizada por intervenção moderna.", "source_id": "S1"},
+        ],
+    }
+    script = _base_script(
+        "A obra começou em 1173. Engenheiros estabilizaram a inclinação com uma intervenção moderna."
+    )
+    script["source_fact_ids"] = ["F1", "F2"]
+
+    assert orchestrator._fact_pack_consistency_reasons(script, fact_pack) == []
