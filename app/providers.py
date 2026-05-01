@@ -356,6 +356,8 @@ Regras obrigatórias:
 - aumente retenção sem inventar fatos: hook mais agressivo, loop aberto, escalada de curiosidade, payoff no ultimo terço e final memoravel
 - fatos acima de viralidade: remova números, nacionalidades, planos, materiais, causas técnicas ou soluções de engenharia que não estejam bem sustentados pelo contexto
 - evite frases absolutas/enganosas como “está garantida”, “a física prova”, “domina a física”, “desafia a física” ou “a inclinação sustenta”
+- se os motivos incluírem factual_risk_requires_conservative_rewrite, reescreva TODA afirmação de risco factual: números precisos, datas, porcentagens, medidas, causalidade técnica, claims médicos/biológicos, engenharia e frases absolutas
+- para afirmações de alto risco sem fonte explícita, use linguagem conservadora: “pode”, “tende a”, “em geral”, “uma das explicações”, “cerca de”, ou remova o detalhe específico
 - se um detalhe técnico parecer duvidoso, substitua por formulação conservadora e verificável
 - qa_metrics deve incluir hook_score, clarity_score, information_density_score, repetition_score, ending_strength_score, estimated_duration_sec, avg_words_per_sentence, max_words_single_sentence, words_per_second, script_gate_pass
 Sem markdown.

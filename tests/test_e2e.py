@@ -768,3 +768,52 @@ def test_publish_package_skips_stopword_hashtags() -> None:
     assert tags == ["#shorts", "#curiosidades", "#ciencia", "#torre", "#pisa", "#não"]
     assert "#por" not in tags
     assert "#que" not in tags
+
+
+def _base_script(full_narration: str) -> dict[str, object]:
+    return {
+        "title": "Curiosidade científica em menos de um minuto",
+        "hook": full_narration.split(".")[0] + ".",
+        "body_beats": [full_narration],
+        "ending": "Esse detalhe muda como você olha para o tema.",
+        "cta": None,
+        "full_narration": full_narration,
+        "estimated_duration_sec": 32,
+        "key_facts": [full_narration],
+        "token_count": len(full_narration.split()),
+        "language": "pt-BR",
+        "qa_metrics": {
+            "hook_score": 0.92,
+            "clarity_score": 0.9,
+            "information_density_score": 0.85,
+            "repetition_score": 0.1,
+            "ending_strength_score": 0.85,
+        },
+    }
+
+
+def test_script_gate_blocks_generic_high_risk_precision_and_causality() -> None:
+    script = _base_script(
+        "O cérebro apaga exatamente 73% das memórias durante o sono. "
+        "Isso acontece porque a dopamina destrói conexões fracas nos neurônios. "
+        "Por isso você acorda mais inteligente no dia seguinte."
+    )
+
+    result = ScriptQualityGate().validate(script, target_duration_sec=35)
+
+    assert not result.passed
+    assert "factual_risk_requires_conservative_rewrite" in result.reasons
+    assert result.metrics["fact_risk"]["high_risk_claim_count"] >= 1
+
+
+def test_script_gate_allows_conservative_factual_language() -> None:
+    script = _base_script(
+        "O cérebro pode reorganizar algumas memórias durante o sono. "
+        "Uma das explicações é que conexões usadas com frequência tendem a ficar mais fortes. "
+        "Esse detalhe ajuda a entender por que dormir bem importa para aprender."
+    )
+
+    result = ScriptQualityGate().validate(script, target_duration_sec=35)
+
+    assert result.passed
+    assert result.metrics["fact_risk"]["blocked"] is False
