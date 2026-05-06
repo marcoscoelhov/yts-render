@@ -9,6 +9,7 @@ import time
 import unicodedata
 import concurrent.futures
 import wave
+from urllib.parse import quote
 import httpx
 from dataclasses import dataclass
 from datetime import timedelta
@@ -1070,7 +1071,7 @@ class JobOrchestrator:
         normalized = query.lower()
         token_count = len(word_tokens(query))
         is_short_entity = token_count <= 3 and ":" not in query and "?" not in query
-        has_concept_suffix = any(term in normalized for term in ["carotenoides", "pigmentos", "diet", "inclinação", "engenharia", "solo"])
+        has_concept_suffix = any(term in normalized for term in ["carotenoides", "pigmentos", "diet", "alimentação", "inclinacao", "inclinação", "engenharia", "solo", "cromatóforos", "iridóforos", "camuflagem"])
         return (
             0 if is_short_entity else 1,
             1 if has_concept_suffix else 0,
@@ -1098,7 +1099,23 @@ class JobOrchestrator:
             "inteligencia",
             "inteligência",
         }
-        return len(tokens) == 1 and tokens[0] in weak_single_terms
+        weak_multi_terms = weak_single_terms | {
+            "causa",
+            "causas",
+            "comida",
+            "alimentacao",
+            "alimentação",
+            "dieta",
+            "cor",
+            "cores",
+            "segredo",
+            "resposta",
+            "explicacao",
+            "explicação",
+        }
+        if len(tokens) == 1:
+            return tokens[0] in weak_single_terms
+        return all(token in weak_multi_terms for token in tokens)
 
 
     def _fact_pack_queries(self, request: TopicRequest, topic_plan: TopicPlan) -> list[str]:
@@ -1161,9 +1178,31 @@ class JobOrchestrator:
         concepts: list[str] = []
         if any(term in normalized for term in ["rosa", "cor", "color", "pink"]):
             concepts.extend(["carotenoides", "pigmentos", "diet"])
+        if any(term in normalized for term in ["polvo", "polvos", "octopus", "octopuses", "cromatóforo", "cromatoforo", "camuflagem"]):
+            concepts.extend(["cromatóforos", "iridóforos", "camuflagem"])
+        if any(term in normalized for term in ["flamingo", "flamingos"]):
+            concepts.extend(["carotenoides", "pigmentos", "alimentação"])
         if any(term in normalized for term in ["cai", "inclina", "torre"]):
             concepts.extend(["inclinação", "engenharia", "solo"])
         return concepts[:3]
+
+    def _normalize_fact_text(self, text: str) -> str:
+        normalized = unicodedata.normalize("NFKD", str(text or "").lower())
+        normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+        return re.sub(r"[^a-z0-9\s]", " ", normalized)
+
+    def _fact_result_is_relevant(self, query: str, title: str, extract: str) -> bool:
+        query_tokens = {token for token in word_tokens(self._normalize_fact_text(query)) if len(token) >= 4}
+        if not query_tokens:
+            return True
+        title_tokens = {token for token in word_tokens(self._normalize_fact_text(title)) if len(token) >= 4}
+        text_tokens = {token for token in word_tokens(self._normalize_fact_text(f"{title} {extract[:500]}")) if len(token) >= 4}
+        if query_tokens & title_tokens:
+            return True
+        if len(query_tokens & text_tokens) >= min(2, len(query_tokens)):
+            return True
+        # Avoid accepting fuzzy but wrong Wikipedia hits like "polvo muda" -> "Povo munda".
+        return False
 
     def _wikipedia_fact_pack(self, query: str) -> dict[str, Any]:
         for language in ["pt", "en"]:
@@ -1171,17 +1210,33 @@ class JobOrchestrator:
                 with httpx.Client(timeout=httpx.Timeout(8.0, connect=3.0), headers={"User-Agent": "yts-render/1.0 fact-pack"}) as client:
                     search = client.get(
                         f"https://{language}.wikipedia.org/w/api.php",
-                        params={"action": "opensearch", "search": query, "limit": 1, "namespace": 0, "format": "json"},
+                        params={"action": "opensearch", "search": query, "limit": 3, "namespace": 0, "format": "json"},
                     )
                     search.raise_for_status()
                     payload = search.json()
                     titles = payload[1] if len(payload) > 1 else []
                     if not titles:
                         continue
-                    title = str(titles[0])
-                    summary = client.get(f"https://{language}.wikipedia.org/api/rest_v1/page/summary/{title.replace(' ', '_')}")
-                    summary.raise_for_status()
-                    data = summary.json()
+                    chosen_title = ""
+                    chosen_data: dict[str, Any] | None = None
+                    for raw_title in titles[:3]:
+                        title = str(raw_title)
+                        try:
+                            encoded_title = quote(title.replace(" ", "_"), safe="")
+                            summary = client.get(f"https://{language}.wikipedia.org/api/rest_v1/page/summary/{encoded_title}")
+                            summary.raise_for_status()
+                            candidate_data = summary.json()
+                        except Exception:  # noqa: BLE001
+                            continue
+                        extract = str(candidate_data.get("extract") or "").strip()
+                        if extract and self._fact_result_is_relevant(query, str(candidate_data.get("title") or title), extract):
+                            chosen_title = title
+                            chosen_data = candidate_data
+                            break
+                    if chosen_data is None:
+                        continue
+                    title = chosen_title
+                    data = chosen_data
             except Exception:  # noqa: BLE001
                 continue
             extract = str(data.get("extract") or "").strip()
@@ -1279,7 +1334,7 @@ class JobOrchestrator:
         plan_dict: dict[str, Any],
         gate_reasons: list[str],
     ) -> dict[str, Any]:
-        processed = dict(script)
+        processed = self._normalize_script_narration_fields(dict(script))
         fact_pack = plan_dict.get("fact_pack") if isinstance(plan_dict.get("fact_pack"), dict) else {}
         if self._should_force_conservative_fact_rewrite(processed, fact_pack, gate_reasons):
             processed = self._rewrite_script_conservatively(processed, fact_pack, plan_dict)
@@ -1289,6 +1344,31 @@ class JobOrchestrator:
         processed["estimated_duration_sec"] = round(max(25.0, min(42.0, len(word_tokens(str(processed.get("full_narration") or ""))) / 2.55)), 2)
         processed["token_count"] = len(tokenize(str(processed.get("full_narration") or "")))
         return processed
+
+    def _normalize_script_narration_fields(self, script: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(script)
+        raw_beats = normalized.get("body_beats") or []
+        if not isinstance(raw_beats, list):
+            raw_beats = [raw_beats]
+        body_beats: list[str] = []
+        for beat in raw_beats:
+            if isinstance(beat, dict):
+                text = str(beat.get("narration") or beat.get("text") or beat.get("content") or "").strip()
+            else:
+                text = str(beat or "").strip()
+            if text:
+                body_beats.append(text.rstrip(".!?") + ".")
+        normalized["body_beats"] = body_beats
+        narration = str(normalized.get("full_narration") or "").strip()
+        narration_has_structured_leak = bool(re.search(r"\{\s*['\"](?:segment|time_range|visual_description|narration)['\"]", narration))
+        if narration_has_structured_leak or not narration:
+            parts = [
+                str(normalized.get("hook") or "").strip(),
+                *body_beats,
+                str(normalized.get("ending") or "").strip(),
+            ]
+            normalized["full_narration"] = " ".join(part.rstrip(".!?") + "." for part in parts if part).strip()
+        return normalized
 
     def _split_long_script_sentences(self, script: dict[str, Any]) -> dict[str, Any]:
         narration = str(script.get("full_narration") or "").strip()

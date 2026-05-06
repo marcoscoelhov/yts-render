@@ -22,6 +22,7 @@ os.environ.setdefault("YTS_DATABASE_URL", f"sqlite:///{Path('data-test/test.db')
 os.environ.setdefault("YTS_USE_MOCK_PROVIDERS", "true")
 
 import app.main as main_module  # noqa: E402
+import app.orchestrator as orchestrator_module  # noqa: E402
 from app.compliance.review import build_human_review_checklist  # noqa: E402
 from app.db import SessionLocal, engine, init_db  # noqa: E402
 from app.editorial.retention import EDITORIAL_PROMPT_VERSION, build_retention_map  # noqa: E402
@@ -1747,6 +1748,95 @@ def test_full_pipeline_with_sound_design_persists_rights_and_artifacts(monkeypat
         assert job.artifact_index["sound_design"] == "audio/sound_design.wav"
     rights_registry = json.loads((Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id / "rights_registry.json").read_text(encoding="utf-8"))
     assert any(entry["asset_type"] == "sound_design" for entry in rights_registry["entries"])
+
+
+def test_script_postprocess_removes_structured_body_beat_leak() -> None:
+    script = _base_script("{'segment': 'visual_hook', 'narration': 'Texto vazado.'}")
+    script["hook"] = "Este flamingo é rosa."
+    script["body_beats"] = [
+        {"segment": "visual_hook", "narration": "Mas ele nasceu branco."},
+        {"segment": "payoff", "narration": "A cor vem dos carotenoides."},
+    ]
+    script["ending"] = "A dieta vira cor."
+
+    processed = orchestrator._postprocess_script_for_quality(script, {"fact_pack": {"status": "limited", "facts": []}}, [])
+
+    assert "{'segment'" not in processed["full_narration"]
+    assert processed["body_beats"] == ["Mas ele nasceu branco.", "A cor vem dos carotenoides."]
+    assert "A cor vem dos carotenoides." in processed["full_narration"]
+
+
+def test_fact_result_relevance_rejects_fuzzy_wrong_wikipedia_hit() -> None:
+    assert not orchestrator._fact_result_is_relevant(
+        "polvo muda",
+        "Povo munda",
+        "O povo munda é um grupo étnico do subcontinente indiano.",
+    )
+
+
+def test_weak_fact_query_rejects_generic_food_cause_terms() -> None:
+    assert orchestrator._is_weak_fact_query("causa comida")
+
+
+def test_fact_query_concepts_include_octopus_camouflage_terms() -> None:
+    concepts = orchestrator._fact_query_concepts("camuflagem dos polvos usando cromatóforos")
+
+    assert "cromatóforos" in concepts
+    assert "iridóforos" in concepts
+
+
+def test_fact_query_concepts_include_flamingo_pigment_terms() -> None:
+    concepts = orchestrator._fact_query_concepts("flamingos ficam rosas")
+
+    assert "carotenoides" in concepts
+    assert "pigmentos" in concepts
+
+
+def test_wikipedia_fact_pack_skips_broken_first_candidate(monkeypatch) -> None:
+    class FakeResponse:
+        def __init__(self, payload: object, *, should_raise: bool = False):
+            self.payload = payload
+            self.should_raise = should_raise
+
+        def raise_for_status(self) -> None:
+            if self.should_raise:
+                raise RuntimeError("summary failed")
+
+        def json(self) -> object:
+            return self.payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, url: str, **kwargs):
+            if url.endswith("/w/api.php"):
+                return FakeResponse(["flamingo", ["Broken Title", "Flamingo"]])
+            if url.endswith("Broken_Title"):
+                return FakeResponse({}, should_raise=True)
+            if url.endswith("Flamingo"):
+                return FakeResponse(
+                    {
+                        "title": "Flamingo",
+                        "extract": "Flamingos are birds with pink color related to carotenoid pigments from food.",
+                        "content_urls": {"desktop": {"page": "https://example.test/flamingo"}},
+                    }
+                )
+            raise AssertionError(url)
+
+    monkeypatch.setattr(orchestrator_module.httpx, "Client", FakeClient)
+
+    pack = orchestrator._wikipedia_fact_pack("flamingo carotenoid")
+
+    assert pack["status"] == "verified"
+    assert pack["topic_title"] == "Flamingo"
+    assert pack["sources"][0]["url"] == "https://example.test/flamingo"
 
 
 def test_fact_pack_consistency_requires_source_fact_ids_when_verified() -> None:
