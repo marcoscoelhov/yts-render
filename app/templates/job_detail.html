@@ -10,6 +10,7 @@
 {% set background_music = details.background_music %}
 {% set render = details.render %}
 {% set monetization = details.monetization_report or {} %}
+{% set publish_package = details.publish_package or {} %}
 {% set repair = details.repair_telemetry or {} %}
 <section class="detail-grid" {% if job.status in ["queued", "running"] %}hx-get="/jobs/{{ job.job_id }}" hx-trigger="every 2s" hx-select=".detail-grid" hx-swap="outerHTML"{% endif %}>
   <div class="main-column">
@@ -29,6 +30,7 @@
         <a href="#audio">Audio &amp; Subtitles</a>
         <a href="#render">Render</a>
         <a href="#monetization">Monetization</a>
+        <a href="#performance">Performance</a>
         <a href="#self-healing">Self-Healing</a>
         <a href="#logs">Logs</a>
       </div>
@@ -85,6 +87,24 @@
       <pre>{{ monetization.hard_blockers }}</pre>
       <h4>Confirmações pendentes</h4>
       <pre>{{ monetization.manual_required }}</pre>
+      {% set review_checklist = monetization.human_review_checklist or publish_package.human_review_checklist or {} %}
+      {% if review_checklist["items"] %}
+      <h4>Checklist humano</h4>
+      <div class="review-checklist-status">
+        {% for item in review_checklist["items"] %}
+        <div class="review-status-row">
+          <span><strong>{{ item.label }}</strong><br><small>{{ item.code }}</small></span>
+          {% if item.required %}
+          <span class="badge {% if item.completed %}approved{% else %}monetization_review{% endif %}">
+            {% if item.completed %}confirmado{% else %}pendente{% endif %}
+          </span>
+          {% else %}
+          <span class="badge queued">não exigido</span>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
       <h4>Disclosure IA</h4>
       <pre>{{ monetization.ai_disclosure }}</pre>
       <h4>Direitos</h4>
@@ -97,6 +117,15 @@
       <pre>{{ monetization.channel_repetition_report }}</pre>
       {% else %}
       <p>Aguardando gate de monetização.</p>
+      {% endif %}
+    </section>
+
+    <section id="performance" class="panel">
+      <h3>Performance</h3>
+      {% if details.performance_metrics %}
+      <pre>{{ details.performance_metrics }}</pre>
+      {% else %}
+      <p>Nenhuma métrica real do YouTube Studio registrada ainda.</p>
       {% endif %}
     </section>
 
@@ -249,6 +278,23 @@
       {% endif %}
       <h3>Artefatos</h3>
       <pre>{{ job.artifact_index or {} }}</pre>
+      <h3>Performance</h3>
+      <form method="post" action="/jobs/{{ job.job_id }}/performance" class="review-form">
+        <input type="hidden" name="source" value="youtube_studio_manual">
+        <label for="retention_percent">Retenção média (%)</label>
+        <input id="retention_percent" name="retention_percent" type="number" min="0" max="100" step="0.1">
+        <label for="viewed_vs_swiped_away_percent">Viewed vs swiped away (%)</label>
+        <input id="viewed_vs_swiped_away_percent" name="viewed_vs_swiped_away_percent" type="number" min="0" max="100" step="0.1">
+        <label for="rewatch_rate">Rewatch rate</label>
+        <input id="rewatch_rate" name="rewatch_rate" type="number" min="0" step="0.01">
+        <label for="rpm_usd">RPM USD</label>
+        <input id="rpm_usd" name="rpm_usd" type="number" min="0" step="0.01">
+        <label for="monetization_status">Status monetização</label>
+        <input id="monetization_status" name="monetization_status" placeholder="monetized, limited, ineligible">
+        <label for="performance_notes">Notas</label>
+        <textarea id="performance_notes" name="notes" rows="3"></textarea>
+        <button type="submit">Registrar métricas</button>
+      </form>
     </section>
   </aside>
 </section>

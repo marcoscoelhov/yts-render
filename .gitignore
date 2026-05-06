@@ -1,10 +1,21 @@
 .env
 .claude/
+.serena/
 .venv/
 node_modules/
 __pycache__/
 .pytest_cache/
 *.py[cod]
 *.egg-info/
+
+# Runtime/generated data and media artifacts
 data/
+data-*/
 data-test/
+data-test-*/
+
+# Local run logs and tool-generated lock files not used by this project
+uvicorn-*.log
+*.err.log
+*.out.log
+uv.lock

@@ -15,7 +15,7 @@ import time
 import wave
 import binascii
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 import anthropic
 import httpx
@@ -24,6 +24,7 @@ from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFilter
 
 from app.config import get_settings
+from app.editorial.retention import EDITORIAL_PROMPT_VERSION, build_retention_map, build_visual_opening_brief
 from app.utils import avg_words_per_sentence, max_words_single_sentence, parse_srt, sentence_split, tokenize, word_tokens, wrap_caption
 
 
@@ -151,6 +152,8 @@ class MockCreativeProvider:
         full_narration = " ".join(narration_parts)
         token_count = len(tokenize(full_narration))
         estimated_duration_sec = round(max(28.5, min(41.5, len(word_tokens(full_narration)) / 2.55)), 2)
+        retention_map = topic_plan.get("retention_map") or build_retention_map(round(estimated_duration_sec))
+        visual_opening = topic_plan.get("visual_opening") or build_visual_opening_brief(topic_plan)
         qa_metrics = {
             "hook_score": 0.92,
             "clarity_score": 0.89,
@@ -163,6 +166,7 @@ class MockCreativeProvider:
             "words_per_second": round(len(word_tokens(full_narration)) / estimated_duration_sec, 2),
             "script_gate_pass": True,
             "source_provider": "mock",
+            "editorial_prompt_version": topic_plan.get("editorial_prompt_version") or EDITORIAL_PROMPT_VERSION,
         }
         return {
             "title": topic_plan["title_candidates"][0],
@@ -176,8 +180,10 @@ class MockCreativeProvider:
             "source_fact_ids": source_fact_ids,
             "token_count": token_count,
             "language": "pt-BR",
+            "retention_map": retention_map,
+            "visual_opening": visual_opening,
             "qa_metrics": qa_metrics,
-            "prompt_version": "mock-curiosidades-v1",
+            "prompt_version": f"mock-{EDITORIAL_PROMPT_VERSION}",
         }
 
     def repair_script(self, script: dict[str, Any], gate_reasons: list[str], topic_plan: dict[str, Any]) -> dict[str, Any]:
@@ -412,10 +418,15 @@ Escreva um roteiro viral de curiosidades em pt-BR.
 Entrada JSON: {json.dumps(topic_plan, ensure_ascii=False)}
 
 Retorne JSON estrito com:
-title, hook, body_beats, ending, cta, full_narration, estimated_duration_sec, key_facts, source_fact_ids, token_count, language, qa_metrics, prompt_version
+title, hook, body_beats, ending, cta, full_narration, estimated_duration_sec, key_facts, source_fact_ids, token_count, language, retention_map, visual_opening, qa_metrics, prompt_version
 
 Regras:
 - 25 a 45 segundos
+- prompt_version deve ser "{EDITORIAL_PROMPT_VERSION}" salvo se a Entrada JSON trouxer versão editorial mais nova
+- retention_map deve refletir os blocos da Entrada JSON.retention_map e mapear o roteiro em: visual_hook, proof_or_tension, escalation, turn_or_payoff, loop_close
+- visual_opening deve descrever o primeiro frame esperado: sujeito, contraste visual, ação/resultado e o que evitar
+- os primeiros 0-2s precisam funcionar visualmente mesmo sem áudio, com resultado, movimento ou contraste concreto
+- use golden_sample_brief como régua editorial: aproxime-se dos padrões bons e evite os padrões ruins
 - primeira frase com no maximo 12 palavras
 - media por frase <= 14
 - use estrutura agressiva de retenção: hook de choque, loop aberto, escalada de fatos, payoff atrasado e fechamento memoravel
@@ -445,7 +456,8 @@ Regras:
 - se a Entrada JSON indicar titulo completo do usuario, preserve a promessa central e refine a formulacao
 - se hub_notes pedir um formato de saida diferente, ignore esse formato e mantenha exatamente o JSON estrito solicitado aqui
 - sem instruções de camera
-- QA deve incluir hook_score, clarity_score, information_density_score, repetition_score, ending_strength_score, estimated_duration_sec, avg_words_per_sentence, max_words_single_sentence, words_per_second, script_gate_pass
+- evite repetir aberturas listadas em recent_pattern_brief.avoid_hook_openings e padrões de título recentes
+- QA deve incluir hook_score, clarity_score, information_density_score, repetition_score, ending_strength_score, estimated_duration_sec, avg_words_per_sentence, max_words_single_sentence, words_per_second, script_gate_pass, editorial_prompt_version
 """
         payload = self._json_completion(prompt)
         payload["qa_metrics"] = {**payload.get("qa_metrics", {}), "source_provider": "minimax"}
@@ -459,9 +471,11 @@ Contexto da pauta JSON: {json.dumps(topic_plan, ensure_ascii=False)}
 Motivos de reprovação: {json.dumps(gate_reasons, ensure_ascii=False)}
 
 Retorne JSON estrito com os mesmos campos:
-title, hook, body_beats, ending, cta, full_narration, estimated_duration_sec, key_facts, source_fact_ids, token_count, language, qa_metrics, prompt_version
+title, hook, body_beats, ending, cta, full_narration, estimated_duration_sec, key_facts, source_fact_ids, token_count, language, retention_map, visual_opening, qa_metrics, prompt_version
 
 Regras obrigatórias:
+- mantenha prompt_version="{EDITORIAL_PROMPT_VERSION}" e preserve/atualize retention_map e visual_opening
+- se os motivos incluírem weak_loop_closure ou ending_not_connected_to_hook, corrija o bloco loop_close sem criar final genérico repetitivo
 - todos os campos textuais devem estar em portugues do Brasil (pt-BR)
 - remova qualquer palavra, frase ou expressão em ingles, espanhol, chines ou outro idioma
 - remova qualquer SSML, HTML, XML, tags, entidades ou markup
@@ -625,7 +639,20 @@ class ResilientCreativeProvider:
     ) -> dict[str, Any]:
         if self.primary:
             try:
-                return self.primary.plan_topic(seed_theme, attempt, history, requested_angle, tone=tone, notes=notes)
+                return self._run_primary_with_timeout(
+                    lambda: self.primary.plan_topic(seed_theme, attempt, history, requested_angle, tone=tone, notes=notes),
+                    timeout_sec=self.settings.minimax_text_timeout_sec,
+                )
+            except concurrent.futures.TimeoutError as exc:
+                if self.strict_minimax_validation:
+                    raise ProviderFailure("minimax_text", f"topic planner timed out after {self.settings.minimax_text_timeout_sec}s") from exc
+                payload = self.fallback.plan_topic(seed_theme, attempt, history, requested_angle, tone=tone, notes=notes)
+                payload["quality_metrics"]["fallback_reason"] = (
+                    f"minimax_text topic planner timed out after {self.settings.minimax_text_timeout_sec}s"
+                )
+                payload["quality_metrics"]["fallback_used"] = True
+                payload["quality_metrics"]["fallback_stage"] = "topic_plan_timeout"
+                return payload
             except ProviderFailure as exc:
                 if self.strict_minimax_validation:
                     raise
@@ -668,7 +695,18 @@ class ResilientCreativeProvider:
     def audit_publish_package(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self.primary:
             try:
-                return self.primary.audit_publish_package(payload)
+                return self._run_primary_with_timeout(
+                    lambda: self.primary.audit_publish_package(payload),
+                    timeout_sec=self.settings.minimax_text_timeout_sec,
+                )
+            except concurrent.futures.TimeoutError as exc:
+                if self.strict_minimax_validation:
+                    raise ProviderFailure("minimax_text", f"publish audit timed out after {self.settings.minimax_text_timeout_sec}s") from exc
+                audit = self.fallback.audit_publish_package(payload)
+                audit["fallback_reason"] = f"minimax_text publish audit timed out after {self.settings.minimax_text_timeout_sec}s"
+                audit["fallback_used"] = True
+                audit["fallback_stage"] = "publish_audit_timeout"
+                return audit
             except ProviderFailure as exc:
                 if self.strict_minimax_validation:
                     raise

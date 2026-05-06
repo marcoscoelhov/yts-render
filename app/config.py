@@ -14,9 +14,13 @@ class Settings(BaseSettings):
     app_url: str = "http://127.0.0.1:8080"
     app_host: str = "127.0.0.1"
     app_port: int = 8080
+    hub_auth_token: str | None = None
 
     data_dir: Path = Path("data")
     database_url: str = "sqlite:///data/yts_render.db"
+    sqlite_busy_timeout_ms: int = 30_000
+    sqlite_journal_mode: str = "WAL"
+    sqlite_synchronous: str = "NORMAL"
     schema_version: str = "1.0.0"
 
     niche_id: str = "curiosidades"
@@ -31,7 +35,7 @@ class Settings(BaseSettings):
     llm_enable_fallback: bool = True
     llm_script_repair_attempts: int = 1
     llm_topic_repair_attempts: int = 2
-    minimax_script_timeout_sec: float = 90.0
+    minimax_script_timeout_sec: float = 150.0
     scene_prompt_gate_enabled: bool = True
     asset_semantic_threshold: float = 0.80
     asset_total_threshold: float = 0.75
@@ -40,12 +44,17 @@ class Settings(BaseSettings):
     asset_generation_regeneration_rounds: int = 2
     background_music_enabled: bool = True
     background_music_gain_db: float = -20.0
+    sound_design_enabled: bool = False
+    sound_design_gain_db: float = -18.0
     youtube_publish_mode: str = "manual"
     youtube_api_enabled: bool = False
     youtube_channel_id: str | None = None
     minimax_commercial_rights_confirmed: bool = False
     edge_tts_commercial_rights_confirmed: bool = False
+    minimax_rights_evidence_url: str | None = None
+    edge_tts_rights_evidence_url: str | None = None
     allow_synthetic_visuals_for_monetization: bool = True
+    conservative_synthetic_disclosure: bool = True
     minimax_api_key: str | None = None
     minimax_text_api_key: str | None = None
     minimax_image_api_key: str | None = None
@@ -53,7 +62,7 @@ class Settings(BaseSettings):
     minimax_text_base_url: str = "https://api.minimax.io/v1"
     minimax_image_base_url: str = "https://api.minimax.io/v1/image_generation"
     minimax_music_base_url: str = "https://api.minimax.io/v1"
-    minimax_text_timeout_sec: float = 120.0
+    minimax_text_timeout_sec: float = 150.0
     minimax_music_timeout_sec: float = 240.0
     minimax_scene_plan_timeout_sec: float = 90.0
     pexels_api_key: str | None = None
@@ -70,6 +79,31 @@ class Settings(BaseSettings):
         if not 25 <= value <= 45:
             raise ValueError("target_duration_sec must be between 25 and 45")
         return value
+
+    @field_validator("sqlite_busy_timeout_ms")
+    @classmethod
+    def validate_sqlite_busy_timeout_ms(cls, value: int) -> int:
+        if not 0 <= value <= 300_000:
+            raise ValueError("sqlite_busy_timeout_ms must be between 0 and 300000")
+        return value
+
+    @field_validator("sqlite_journal_mode")
+    @classmethod
+    def validate_sqlite_journal_mode(cls, value: str) -> str:
+        normalized = value.upper()
+        allowed = {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}
+        if normalized not in allowed:
+            raise ValueError("sqlite_journal_mode must be a valid SQLite journal mode")
+        return normalized
+
+    @field_validator("sqlite_synchronous")
+    @classmethod
+    def validate_sqlite_synchronous(cls, value: str) -> str:
+        normalized = value.upper()
+        allowed = {"OFF", "NORMAL", "FULL", "EXTRA"}
+        if normalized not in allowed:
+            raise ValueError("sqlite_synchronous must be a valid SQLite synchronous mode")
+        return normalized
 
     @property
     def templates_dir(self) -> Path:

@@ -22,9 +22,12 @@ os.environ.setdefault("YTS_DATABASE_URL", f"sqlite:///{Path('data-test/test.db')
 os.environ.setdefault("YTS_USE_MOCK_PROVIDERS", "true")
 
 import app.main as main_module  # noqa: E402
-from app.db import SessionLocal, init_db  # noqa: E402
+from app.compliance.review import build_human_review_checklist  # noqa: E402
+from app.db import SessionLocal, engine, init_db  # noqa: E402
+from app.editorial.retention import EDITORIAL_PROMPT_VERSION, build_retention_map  # noqa: E402
+from app.editorial.repetition import build_channel_repetition_report  # noqa: E402
 from app.main import app, artifact_url  # noqa: E402
-from app.models import BackgroundMusicAsset, Job, NarrationAsset, RenderOutput, SceneAsset, Script, SubtitleTrack, TopicPlan, TopicRegistry, TopicRequest  # noqa: E402
+from app.models import BackgroundMusicAsset, Job, NarrationAsset, PerformanceMetric, RenderOutput, SceneAsset, Script, SubtitleTrack, TopicPlan, TopicRegistry, TopicRequest  # noqa: E402
 from app.orchestrator import JobOrchestrator, RecoverableStepError, StepDefinition, normalize_script_metrics, orchestrator  # noqa: E402
 from app.providers import LLMProviderRegistry, LocalSpeechFallbackProvider, MiniMaxBackgroundMusicProvider, MinimaxCreativeProvider, MinimaxImageProvider, MockCreativeProvider, ProviderFailure, ResilientCreativeProvider, ResilientMusicProvider  # noqa: E402
 from app.quality.asset_gate import AssetGate  # noqa: E402
@@ -81,7 +84,7 @@ def test_full_pipeline_reaches_monetization_review() -> None:
     )
     assert response.status_code == 303
     job_id = response.headers["location"].split("/")[-1]
-    wait_for_status(job_id, "monetization_review")
+    wait_for_any_status(job_id, {"monetization_review", "blocked_for_monetization"})
     with SessionLocal() as session:
         job = session.get(Job, job_id)
         render = session.query(RenderOutput).filter_by(job_id=job_id).one()
@@ -91,7 +94,7 @@ def test_full_pipeline_reaches_monetization_review() -> None:
         assert render.resolution == "1080x1920"
         assert 25_000 <= render.duration_ms <= 45_000
         assert subtitles.coverage_ratio >= 0.99
-        assert background_music.gain_db == -15.0
+        assert background_music.gain_db == -20.0
         assert Path(background_music.audio_uri.removeprefix("file://")).exists()
         assert Path(background_music.mixed_audio_uri.removeprefix("file://")).exists()
         assert len(selected_assets) >= 5
@@ -111,6 +114,36 @@ def test_full_pipeline_reaches_monetization_review() -> None:
 def test_artifact_url_maps_file_uri_to_static_route() -> None:
     artifact_path = Path(os.environ["YTS_DATA_DIR"]).resolve() / "artifacts" / "job-1" / "render" / "final.mp4"
     assert artifact_url(artifact_path.as_uri()) == "/artifacts/job-1/render/final.mp4"
+
+
+def test_hub_auth_token_protects_pages_and_artifacts(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.settings, "hub_auth_token", "secret-token")
+    client = TestClient(app)
+    main_module.settings.artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    assert client.get("/").status_code == 401
+    assert client.get("/", headers={"x-yts-hub-token": "secret-token"}).status_code == 200
+    assert client.get("/", cookies={"yts_hub_token": "secret-token"}).status_code == 200
+    assert client.get("/artifacts/missing.mp4").status_code == 401
+    assert client.get("/artifacts/missing.mp4", cookies={"yts_hub_token": "secret-token"}).status_code == 404
+    assert client.get("/artifacts/missing.mp4?access_token=secret-token").status_code == 401
+    assert client.post("/jobs", data={"seed_theme": "polvos"}, cookies={"yts_hub_token": "secret-token"}).status_code == 401
+
+
+def test_artifact_url_does_not_embed_hub_auth_token(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.settings, "hub_auth_token", "secret-token")
+    artifact_path = Path(os.environ["YTS_DATA_DIR"]).resolve() / "artifacts" / "job-1" / "render" / "final.mp4"
+
+    assert artifact_url(artifact_path.as_uri()) == "/artifacts/job-1/render/final.mp4"
+
+
+def test_sqlite_engine_uses_busy_timeout_and_wal_pragmas() -> None:
+    with engine.connect() as connection:
+        busy_timeout = connection.exec_driver_sql("PRAGMA busy_timeout").scalar()
+        journal_mode = connection.exec_driver_sql("PRAGMA journal_mode").scalar()
+
+    assert busy_timeout >= 30_000
+    assert str(journal_mode).lower() == "wal"
 
 
 def test_hub_create_job_sends_title_mode_tone_angle_and_seo_notes(monkeypatch) -> None:
@@ -532,6 +565,26 @@ def test_mock_generate_script_grounds_source_fact_ids_when_fact_pack_is_verified
     ]
 
 
+def test_mock_generate_script_includes_retention_map_and_visual_opening() -> None:
+    provider = MockCreativeProvider()
+
+    script = provider.generate_script(
+        {
+            "canonical_topic": "polvos",
+            "angle": "biologia curiosa",
+            "title_candidates": ["Polvos parecem impossíveis pelo detalhe dos braços"],
+            "retention_map": build_retention_map(32),
+            "visual_opening": {"first_frame_goal": "mostrar braço do polvo reagindo antes da cabeça"},
+            "editorial_prompt_version": EDITORIAL_PROMPT_VERSION,
+        }
+    )
+
+    assert script["prompt_version"].endswith(EDITORIAL_PROMPT_VERSION)
+    assert script["retention_map"]["segments"][0]["code"] == "visual_hook"
+    assert script["visual_opening"]["first_frame_goal"]
+    assert script["qa_metrics"]["editorial_prompt_version"] == EDITORIAL_PROMPT_VERSION
+
+
 def test_mock_repair_script_uses_fact_pack_and_shortens_long_sentences() -> None:
     provider = MockCreativeProvider()
     repaired = provider.repair_script(
@@ -686,13 +739,13 @@ def test_channel_repetition_report_flags_similar_recent_jobs() -> None:
         session.add_all([previous, current])
         session.add(
             Script(
-                script_id="script-repetition-previous",
-                job_id=previous.job_id,
-                schema_version="1.0.0",
-                content_hash="script-prev",
-                title="Polvos pensam com os braços",
-                hook="O polvo não pensa só com a cabeça.",
-                body_beats=[],
+                    script_id="script-repetition-previous",
+                    job_id=previous.job_id,
+                    schema_version="1.0.0",
+                    content_hash="script-prev",
+                    title="Polvos pensam com os braços",
+                    hook="O polvo não pensa só com a cabeça.",
+                    body_beats=["Os braços processam sinais.", "O corpo reage antes da cabeça.", "Isso muda a leitura do animal."],
                 ending="Isso muda como você olha para o animal.",
                 cta=None,
                 full_narration="O polvo não pensa só com a cabeça. Seus braços processam sinais.",
@@ -719,11 +772,11 @@ def test_channel_repetition_report_flags_similar_recent_jobs() -> None:
         script = Script(
             script_id="script-repetition-current",
             job_id=current.job_id,
-            schema_version="1.0.0",
-            content_hash="script-current",
-            title="Polvos pensam com os braços",
-            hook="O polvo não pensa só com a cabeça.",
-            body_beats=[],
+                schema_version="1.0.0",
+                content_hash="script-current",
+                title="Polvos pensam com os braços",
+                hook="O polvo não pensa só com a cabeça.",
+                body_beats=["Os braços processam sinais.", "O corpo reage antes da cabeça.", "Isso muda a leitura do animal."],
             ending="Isso muda como você olha para o animal.",
             cta=None,
             full_narration="O polvo não pensa só com a cabeça. Seus braços processam sinais.",
@@ -744,6 +797,12 @@ def test_channel_repetition_report_flags_similar_recent_jobs() -> None:
 
     assert report["repetition_risk"] in {"medium", "high"}
     assert report["matches"]
+    assert report["signals"]["exact_hook_opening_matches"] >= 1
+    assert report["signals"]["exact_title_opening_matches"] >= 1
+    assert report["signals"]["exact_duration_bucket_matches"] >= 1
+    assert report["signals"]["exact_beat_count_matches"] >= 1
+    assert any("same_hook_opening" in match["signals"] for match in report["matches"])
+    assert any("same_duration_bucket" in match["signals"] for match in report["matches"])
 
 
 def test_retry_action_creates_new_job() -> None:
@@ -759,6 +818,87 @@ def test_retry_action_creates_new_job() -> None:
     assert retry.status_code == 303
     new_job_id = retry.headers["location"].split("/")[-1]
     assert new_job_id != job_id
+
+
+def test_record_performance_metrics_persists_artifact_and_learning_brief() -> None:
+    job_id = orchestrator.create_job(
+        {
+            "seed_theme": "polvos",
+            "target_duration_sec": 35,
+            "tone": "intrigante_direto",
+            "cta_style": "none",
+        }
+    )
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        session.add(
+            TopicPlan(
+                topic_id="topic-performance",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="topic-performance",
+                canonical_topic="polvos",
+                angle="biologia curiosa",
+                hook_promise="o polvo não pensa só com a cabeça",
+                entities=["polvos"],
+                search_terms=["polvos"],
+                title_candidates=["Polvos pensam com os braços"],
+                quality_metrics={},
+            )
+        )
+        session.add(
+            Script(
+                script_id="script-performance",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="script-performance",
+                title="Polvos pensam com os braços",
+                hook="O polvo não pensa só com a cabeça.",
+                body_beats=["Os braços processam sinais."],
+                ending="Isso muda como você olha para o animal.",
+                cta=None,
+                full_narration="O polvo não pensa só com a cabeça. Os braços processam sinais.",
+                estimated_duration_sec=35,
+                key_facts=[],
+                token_count=20,
+                language="pt-BR",
+                qa_metrics={},
+                prompt_version="test",
+            )
+        )
+        assert job
+        job.status = "published"
+        session.commit()
+
+    orchestrator.record_performance_metrics(
+        job_id,
+        {
+            "source": "youtube_studio_manual",
+            "retention_percent": 82.0,
+            "viewed_vs_swiped_away_percent": 71.0,
+            "rewatch_rate": 1.2,
+            "likes": 10,
+            "shares": 2,
+            "comments": 1,
+            "rpm_usd": 0.08,
+            "monetization_status": "monetized",
+            "notes": "bom loop",
+        },
+    )
+
+    with SessionLocal() as session:
+        metric = session.query(PerformanceMetric).filter_by(job_id=job_id).one()
+        job = session.get(Job, job_id)
+        brief = orchestrator._channel_learning_brief(session, "curiosidades")
+
+    assert metric.retention_percent == 82.0
+    assert job and job.artifact_index["performance_metrics"] == "performance_metrics.json"
+    assert job.quality_summary["performance"]["retention_percent"] == 82.0
+    report = json.loads((Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id / "performance_metrics.json").read_text(encoding="utf-8"))
+    assert report["latest"]["retention_percent"] == 82.0
+    assert brief["sample_count"] >= 1
+    assert brief["strong_patterns"]
+    assert (Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id / "performance_metrics.json").exists()
 
 
 def test_review_page_no_longer_promises_partial_retry() -> None:
@@ -1394,12 +1534,100 @@ def test_publish_package_skips_stopword_hashtags() -> None:
     assert "#que" not in tags
 
 
+def test_human_review_checklist_marks_required_completed_and_pending_items() -> None:
+    checklist = build_human_review_checklist(
+        rights_registry={"all_commercial_rights_confirmed": False},
+        ai_disclosure={"youtube_disclosure_required": True},
+        fact_claims_report={"requires_fact_review": False},
+        metadata_review={"requires_metadata_review": True},
+        channel_repetition_report={"repetition_risk": "medium"},
+        confirmations={"rights_confirmed", "originality_confirmed"},
+    )
+
+    assert checklist["all_required_completed"] is False
+    assert "rights_confirmation_required" in checklist["completed_codes"]
+    assert "youtube_ai_disclosure_toggle_required" in checklist["pending_codes"]
+    assert "metadata_review_required" in checklist["pending_codes"]
+    assert "originality_review_required" in checklist["completed_codes"]
+    assert "fact_review_required" not in checklist["required_codes"]
+
+
+def test_conservative_ai_disclosure_requires_toggle_for_any_synthetic_asset(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.settings, "conservative_synthetic_disclosure", True)
+    report = orchestrator._build_ai_disclosure_report(
+        [
+            SimpleNamespace(
+                provider="mock",
+                scene_id="scene-1",
+                prompt_snapshot="abstract underwater texture without people",
+            )
+        ]
+    )
+
+    assert report["youtube_disclosure_required"] is True
+    assert report["policy_mode"] == "conservative"
+
+
+def test_rights_registry_requires_evidence_for_confirmed_minimax_assets(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.settings, "minimax_commercial_rights_confirmed", True)
+    monkeypatch.setattr(orchestrator.settings, "minimax_rights_evidence_url", None)
+    report = orchestrator._build_rights_registry(
+        SimpleNamespace(job_id="job-rights"),
+        [
+            SimpleNamespace(
+                kind="image",
+                scene_id="scene-1",
+                provider="minimax",
+                uri="file:///tmp/asset.jpg",
+                license_note=None,
+                attribution=None,
+            )
+        ],
+        None,
+        None,
+    )
+
+    assert report["all_commercial_rights_confirmed"] is False
+    assert report["evidence_required_count"] == 1
+    assert report["entries"][0]["review_required"] is True
+
+
+def test_repetition_module_flags_structural_template_matches() -> None:
+    report = build_channel_repetition_report(
+        current={
+            "canonical_topic": "polvos",
+            "angle": "biologia curiosa",
+            "script": {
+                "title": "Polvos pensam com os braços",
+                "hook": "O polvo não pensa só com a cabeça.",
+                "ending": "Isso muda como você olha para o animal.",
+                "estimated_duration_sec": 35,
+                "body_beats": ["A", "B", "C"],
+            },
+        },
+        recent_rows=[
+            {
+                "job_id": "previous",
+                "topic_summary": "polvos biologia curiosa",
+                "title": "Polvos pensam com os braços",
+                "hook": "O polvo não pensa só com a cabeça.",
+                "ending": "Isso muda como você olha para o animal.",
+                "estimated_duration_sec": 35,
+                "body_beats": ["A", "B", "C"],
+            }
+        ],
+    )
+
+    assert report["repetition_risk"] == "high"
+    assert report["signals"]["exact_structural_signature_matches"] == 1
+
+
 def _base_script(full_narration: str) -> dict[str, object]:
     return {
         "title": "Curiosidade científica em menos de um minuto",
         "hook": full_narration.split(".")[0] + ".",
         "body_beats": [full_narration],
-        "ending": "Esse detalhe muda como você olha para o tema.",
+        "ending": "No fim, essa curiosidade científica muda como você olha para o tema.",
         "cta": None,
         "full_narration": full_narration,
         "estimated_duration_sec": 32,
@@ -1441,6 +1669,84 @@ def test_script_gate_allows_conservative_factual_language() -> None:
 
     assert result.passed
     assert result.metrics["fact_risk"]["blocked"] is False
+
+
+def test_script_gate_rejects_ending_without_loop_connection() -> None:
+    script = _base_script(
+        "Polvos mudam de cor em segundos para confundir ameaças. "
+        "Esse truque aparece quando o ambiente muda rápido. "
+        "É assim que o corpo responde antes do predador chegar."
+    )
+    script["ending"] = "Por isso o oceano parece misterioso."
+
+    result = ScriptQualityGate().validate(script, target_duration_sec=35)
+
+    assert not result.passed
+    assert "ending_not_connected_to_hook" in result.reasons
+    assert result.metrics["loop_gate"]["connected_to_opening"] is False
+
+
+def test_validate_or_repair_script_recovers_simple_loop_closure(monkeypatch) -> None:
+    original_repair_attempts = orchestrator.settings.llm_script_repair_attempts
+    monkeypatch.setattr(orchestrator.settings, "llm_script_repair_attempts", 1)
+    monkeypatch.setattr(orchestrator.providers.creative, "repair_script", lambda script, reasons, plan: dict(script))
+    script = _base_script(
+        "Polvos mudam de cor em segundos para confundir ameaças. "
+        "A pele reage rápido quando a textura ao redor muda. "
+        "Isso transforma fuga em camuflagem instantânea."
+    )
+    script["ending"] = "Por isso o mar parece estranho."
+    plan_dict = {"canonical_topic": "polvos", "fact_pack": {"status": "limited", "facts": []}}
+
+    try:
+        repaired, metrics = orchestrator._validate_or_repair_script(script, plan_dict, 35, "none")
+    finally:
+        monkeypatch.setattr(orchestrator.settings, "llm_script_repair_attempts", original_repair_attempts)
+
+    assert metrics["script_quality_gate_pass"] is True
+    assert metrics["loop_gate"]["connected_to_opening"] is True
+    assert "polvos" in repaired["ending"].lower()
+
+
+def test_validate_or_repair_script_rewrites_weak_fact_pack_conservatively(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.providers.creative, "repair_script", lambda script, reasons, plan: dict(script))
+    script = _base_script(
+        "O cérebro apaga exatamente 73% das memórias durante o sono. "
+        "Isso acontece porque a dopamina destrói conexões fracas nos neurônios. "
+        "Por isso você acorda mais inteligente no dia seguinte."
+    )
+    script["source_fact_ids"] = ["F9"]
+    plan_dict = {"canonical_topic": "cérebro", "fact_pack": {"status": "limited", "facts": []}}
+
+    repaired, metrics = orchestrator._validate_or_repair_script(script, plan_dict, 35, "none")
+
+    assert metrics["script_quality_gate_pass"] is True
+    assert metrics["fact_risk"]["blocked"] is False
+    assert repaired["source_fact_ids"] == []
+    assert "número exato" in repaired["full_narration"] or "Em geral" in repaired["full_narration"]
+
+
+def test_full_pipeline_with_sound_design_persists_rights_and_artifacts(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.settings, "sound_design_enabled", True)
+    monkeypatch.setattr(orchestrator.settings, "sound_design_gain_db", -16.0)
+    client = TestClient(app)
+
+    response = client.post(
+        "/jobs",
+        data={"seed_theme": "polvos", "target_duration_sec": 35, "tone": "intrigante_direto", "cta_style": "none"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    job_id = response.headers["location"].split("/")[-1]
+    wait_for_any_status(job_id, {"monetization_review", "blocked_for_monetization"})
+    with SessionLocal() as session:
+        background_music = session.query(BackgroundMusicAsset).filter_by(job_id=job_id).one()
+        assert background_music.provider_metadata["sound_design"]["enabled"] is True
+        assert Path(background_music.provider_metadata["sound_design"]["audio_uri"].removeprefix("file://")).exists()
+        job = session.get(Job, job_id)
+        assert job.artifact_index["sound_design"] == "audio/sound_design.wav"
+    rights_registry = json.loads((Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id / "rights_registry.json").read_text(encoding="utf-8"))
+    assert any(entry["asset_type"] == "sound_design" for entry in rights_registry["entries"])
 
 
 def test_fact_pack_consistency_requires_source_fact_ids_when_verified() -> None:
@@ -1799,9 +2105,28 @@ def test_fact_query_priority_prefers_short_entity_before_long_phrase() -> None:
     assert ordered.index("polvo corações pigmentos") > 0
 
 
+def test_fact_query_removes_generic_viral_opening() -> None:
+    cleaned = orchestrator._clean_fact_query("Você sabia? O cérebro humano tem um poder insano")
+
+    assert "sabia" not in cleaned.lower()
+    assert orchestrator._extract_fact_entity(cleaned) == "cérebro humano"
+
+
 def test_weak_fact_query_filters_generic_single_word_angle() -> None:
     assert orchestrator._is_weak_fact_query("auto") is True
     assert orchestrator._is_weak_fact_query("polvos") is False
+
+
+def test_script_postprocess_splits_long_sentences_before_gate() -> None:
+    script = _base_script(
+        "O espaço invisível parece distante mas atravessa sua vida todos os dias quando a luz viaja por regiões que ninguém consegue tocar diretamente. "
+        "Esse efeito muda como você entende o céu."
+    )
+
+    processed = orchestrator._postprocess_script_for_quality(script, {"canonical_topic": "espaço"}, [])
+    result = ScriptQualityGate().validate(processed, target_duration_sec=35)
+
+    assert result.metrics["max_words_single_sentence"] <= 20
 
 
 def test_publish_hashtags_use_entities_not_weak_words() -> None:

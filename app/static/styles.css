@@ -268,6 +268,27 @@ button.ghost {
   width: auto;
 }
 
+.review-checklist-status {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0.8rem 0 1rem;
+}
+
+.review-status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.8rem 0.95rem;
+  border: 1px solid rgba(34, 28, 20, 0.08);
+  border-radius: 0.9rem;
+  background: #fffdf8;
+}
+
+.review-status-row small {
+  color: var(--muted);
+}
+
 .tab-strip {
   display: flex;
   flex-wrap: wrap;

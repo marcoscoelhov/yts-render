@@ -38,3 +38,37 @@ class ReviewActionPayload(BaseModel):
     action: Literal["approve", "reject", "retry"]
     reason_codes: list[str] = Field(default_factory=list)
     notes: str | None = None
+
+
+class PerformanceMetricPayload(BaseModel):
+    source: str = "youtube_studio_manual"
+    retention_percent: float | None = None
+    viewed_vs_swiped_away_percent: float | None = None
+    rewatch_rate: float | None = None
+    likes: int | None = None
+    shares: int | None = None
+    comments: int | None = None
+    rpm_usd: float | None = None
+    monetization_status: str | None = None
+    notes: str | None = None
+
+    @field_validator("retention_percent", "viewed_vs_swiped_away_percent")
+    @classmethod
+    def validate_percent(cls, value: float | None) -> float | None:
+        if value is not None and not 0 <= value <= 100:
+            raise ValueError("percent metrics must be between 0 and 100")
+        return value
+
+    @field_validator("rewatch_rate", "rpm_usd")
+    @classmethod
+    def validate_non_negative_float(cls, value: float | None) -> float | None:
+        if value is not None and value < 0:
+            raise ValueError("metric must be non-negative")
+        return value
+
+    @field_validator("likes", "shares", "comments")
+    @classmethod
+    def validate_non_negative_int(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("metric must be non-negative")
+        return value

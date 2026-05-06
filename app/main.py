@@ -4,9 +4,10 @@ import json
 import random
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import case, func, or_, select
@@ -17,7 +18,7 @@ from app.models import FallbackEvent, Job, RenderOutput, SceneAsset, TopicReques
 from app.orchestrator import FatalStepError, orchestrator
 from pydantic import ValidationError
 
-from app.schemas import ReviewActionPayload, TopicRequestCreate
+from app.schemas import PerformanceMetricPayload, ReviewActionPayload, TopicRequestCreate
 from app.trends import TrendResearcher
 from app.utils import path_from_uri
 
@@ -107,6 +108,39 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.mount("/artifacts", StaticFiles(directory=str(settings.artifacts_dir)), name="artifacts")
 app.mount("/static", StaticFiles(directory=str(settings.static_dir)), name="static")
+
+
+def _authorized_request(request: Request) -> bool:
+    if not settings.hub_auth_token:
+        return True
+    supplied = request.headers.get("x-yts-hub-token")
+    authorization = request.headers.get("authorization") or ""
+    if authorization.lower().startswith("bearer "):
+        supplied = authorization.split(" ", 1)[1].strip()
+    if not supplied and request.method in {"GET", "HEAD"}:
+        supplied = request.cookies.get("yts_hub_token")
+    return supplied == settings.hub_auth_token
+
+
+def _optional_float(value: str | None) -> float | None:
+    if value is None or str(value).strip() == "":
+        return None
+    return float(value)
+
+
+def _optional_int(value: str | None) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    return int(value)
+
+
+@app.middleware("http")
+async def require_hub_auth(request: Request, call_next):
+    if request.url.path.startswith("/healthz") or request.url.path.startswith("/static"):
+        return await call_next(request)
+    if request.method == "OPTIONS" or _authorized_request(request):
+        return await call_next(request)
+    return PlainTextResponse("unauthorized", status_code=401)
 
 
 def _query_jobs(status: str | None, search: str | None, fallback: str | None, review: str | None):
@@ -413,6 +447,43 @@ def publish_job(
         raise HTTPException(status_code=404, detail="job not found") from exc
     except FatalStepError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
+
+
+@app.post("/jobs/{job_id}/performance")
+def record_performance(
+    job_id: str,
+    source: str = Form(default="youtube_studio_manual"),
+    retention_percent: str | None = Form(default=None),
+    viewed_vs_swiped_away_percent: str | None = Form(default=None),
+    rewatch_rate: str | None = Form(default=None),
+    likes: str | None = Form(default=None),
+    shares: str | None = Form(default=None),
+    comments: str | None = Form(default=None),
+    rpm_usd: str | None = Form(default=None),
+    monetization_status: str | None = Form(default=None),
+    notes: str | None = Form(default=None),
+):
+    try:
+        payload = PerformanceMetricPayload(
+            source=source,
+            retention_percent=_optional_float(retention_percent),
+            viewed_vs_swiped_away_percent=_optional_float(viewed_vs_swiped_away_percent),
+            rewatch_rate=_optional_float(rewatch_rate),
+            likes=_optional_int(likes),
+            shares=_optional_int(shares),
+            comments=_optional_int(comments),
+            rpm_usd=_optional_float(rpm_usd),
+            monetization_status=monetization_status,
+            notes=notes,
+        )
+        orchestrator.record_performance_metrics(job_id, payload.model_dump())
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="job not found") from exc
     return RedirectResponse(url=f"/jobs/{job_id}", status_code=303)
 
 

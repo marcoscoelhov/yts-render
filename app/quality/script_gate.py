@@ -6,6 +6,53 @@ from typing import Any
 
 from app.utils import avg_words_per_sentence, max_words_single_sentence, word_tokens
 
+LOOP_STOPWORDS = {
+    "a",
+    "as",
+    "o",
+    "os",
+    "de",
+    "da",
+    "do",
+    "das",
+    "dos",
+    "e",
+    "em",
+    "um",
+    "uma",
+    "uns",
+    "umas",
+    "no",
+    "na",
+    "nos",
+    "nas",
+    "para",
+    "por",
+    "com",
+    "sem",
+    "que",
+    "isso",
+    "esse",
+    "essa",
+    "essas",
+    "esses",
+    "como",
+    "mais",
+    "menos",
+    "muito",
+    "muita",
+    "muitas",
+    "muitos",
+    "quando",
+    "entao",
+    "então",
+    "sobre",
+    "entre",
+    "vira",
+    "fica",
+    "fim",
+}
+
 
 ALLOWED_NON_PT_TERMS = {
     "gps",
@@ -129,6 +176,11 @@ class ScriptQualityGate:
             reasons.append("overconfident_or_unsupported_factual_claim")
         if fact_risk["blocked"]:
             reasons.append("factual_risk_requires_conservative_rewrite")
+        loop_metrics = self._loop_report(script)
+        if not loop_metrics["connected_to_opening"]:
+            reasons.append("ending_not_connected_to_hook")
+        elif loop_metrics["closure_strength"] < 0.25:
+            reasons.append("weak_loop_closure")
 
         word_count = len(word_tokens(full_narration))
         estimated_duration = float(script.get("estimated_duration_sec") or max(0, word_count / 2.55))
@@ -178,6 +230,7 @@ class ScriptQualityGate:
             "script_quality_gate_pass": not reasons,
             "script_quality_gate_reasons": reasons,
             "fact_risk": fact_risk,
+            "loop_gate": loop_metrics,
         }
         return ScriptGateResult(passed=not reasons, reasons=reasons, metrics=metrics)
 
@@ -266,6 +319,36 @@ class ScriptQualityGate:
             "claim_count": len(claims),
             "high_risk_claim_count": len(high_risk_claims),
             "claims": claims[:8],
+        }
+
+    def _loop_report(self, script: dict[str, Any]) -> dict[str, Any]:
+        hook = str(script.get("hook") or "")
+        ending = str(script.get("ending") or "")
+        title = str(script.get("title") or "")
+        full_narration = str(script.get("full_narration") or "")
+        opening = hook or (full_narration.split(".", 1)[0] if full_narration else "")
+        opening_tokens = self._salient_tokens(opening)
+        ending_tokens = self._salient_tokens(ending)
+        title_tokens = self._salient_tokens(title)
+        shared_opening = sorted(opening_tokens & ending_tokens)
+        shared_title = sorted(title_tokens & ending_tokens)
+        opening_overlap = len(shared_opening) / max(len(opening_tokens), 1)
+        title_overlap = len(shared_title) / max(len(title_tokens), 1)
+        closure_strength = round(max(opening_overlap, title_overlap), 3)
+        return {
+            "connected_to_opening": bool(shared_opening or shared_title),
+            "closure_strength": closure_strength,
+            "shared_opening_tokens": shared_opening[:6],
+            "shared_title_tokens": shared_title[:6],
+            "opening_salient_token_count": len(opening_tokens),
+            "ending_salient_token_count": len(ending_tokens),
+        }
+
+    def _salient_tokens(self, text: str) -> set[str]:
+        return {
+            token
+            for token in word_tokens(text)
+            if len(token) >= 4 and token not in LOOP_STOPWORDS
         }
 
     def _has_overconfident_or_unsupported_factual_claims(self, text: str) -> bool:
