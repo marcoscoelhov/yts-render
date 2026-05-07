@@ -76,7 +76,7 @@ Arquivos em `data/artifacts/` sao servidos por `/artifacts/...`.
 
 `ProviderRegistry` monta os providers conforme `.env`:
 
-- `creative`: `ResilientCreativeProvider`, com primary/fallback configurados por `YTS_LLM_*`.
+- `creative`: `ResilientCreativeProvider`, com primary/fallback/repair/scene configurados por `YTS_LLM_*`.
 - `image`: `MockImageProvider` quando `YTS_USE_MOCK_PROVIDERS=true`; caso contrario `MinimaxImageProvider`.
 - `stock`: `ResilientStockProvider`, com fallback Pexels/Pixabay/local quando aplicavel.
 - `tts`: `LocalSpeechFallbackProvider` em mock; caso contrario `EdgeTTSProvider`.
@@ -87,10 +87,26 @@ Variaveis principais:
 
 - `YTS_USE_MOCK_PROVIDERS`: liga fluxo local sem API paga.
 - `YTS_LLM_PRIMARY_PROVIDER`: provider primario de texto, normalmente `minimax`.
-- `YTS_LLM_FALLBACK_PROVIDER`: fallback de texto, normalmente `mock`.
+- `YTS_LLM_FALLBACK_PROVIDER`: fallback barato de texto, normalmente `deepseek`.
+- `YTS_LLM_REPAIR_PROVIDER`: provider forte para repair de roteiro, normalmente `qwen`.
+- `YTS_LLM_SCENE_PROVIDER`: provider forte para refazer cenas quando MiniMax falha ou o gate reprova, normalmente `qwen`.
 - `YTS_MINIMAX_TEXT_API_KEY`: chave para pauta, roteiro, cenas e auditoria.
+- `YTS_DEEPSEEK_API_KEY`: chave do fallback barato OpenAI-compatible.
+- `YTS_QWEN_API_KEY`: chave do provider Qwen OpenAI-compatible para repair e cenas.
 - `YTS_MINIMAX_IMAGE_API_KEY`: chave para geracao de imagens.
 - `YTS_PEXELS_API_KEY` e `YTS_PIXABAY_API_KEY`: fallback de stock.
+
+## Pipelines
+
+`JobOrchestrator` coordena jobs, retries, leases, worker e eventos. A execucao de steps pesados fica em `app/pipelines/`:
+
+- `ScriptPipeline`: etapa `script`.
+- `ScenePipeline`: etapa `scene_plan`.
+- `AssetPipeline`: etapa `asset_generation`.
+- `RenderPipeline`: etapa `render`.
+- `MonetizationPipeline`: etapa `monetization_readiness_gate`.
+
+O plano de modularizacao e proximos cortes esta em `docs/modularization-plan.md`.
 
 ## Qualidade
 
@@ -208,4 +224,3 @@ Para mudar banco/modelos:
 - `app/models.py`: schema SQLAlchemy.
 - `app/db.py`: engine/session.
 - `scripts/migrate_sqlite_to_postgres.py`: migracao auxiliar quando aplicavel.
-

@@ -86,6 +86,22 @@ GENERIC_HOOK_OPENING_PATTERN = re.compile(
     r"^\s*(?:você\s+sabia|voce\s+sabia|já\s+imaginou|ja\s+imaginou|nesse\s+v[ií]deo|neste\s+v[ií]deo)\b",
     re.IGNORECASE,
 )
+ACADEMIC_TITLE_PATTERN = re.compile(
+    r"^\s*(?:metabolismo|an[aá]lise|estudo|revis[aã]o|investiga[cç][aã]o|mecanismos?|efeitos?)\s+(?:de|do|da|dos|das|sobre|em)\b",
+    re.IGNORECASE,
+)
+VIRAL_TITLE_SIGNAL_PATTERN = re.compile(
+    r"\b(?:por que|porque|como|segredo|mist[eé]rio|parece|ningu[eé]m|quase|incr[ií]vel|estranho|imposs[ií]vel|pinta|muda|vira|esconde|revela)\b",
+    re.IGNORECASE,
+)
+REWATCH_LOOP_PATTERN = re.compile(
+    r"\b(?:replay|rever|ver de novo|v[eê] de novo|quando voc[eê] volta|no come[cç]o|primeir[ao] frase|primeir[ao] cena|cena inicial|aquela imagem|aquele detalhe|a pista)\b",
+    re.IGNORECASE,
+)
+GENERIC_LOOP_ENDING_PATTERN = re.compile(
+    r"\b(?:fecha o ciclo|agora tudo faz sentido|parece inevit[aá]vel)\b",
+    re.IGNORECASE,
+)
 
 OVERCONFIDENT_FACT_MARKERS = {
     "a torre está garantida",
@@ -171,6 +187,8 @@ class ScriptQualityGate:
             reasons.append("suspicious_glued_words")
         if GENERIC_HOOK_OPENING_PATTERN.search(str(script.get("hook") or "")) or GENERIC_HOOK_OPENING_PATTERN.search(full_narration):
             reasons.append("generic_hook_opening")
+        if GENERIC_LOOP_ENDING_PATTERN.search(str(script.get("ending") or "")):
+            reasons.append("generic_loop_ending")
         fact_risk = self._fact_risk_report(script)
         if self._has_overconfident_or_unsupported_factual_claims(combined_text):
             reasons.append("overconfident_or_unsupported_factual_claim")
@@ -200,6 +218,8 @@ class ScriptQualityGate:
             reasons.append("sentence_too_long")
         if not title.strip():
             reasons.append("missing_title")
+        elif self._has_academic_title_tone(title):
+            reasons.append("academic_title_tone")
 
         qa_metrics = dict(script.get("qa_metrics") or {})
         numeric_checks = {
@@ -334,15 +354,20 @@ class ScriptQualityGate:
         shared_title = sorted(title_tokens & ending_tokens)
         opening_overlap = len(shared_opening) / max(len(opening_tokens), 1)
         title_overlap = len(shared_title) / max(len(title_tokens), 1)
-        closure_strength = round(max(opening_overlap, title_overlap), 3)
+        rewatch_loop_signal = bool(REWATCH_LOOP_PATTERN.search(ending))
+        closure_strength = round(max(opening_overlap, title_overlap, 0.35 if rewatch_loop_signal else 0.0), 3)
         return {
-            "connected_to_opening": bool(shared_opening or shared_title),
+            "connected_to_opening": bool(shared_opening or shared_title or rewatch_loop_signal),
             "closure_strength": closure_strength,
             "shared_opening_tokens": shared_opening[:6],
             "shared_title_tokens": shared_title[:6],
+            "rewatch_loop_signal": rewatch_loop_signal,
             "opening_salient_token_count": len(opening_tokens),
             "ending_salient_token_count": len(ending_tokens),
         }
+
+    def _has_academic_title_tone(self, title: str) -> bool:
+        return bool(ACADEMIC_TITLE_PATTERN.search(title)) and not bool(VIRAL_TITLE_SIGNAL_PATTERN.search(title))
 
     def _salient_tokens(self, text: str) -> set[str]:
         return {

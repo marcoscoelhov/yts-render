@@ -23,6 +23,7 @@ os.environ.setdefault("YTS_USE_MOCK_PROVIDERS", "true")
 
 import app.main as main_module  # noqa: E402
 import app.orchestrator as orchestrator_module  # noqa: E402
+import app.pipelines.script_pipeline as script_pipeline_module  # noqa: E402
 from app.compliance.review import build_human_review_checklist  # noqa: E402
 from app.db import SessionLocal, engine, init_db  # noqa: E402
 from app.editorial.retention import EDITORIAL_PROMPT_VERSION, build_retention_map  # noqa: E402
@@ -30,7 +31,7 @@ from app.editorial.repetition import build_channel_repetition_report  # noqa: E4
 from app.main import app, artifact_url  # noqa: E402
 from app.models import BackgroundMusicAsset, Job, NarrationAsset, PerformanceMetric, RenderOutput, SceneAsset, Script, SubtitleTrack, TopicPlan, TopicRegistry, TopicRequest  # noqa: E402
 from app.orchestrator import JobOrchestrator, RecoverableStepError, StepDefinition, normalize_script_metrics, orchestrator  # noqa: E402
-from app.providers import LLMProviderRegistry, LocalSpeechFallbackProvider, MiniMaxBackgroundMusicProvider, MinimaxCreativeProvider, MinimaxImageProvider, MockCreativeProvider, ProviderFailure, ResilientCreativeProvider, ResilientMusicProvider  # noqa: E402
+from app.providers import DeepSeekCreativeProvider, LLMProviderRegistry, LocalSpeechFallbackProvider, MiniMaxBackgroundMusicProvider, MinimaxCreativeProvider, MinimaxImageProvider, MockCreativeProvider, ProviderFailure, QwenCreativeProvider, ResilientCreativeProvider, ResilientMusicProvider  # noqa: E402
 from app.quality.asset_gate import AssetGate  # noqa: E402
 from app.quality.render_gate import RenderGate  # noqa: E402
 from app.quality.scene_gate import ScenePlanGate  # noqa: E402
@@ -340,6 +341,124 @@ def test_llm_registry_uses_mock_when_mock_providers_enabled() -> None:
     registry = LLMProviderRegistry()
     assert registry.primary_provider().provider_name == "mock"
     assert registry.fallback_provider().provider_name == "mock"
+    assert registry.repair_provider().provider_name == "mock"
+    assert registry.scene_provider().provider_name == "mock"
+
+
+def test_deepseek_provider_uses_v4_flash_openai_compatible_client(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    settings = SimpleNamespace(
+        deepseek_api_key="deepseek-key",
+        deepseek_base_url="https://api.deepseek.com",
+        deepseek_model="deepseek-v4-flash",
+        deepseek_timeout_sec=90,
+    )
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=json.dumps(
+                                {
+                                    "title": "A comida que pinta flamingos",
+                                    "hook": "A pena rosa começa no prato.",
+                                    "body_beats": ["Pigmentos da dieta podem influenciar a cor."],
+                                    "ending": "No replay, a primeira frase já mostrava a tinta.",
+                                    "cta": None,
+                                    "full_narration": "A pena rosa começa no prato. Pigmentos da dieta podem influenciar a cor. No replay, a primeira frase já mostrava a tinta.",
+                                    "estimated_duration_sec": 30,
+                                    "key_facts": ["Pigmentos da dieta podem influenciar a cor."],
+                                    "source_fact_ids": [],
+                                    "token_count": 24,
+                                    "language": "pt-BR",
+                                    "retention_map": {},
+                                    "visual_opening": {},
+                                    "qa_metrics": {},
+                                    "prompt_version": EDITORIAL_PROMPT_VERSION,
+                                }
+                            )
+                        )
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("app.providers.get_settings", lambda: settings)
+    monkeypatch.setattr("app.providers.OpenAI", FakeOpenAI)
+
+    provider = DeepSeekCreativeProvider()
+    result = provider.repair_script({"title": "x"}, ["weak_loop_closure"], {"canonical_topic": "flamingos"})
+
+    assert captured["client_kwargs"]["api_key"] == "deepseek-key"
+    assert captured["client_kwargs"]["base_url"] == "https://api.deepseek.com"
+    assert captured["model"] == "deepseek-v4-flash"
+    assert result["qa_metrics"]["repair_provider"] == "deepseek"
+
+
+def test_qwen_provider_uses_max_openai_compatible_client(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    settings = SimpleNamespace(
+        qwen_api_key="qwen-key",
+        qwen_base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        qwen_model="qwen3.6-max-preview",
+        qwen_timeout_sec=90,
+    )
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content=json.dumps(
+                                {
+                                    "title": "A comida que pinta flamingos",
+                                    "hook": "A pena rosa começa no prato.",
+                                    "body_beats": ["Pigmentos da dieta podem influenciar a cor."],
+                                    "ending": "No replay, a primeira frase já mostrava a tinta.",
+                                    "cta": None,
+                                    "full_narration": "A pena rosa começa no prato. Pigmentos da dieta podem influenciar a cor. No replay, a primeira frase já mostrava a tinta.",
+                                    "estimated_duration_sec": 30,
+                                    "key_facts": ["Pigmentos da dieta podem influenciar a cor."],
+                                    "source_fact_ids": [],
+                                    "token_count": 24,
+                                    "language": "pt-BR",
+                                    "retention_map": {},
+                                    "visual_opening": {},
+                                    "qa_metrics": {},
+                                    "prompt_version": EDITORIAL_PROMPT_VERSION,
+                                }
+                            )
+                        )
+                    )
+                ]
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+            self.chat = SimpleNamespace(completions=FakeCompletions())
+
+    monkeypatch.setattr("app.providers.get_settings", lambda: settings)
+    monkeypatch.setattr("app.providers.OpenAI", FakeOpenAI)
+
+    provider = QwenCreativeProvider()
+    result = provider.generate_script({"canonical_topic": "flamingos", "angle": "cor pela alimentação"})
+
+    assert captured["client_kwargs"]["api_key"] == "qwen-key"
+    assert captured["client_kwargs"]["base_url"] == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    assert captured["model"] == "qwen3.6-max-preview"
+    assert result["qa_metrics"]["source_provider"] == "qwen"
 
 
 def test_scene_plan_gate_rejects_generic_prompt_without_no_text_constraint() -> None:
@@ -472,6 +591,12 @@ def test_script_metrics_normalize_zero_to_ten_provider_scores() -> None:
     assert metrics["repetition_score"] == 0.2
     assert metrics["ending_strength_score"] == 0.8
     assert metrics["avg_words_per_sentence"] == 12.5
+
+
+def test_script_metrics_treat_repetition_one_as_low_provider_score() -> None:
+    metrics = normalize_script_metrics({"repetition_score": 1})
+
+    assert metrics["repetition_score"] == 0.1
 
 
 def test_resilient_creative_provider_repair_script_falls_back_on_timeout() -> None:
@@ -1032,6 +1157,51 @@ def test_process_job_returns_persisted_cancelled_status_after_step_abort(monkeyp
         job = session.get(Job, job_id)
         assert job is not None
         assert job.status == "script_quality_failed"
+
+
+def test_orchestrator_routes_domain_steps_to_pipeline_modules() -> None:
+    test_orchestrator = JobOrchestrator()
+    handlers = {step.name: step.handler for step in test_orchestrator._steps()}
+
+    assert handlers["script"].__self__ is test_orchestrator.script_pipeline
+    assert handlers["scene_plan"].__self__ is test_orchestrator.scene_pipeline
+    assert handlers["asset_generation"].__self__ is test_orchestrator.asset_pipeline
+    assert handlers["tts"].__self__ is test_orchestrator.asset_pipeline
+    assert handlers["subtitle_alignment"].__self__ is test_orchestrator.asset_pipeline
+    assert handlers["background_music"].__self__ is test_orchestrator.asset_pipeline
+    assert handlers["render"].__self__ is test_orchestrator.render_pipeline
+    assert handlers["monetization_readiness_gate"].__self__ is test_orchestrator.monetization_pipeline
+    assert handlers["publish_to_review_hub"].__self__ is test_orchestrator.monetization_pipeline
+
+
+def test_pipelines_use_explicit_base_dependencies_and_asset_helpers() -> None:
+    test_orchestrator = JobOrchestrator()
+
+    assert "__getattr__" not in test_orchestrator.asset_pipeline.__class__.__mro__[1].__dict__
+    assert "_build_fact_pack" not in test_orchestrator.script_pipeline.__class__.__mro__[1].__dict__
+    assert "_normalize_scene_semantics" not in test_orchestrator.scene_pipeline.__class__.__mro__[1].__dict__
+    assert test_orchestrator.script_pipeline._build_fact_pack.__self__ is test_orchestrator.script_pipeline
+    assert test_orchestrator.script_pipeline._validate_or_repair_script.__self__ is test_orchestrator.script_pipeline
+    assert test_orchestrator.script_pipeline._persist_script_generation_debug.__self__ is test_orchestrator.script_pipeline
+    assert test_orchestrator.scene_pipeline.normalize_scene_token_coverage.__self__ is test_orchestrator.scene_pipeline
+    assert test_orchestrator.scene_pipeline.normalize_scene_semantics.__self__ is test_orchestrator.scene_pipeline
+    assert test_orchestrator.scene_pipeline.fallback_query_variants.__self__ is test_orchestrator.scene_pipeline
+    assert test_orchestrator.asset_pipeline._fit_tts_duration.__self__ is test_orchestrator.asset_pipeline
+    assert test_orchestrator.asset_pipeline._mix_background_music_with_repair.__self__ is test_orchestrator.asset_pipeline
+    assert test_orchestrator.asset_pipeline._split_subtitle_cue.__self__ is test_orchestrator.asset_pipeline
+    assert test_orchestrator.asset_pipeline._generate_primary_asset.__self__ is test_orchestrator.asset_pipeline
+    assert test_orchestrator.asset_pipeline.image_assets.pipeline is test_orchestrator.asset_pipeline
+    assert test_orchestrator.asset_pipeline.tts.pipeline is test_orchestrator.asset_pipeline
+    assert test_orchestrator.asset_pipeline.subtitles.pipeline is test_orchestrator.asset_pipeline
+    assert test_orchestrator.asset_pipeline.music.pipeline is test_orchestrator.asset_pipeline
+    assert test_orchestrator.render_pipeline.render_with_repair.__self__ is test_orchestrator.render_pipeline
+    assert test_orchestrator.render_pipeline.mutate_render_command_for_repair.__self__ is test_orchestrator.render_pipeline
+    assert test_orchestrator.monetization_pipeline.step_publish.__self__ is test_orchestrator.monetization_pipeline
+    assert test_orchestrator.monetization_pipeline.build_monetization_report.__self__ is test_orchestrator.monetization_pipeline
+    assert test_orchestrator.monetization_pipeline.build_rights_registry.__self__ is test_orchestrator.monetization_pipeline
+    assert test_orchestrator.monetization_pipeline.build_fact_claims_report.__self__ is test_orchestrator.monetization_pipeline
+    assert test_orchestrator.monetization_pipeline.build_publish_package.__self__ is test_orchestrator.monetization_pipeline
+    assert test_orchestrator.monetization_pipeline.provider_publish_audit.__self__ is test_orchestrator.monetization_pipeline
 
 
 def test_process_job_returns_persisted_cancelled_status_after_shutdown(monkeypatch) -> None:
@@ -1687,6 +1857,50 @@ def test_script_gate_rejects_ending_without_loop_connection() -> None:
     assert result.metrics["loop_gate"]["connected_to_opening"] is False
 
 
+def test_script_gate_accepts_rewatch_loop_without_exact_token_overlap() -> None:
+    script = _base_script(
+        "A pena rosa começa no prato. "
+        "O pigmento entra pela comida antes de aparecer na cor. "
+        "No replay, aquela refeição vira tinta."
+    )
+    script["title"] = "A comida que pinta flamingos de rosa"
+    script["hook"] = "A pena rosa começa no prato."
+    script["ending"] = "No replay, aquela refeição vira tinta."
+
+    result = ScriptQualityGate().validate(script, target_duration_sec=35)
+
+    assert result.passed
+    assert result.metrics["loop_gate"]["rewatch_loop_signal"] is True
+
+
+def test_script_gate_rejects_obvious_academic_title_tone() -> None:
+    script = _base_script(
+        "A pena rosa começa no prato. "
+        "O pigmento entra pela comida antes de aparecer na cor. "
+        "A pena rosa só parece mágica até você olhar para o prato."
+    )
+    script["title"] = "Metabolismo de carotenoides em aves aquáticas"
+
+    result = ScriptQualityGate().validate(script, target_duration_sec=35)
+
+    assert not result.passed
+    assert "academic_title_tone" in result.reasons
+
+
+def test_script_gate_rejects_generic_loop_ending_template() -> None:
+    script = _base_script(
+        "Polvos mudam de cor em segundos. "
+        "A pele responde ao ambiente ao redor. "
+        "No fim, polvos mudam de cor e agora tudo faz sentido."
+    )
+    script["ending"] = "No fim, polvos mudam de cor e agora tudo faz sentido."
+
+    result = ScriptQualityGate().validate(script, target_duration_sec=35)
+
+    assert not result.passed
+    assert "generic_loop_ending" in result.reasons
+
+
 def test_validate_or_repair_script_recovers_simple_loop_closure(monkeypatch) -> None:
     original_repair_attempts = orchestrator.settings.llm_script_repair_attempts
     monkeypatch.setattr(orchestrator.settings, "llm_script_repair_attempts", 1)
@@ -1706,7 +1920,8 @@ def test_validate_or_repair_script_recovers_simple_loop_closure(monkeypatch) -> 
 
     assert metrics["script_quality_gate_pass"] is True
     assert metrics["loop_gate"]["connected_to_opening"] is True
-    assert "polvos" in repaired["ending"].lower()
+    assert metrics["loop_gate"]["rewatch_loop_signal"] is True
+    assert "fecha o ciclo" not in repaired["ending"].lower()
 
 
 def test_validate_or_repair_script_rewrites_weak_fact_pack_conservatively(monkeypatch) -> None:
@@ -1730,16 +1945,20 @@ def test_validate_or_repair_script_rewrites_weak_fact_pack_conservatively(monkey
 def test_full_pipeline_with_sound_design_persists_rights_and_artifacts(monkeypatch) -> None:
     monkeypatch.setattr(orchestrator.settings, "sound_design_enabled", True)
     monkeypatch.setattr(orchestrator.settings, "sound_design_gain_db", -16.0)
+    orchestrator.stop_worker()
+    orchestrator.stop_event.clear()
     client = TestClient(app)
-
-    response = client.post(
-        "/jobs",
-        data={"seed_theme": "polvos", "target_duration_sec": 35, "tone": "intrigante_direto", "cta_style": "none"},
-        follow_redirects=False,
-    )
-    assert response.status_code == 303
-    job_id = response.headers["location"].split("/")[-1]
-    wait_for_any_status(job_id, {"monetization_review", "blocked_for_monetization"})
+    try:
+        response = client.post(
+            "/jobs",
+            data={"seed_theme": "polvos", "target_duration_sec": 35, "tone": "intrigante_direto", "cta_style": "none"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        job_id = response.headers["location"].split("/")[-1]
+        assert orchestrator.process_job(job_id) in {"monetization_review", "blocked_for_monetization"}
+    finally:
+        orchestrator.start_worker()
     with SessionLocal() as session:
         background_music = session.query(BackgroundMusicAsset).filter_by(job_id=job_id).one()
         assert background_music.provider_metadata["sound_design"]["enabled"] is True
@@ -1766,11 +1985,39 @@ def test_script_postprocess_removes_structured_body_beat_leak() -> None:
     assert "A cor vem dos carotenoides." in processed["full_narration"]
 
 
-def test_fact_result_relevance_rejects_fuzzy_wrong_wikipedia_hit() -> None:
+def test_script_postprocess_repairs_common_provider_text_issues() -> None:
+    script = _base_script(
+        "Flamengos brancos viram roses. "
+        "A cor vem deartemia e algas, sem nenhuma trace de rosa. "
+        "Sem supplementação, o tom muda."
+    )
+    script["title"] = "Flamengos viram roses pela alimentacao"
+    script["hook"] = "Flamengos brancos viram roses."
+    script["ending"] = "Sem supplementação, o tom muda."
+
+    processed = orchestrator._postprocess_script_for_quality(script, {"fact_pack": {"status": "limited", "facts": []}}, [])
+    combined = " ".join([processed["title"], processed["hook"], processed["ending"], processed["full_narration"]])
+
+    assert "Flamengos" not in combined
+    assert "roses" not in combined
+    assert "deartemia" not in combined
+    assert "supplementação" not in combined
+    assert "alimentação" in processed["title"]
+
+
+def test_fact_result_relevance_rejects_fuzzy_wrong_search_hit() -> None:
     assert not orchestrator._fact_result_is_relevant(
         "polvo muda",
         "Povo munda",
         "O povo munda é um grupo étnico do subcontinente indiano.",
+    )
+
+
+def test_fact_result_relevance_rejects_single_token_only_in_abstract() -> None:
+    assert not orchestrator._fact_result_is_relevant(
+        "Modena",
+        "Preferred Reporting Items for Systematic Reviews and Meta-Analyses",
+        "The author affiliation mentions Università di Modena e Reggio Emilia.",
     )
 
 
@@ -1781,26 +2028,31 @@ def test_weak_fact_query_rejects_generic_food_cause_terms() -> None:
 def test_fact_query_concepts_include_octopus_camouflage_terms() -> None:
     concepts = orchestrator._fact_query_concepts("camuflagem dos polvos usando cromatóforos")
 
-    assert "cromatóforos" in concepts
-    assert "iridóforos" in concepts
+    assert "chromatophores" in concepts
+    assert "iridophores" in concepts
+
+
+def test_fact_query_concepts_do_not_treat_coracoes_as_color() -> None:
+    concepts = orchestrator._fact_query_concepts("polvo com tres corações e sangue azul")
+
+    assert "plumage pigmentation" not in concepts
+    assert "carotenoid pigmentation" not in concepts
 
 
 def test_fact_query_concepts_include_flamingo_pigment_terms() -> None:
     concepts = orchestrator._fact_query_concepts("flamingos ficam rosas")
 
-    assert "carotenoides" in concepts
-    assert "pigmentos" in concepts
+    assert "carotenoid pigmentation" in concepts
+    assert "plumage pigmentation" in concepts
 
 
-def test_wikipedia_fact_pack_skips_broken_first_candidate(monkeypatch) -> None:
+def test_scientific_article_fact_pack_skips_result_without_abstract(monkeypatch) -> None:
     class FakeResponse:
-        def __init__(self, payload: object, *, should_raise: bool = False):
+        def __init__(self, payload: object):
             self.payload = payload
-            self.should_raise = should_raise
 
         def raise_for_status(self) -> None:
-            if self.should_raise:
-                raise RuntimeError("summary failed")
+            pass
 
         def json(self) -> object:
             return self.payload
@@ -1816,27 +2068,49 @@ def test_wikipedia_fact_pack_skips_broken_first_candidate(monkeypatch) -> None:
             return False
 
         def get(self, url: str, **kwargs):
-            if url.endswith("/w/api.php"):
-                return FakeResponse(["flamingo", ["Broken Title", "Flamingo"]])
-            if url.endswith("Broken_Title"):
-                return FakeResponse({}, should_raise=True)
-            if url.endswith("Flamingo"):
-                return FakeResponse(
-                    {
-                        "title": "Flamingo",
-                        "extract": "Flamingos are birds with pink color related to carotenoid pigments from food.",
-                        "content_urls": {"desktop": {"page": "https://example.test/flamingo"}},
-                    }
-                )
+            assert url == "https://api.openalex.org/works"
+            assert kwargs["params"]["filter"] == "type:article,has_abstract:true"
+            return FakeResponse(
+                {
+                    "results": [
+                        {"display_name": "Broken article", "abstract_inverted_index": None},
+                        {
+                            "display_name": "Carotenoid pigmentation in flamingos",
+                            "abstract_inverted_index": {
+                                "Flamingos": [0],
+                                "show": [1],
+                                "pink": [2],
+                                "color": [3],
+                                "because": [4],
+                                "carotenoid": [5],
+                                "pigments": [6],
+                                "from": [7],
+                                "food": [8],
+                                "accumulate": [9],
+                                "in": [10],
+                                "their": [11],
+                                "feathers.": [12],
+                            },
+                            "doi": "https://doi.org/10.0000/flamingo",
+                            "publication_year": 2024,
+                            "primary_location": {
+                                "landing_page_url": "https://example.test/flamingo-paper",
+                                "source": {"display_name": "Journal of Bird Color"},
+                            },
+                        },
+                    ]
+                }
+            )
             raise AssertionError(url)
 
-    monkeypatch.setattr(orchestrator_module.httpx, "Client", FakeClient)
+    monkeypatch.setattr(script_pipeline_module.httpx, "Client", FakeClient)
 
-    pack = orchestrator._wikipedia_fact_pack("flamingo carotenoid")
+    pack = orchestrator._scientific_article_fact_pack("flamingo carotenoid")
 
     assert pack["status"] == "verified"
-    assert pack["topic_title"] == "Flamingo"
-    assert pack["sources"][0]["url"] == "https://example.test/flamingo"
+    assert pack["topic_title"] == "Carotenoid pigmentation in flamingos"
+    assert pack["sources"][0]["url"] == "https://doi.org/10.0000/flamingo"
+    assert pack["sources"][0]["provider"] == "openalex"
 
 
 def test_fact_pack_consistency_requires_source_fact_ids_when_verified() -> None:
@@ -2179,10 +2453,10 @@ def test_fact_pack_query_generation_extracts_entity_and_concepts() -> None:
     normalized = [query.lower() for query in queries]
 
     assert any(query == "flamingos" for query in normalized)
-    assert any("flamingos carotenoides" == query for query in normalized)
+    assert any("flamingos carotenoid pigmentation" == query for query in normalized)
 
 
-def test_fact_query_priority_prefers_short_entity_before_long_phrase() -> None:
+def test_fact_query_priority_prefers_conceptual_entity_query_before_broad_entity() -> None:
     queries = [
         "Polvos: curiosidades científicas sobre o cefalópode mais inteligente do oceano",
         "polvos",
@@ -2191,8 +2465,34 @@ def test_fact_query_priority_prefers_short_entity_before_long_phrase() -> None:
 
     ordered = sorted(queries, key=orchestrator._fact_query_priority)
 
-    assert ordered[0] == "polvos"
-    assert ordered.index("polvo corações pigmentos") > 0
+    assert ordered[0] == "polvo corações pigmentos"
+    assert ordered.index("polvos") > ordered.index("polvo corações pigmentos")
+
+
+def test_fact_pack_query_generation_uses_structured_topic_fields_without_dict_keys() -> None:
+    request = SimpleNamespace(seed_theme="flamingos ficam rosas pela alimentação")
+    topic_plan = SimpleNamespace(
+        canonical_topic="Por que flamingos são cor-de-rosa pela alimentação",
+        angle="surpresa científica visual",
+        hook_promise="Descubra como flamingos nascem brancos e ficam cor-de-rosa apenas comendo",
+        title_candidates=["{'text': 'Como flamingos ficam cor-de-rosa? A resposta está no cardápio', 'characters': 59}"],
+        entities=["{'name': 'Flamingo', 'type': 'espécie_animal'}", "{'name': 'Astaxantina', 'type': 'pigmento_carotenoide'}"],
+        search_terms=["flamingo cor rosa alimentação", "carotenoides flamingos"],
+    )
+
+    queries = []
+    seen = set()
+    for query in orchestrator._fact_pack_queries(request, topic_plan):
+        normalized = " ".join(str(query or "").split())
+        if normalized and normalized.lower() not in seen and not orchestrator._is_weak_fact_query(normalized):
+            queries.append(normalized)
+            seen.add(normalized.lower())
+
+    top_queries = sorted(queries, key=orchestrator._fact_query_priority)[:8]
+
+    assert "name diet" not in top_queries
+    assert "text diet" not in top_queries
+    assert any("flamingo" in query.lower() for query in top_queries)
 
 
 def test_fact_query_removes_generic_viral_opening() -> None:
@@ -2204,6 +2504,9 @@ def test_fact_query_removes_generic_viral_opening() -> None:
 
 def test_weak_fact_query_filters_generic_single_word_angle() -> None:
     assert orchestrator._is_weak_fact_query("auto") is True
+    assert orchestrator._is_weak_fact_query("descubra dieta diet") is True
+    assert orchestrator._is_weak_fact_query("1325") is True
+    assert orchestrator._is_weak_fact_query("duas cidades") is True
     assert orchestrator._is_weak_fact_query("polvos") is False
 
 

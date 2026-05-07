@@ -39,3 +39,6 @@ Recent history follows Conventional Commit style such as `feat: gate publish rea
 
 ## Configuration & Data Notes
 Copy `.env.example` to `.env` for local setup. Keep secrets, generated artifacts, SQLite files, and provider outputs out of commits. If you change settings or provider behavior, update `README.md` or the relevant file in `docs/`.
+
+## Source & Fact-Checking Policy
+Do not use Wikipedia as a reliable factual source for generated scripts, especially for scientific, medical, engineering, historical, or technical claims. Prefer scientific articles, scholarly indexes, primary sources, official documentation, or institutional sources. If no reliable source is retrieved, keep the fact pack limited and force conservative wording instead of filling gaps with Wikipedia.

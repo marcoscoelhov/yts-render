@@ -31,7 +31,9 @@ class Settings(BaseSettings):
     use_mock_providers: bool = False
     strict_minimax_validation: bool = False
     llm_primary_provider: str = "minimax"
-    llm_fallback_provider: str = "mock"
+    llm_fallback_provider: str = "deepseek"
+    llm_repair_provider: str = "qwen"
+    llm_scene_provider: str = "qwen"
     llm_enable_fallback: bool = True
     llm_script_repair_attempts: int = 1
     llm_topic_repair_attempts: int = 2
@@ -65,6 +67,14 @@ class Settings(BaseSettings):
     minimax_text_timeout_sec: float = 150.0
     minimax_music_timeout_sec: float = 240.0
     minimax_scene_plan_timeout_sec: float = 90.0
+    deepseek_api_key: str | None = None
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-v4-flash"
+    deepseek_timeout_sec: float = 90.0
+    qwen_api_key: str | None = None
+    qwen_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    qwen_model: str = "qwen3.6-max-preview"
+    qwen_timeout_sec: float = 90.0
     pexels_api_key: str | None = None
     pixabay_api_key: str | None = None
     tailscale_hostname: str = "shorts-hub"

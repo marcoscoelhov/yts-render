@@ -7,10 +7,12 @@ import colorsys
 import concurrent.futures
 import json
 import math
+import queue
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import wave
 import binascii
@@ -296,12 +298,14 @@ class MockCreativeProvider:
 
 class MinimaxCreativeProvider:
     provider_name = "minimax"
+    failure_provider_name = "minimax_text"
+    model_name = "MiniMax-M2.7"
 
     def __init__(self) -> None:
         settings = get_settings()
         api_key = settings.resolved_minimax_text_api_key
         if not api_key:
-            raise ProviderFailure("minimax_text", "missing minimax text api key")
+            raise ProviderFailure(self.failure_provider_name, "missing minimax text api key")
         self.timeout_sec = settings.minimax_text_timeout_sec
         self.client = OpenAI(
             api_key=api_key,
@@ -344,9 +348,9 @@ Sem markdown.
 """
         payload = self._json_completion(prompt)
         if not isinstance(payload, dict):
-            raise ProviderFailure("minimax_text", "topic planner returned non-object json")
+            raise ProviderFailure(self.failure_provider_name, "topic planner returned non-object json")
         payload = self._normalize_topic_payload(payload, seed_theme)
-        payload["quality_metrics"] = {**payload.get("quality_metrics", {}), "source_provider": "minimax"}
+        payload["quality_metrics"] = {**payload.get("quality_metrics", {}), "source_provider": self.provider_name}
         return payload
 
     def _normalize_topic_payload(self, payload: dict[str, Any], seed_theme: str) -> dict[str, Any]:
@@ -432,12 +436,17 @@ Regras:
 - use estrutura agressiva de retenção: hook de choque, loop aberto, escalada de fatos, payoff atrasado e fechamento memoravel
 - cada frase deve criar uma pergunta mental ou tensão para a frase seguinte
 - não entregue a explicação completa no primeiro beat; plante o mistério e pague no último terço
+- fatos científicos são matéria-prima, não estilo: transforme termos acadêmicos em consequência visual, tensão ou surpresa concreta
+- não escreva como aula, artigo, definição enciclopédica ou professor explicando; escreva como Short de curiosidade com precisão factual
+- o final deve criar loop de reassistência: ele precisa fazer o primeiro frame ou a primeira frase ganhar novo significado quando o usuário vê de novo
+- não use frase meta como "fecha o ciclo", "agora tudo faz sentido" ou "essa curiosidade muda como você olha" no ending
 - transforme fatos em consequência visual/mental, evitando tom de Wikipedia
 - todos os campos textuais do JSON devem estar em portugues do Brasil (pt-BR)
 - nao use chines, ingles, espanhol ou outro idioma em title, hook, body_beats, ending, cta, full_narration, key_facts ou valores textuais de qa_metrics
 - excecoes permitidas: nomes proprios, nomes cientificos, siglas, marcas, titulos de fontes e URLs
 - key_facts deve ser uma lista em pt-BR, sem trechos em outros alfabetos ou idiomas
 - title deve ser otimizado para SEO e copywriting viral, com promessa especifica e palavra-chave cedo quando natural
+- title não pode parecer título de artigo científico; evite "metabolismo de", "análise de", "estudo sobre", "mecanismos de" e formule como promessa visual ou surpresa concreta
 - hook deve abrir com choque, contraste ou tensão imediata, sem introducao generica
 - proibido começar hook ou full_narration com "você sabia", "voce sabia", "já imaginou", "ja imaginou", "nesse vídeo", "nesse video" ou fórmulas genéricas equivalentes
 - comece direto por contraste, consequência, conflito ou fato específico
@@ -450,7 +459,7 @@ Regras:
 - se fact_pack.status não for "verified" ou facts estiver vazio, source_fact_ids deve ser [] e o roteiro deve evitar precisão factual forte sem fonte
 - não cite fontes no texto narrado; use os fatos como bastidor e mantenha retenção viral
 - key_facts deve listar apenas fatos que o roteiro realmente usa, sem exagero e sem detalhe técnico duvidoso
-- ending deve fechar o loop mental do hook e recontextualizar o tema com uma frase memoravel
+- ending deve fechar o loop mental do hook e recontextualizar o tema com uma frase memoravel que aponte de volta para o começo sem soar repetitiva
 - se cta_style for "none", cta deve ser null e full_narration não deve incluir pedido de inscrição, like, comentário, compartilhamento ou ativar sininho
 - mantenha o tom selecionado na Entrada JSON, sem exagerar sensacionalismo
 - se a Entrada JSON indicar titulo completo do usuario, preserve a promessa central e refine a formulacao
@@ -460,7 +469,7 @@ Regras:
 - QA deve incluir hook_score, clarity_score, information_density_score, repetition_score, ending_strength_score, estimated_duration_sec, avg_words_per_sentence, max_words_single_sentence, words_per_second, script_gate_pass, editorial_prompt_version
 """
         payload = self._json_completion(prompt)
-        payload["qa_metrics"] = {**payload.get("qa_metrics", {}), "source_provider": "minimax"}
+        payload["qa_metrics"] = {**payload.get("qa_metrics", {}), "source_provider": self.provider_name}
         return payload
 
     def repair_script(self, script: dict[str, Any], gate_reasons: list[str], topic_plan: dict[str, Any]) -> dict[str, Any]:
@@ -476,6 +485,9 @@ title, hook, body_beats, ending, cta, full_narration, estimated_duration_sec, ke
 Regras obrigatórias:
 - mantenha prompt_version="{EDITORIAL_PROMPT_VERSION}" e preserve/atualize retention_map e visual_opening
 - se os motivos incluírem weak_loop_closure ou ending_not_connected_to_hook, corrija o bloco loop_close sem criar final genérico repetitivo
+- o novo ending deve criar loop de reassistência: o início precisa ganhar novo significado no replay
+- não use frase meta como "fecha o ciclo", "agora tudo faz sentido" ou "essa curiosidade muda como você olha"
+- preserve tom viral mesmo quando usar fatos científicos; não transforme o roteiro em aula ou resumo acadêmico
 - todos os campos textuais devem estar em portugues do Brasil (pt-BR)
 - remova qualquer palavra, frase ou expressão em ingles, espanhol, chines ou outro idioma
 - remova qualquer SSML, HTML, XML, tags, entidades ou markup
@@ -499,8 +511,8 @@ Sem markdown.
         payload = self._json_completion(prompt)
         payload["qa_metrics"] = {
             **payload.get("qa_metrics", {}),
-            "source_provider": "minimax",
-            "repair_provider": "minimax",
+            "source_provider": self.provider_name,
+            "repair_provider": self.provider_name,
             "repair_reasons": gate_reasons,
         }
         return payload
@@ -521,7 +533,7 @@ Regras:
 Sem markdown.
 """
         audit = self._json_completion(prompt)
-        audit["provider"] = "minimax"
+        audit["provider"] = self.provider_name
         return audit
 
     def plan_scenes(self, script: dict[str, Any], target_scene_count: int) -> list[dict[str, Any]]:
@@ -564,13 +576,13 @@ Regras obrigatorias para image_prompt:
 """
         payload = self._json_completion(prompt)
         if not isinstance(payload, list):
-            raise ProviderFailure("minimax_text", "scene planner returned non-list json")
+            raise ProviderFailure(self.failure_provider_name, "scene planner returned non-list json")
         return payload
 
     def _json_completion(self, prompt: str) -> Any:
         try:
             response = self.client.chat.completions.create(
-                model="MiniMax-M2.7",
+                model=self.model_name,
                 messages=[
                     {"role": "system", "content": "Return valid JSON only. No markdown fences."},
                     {"role": "user", "content": prompt},
@@ -578,10 +590,10 @@ Regras obrigatorias para image_prompt:
                 timeout=self.timeout_sec,
             )
         except Exception as exc:  # noqa: BLE001
-            raise ProviderFailure("minimax_text", str(exc)) from exc
+            raise ProviderFailure(self.failure_provider_name, str(exc)) from exc
         raw = (response.choices[0].message.content or "").strip()
         if not raw:
-            raise ProviderFailure("minimax_text", "empty text response")
+            raise ProviderFailure(self.failure_provider_name, "empty text response")
         raw = self._strip_think(raw)
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
@@ -594,7 +606,7 @@ Regras obrigatorias para image_prompt:
                     return json.loads(extracted)
                 except Exception:
                     pass
-            raise ProviderFailure("minimax_text", f"invalid json: {raw[:300]}") from exc
+            raise ProviderFailure(self.failure_provider_name, f"invalid json: {raw[:300]}") from exc
 
     def _extract_json(self, raw: str) -> str | None:
         candidates = []
@@ -620,12 +632,48 @@ Regras obrigatorias para image_prompt:
         return raw
 
 
+class DeepSeekCreativeProvider(MinimaxCreativeProvider):
+    provider_name = "deepseek"
+    failure_provider_name = "deepseek_text"
+
+    def __init__(self) -> None:
+        settings = get_settings()
+        if not settings.deepseek_api_key:
+            raise ProviderFailure(self.failure_provider_name, "missing deepseek api key")
+        self.timeout_sec = settings.deepseek_timeout_sec
+        self.model_name = settings.deepseek_model
+        self.client = OpenAI(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            timeout=self.timeout_sec,
+        )
+
+
+class QwenCreativeProvider(MinimaxCreativeProvider):
+    provider_name = "qwen"
+    failure_provider_name = "qwen_text"
+
+    def __init__(self) -> None:
+        settings = get_settings()
+        if not settings.qwen_api_key:
+            raise ProviderFailure(self.failure_provider_name, "missing qwen api key")
+        self.timeout_sec = settings.qwen_timeout_sec
+        self.model_name = settings.qwen_model
+        self.client = OpenAI(
+            api_key=settings.qwen_api_key,
+            base_url=settings.qwen_base_url,
+            timeout=self.timeout_sec,
+        )
+
+
 class ResilientCreativeProvider:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.registry = LLMProviderRegistry()
         self.primary = self.registry.primary_provider()
         self.fallback = self.registry.fallback_provider()
+        self.repair_provider = self.registry.repair_provider()
+        self.scene_provider = self.registry.scene_provider()
         self.strict_minimax_validation = self.settings.strict_minimax_validation
 
     def plan_topic(
@@ -728,7 +776,8 @@ class ResilientCreativeProvider:
             except concurrent.futures.TimeoutError:
                 if self.strict_minimax_validation:
                     raise ProviderFailure("minimax_text", f"scene planner timed out after {self.settings.minimax_scene_plan_timeout_sec}s")
-                scenes = self.fallback.plan_scenes(script, target_scene_count)
+                provider = getattr(self, "scene_provider", None) or self.fallback
+                scenes = provider.plan_scenes(script, target_scene_count)
                 for scene in scenes:
                     scene["provider_fallback_reason"] = (
                         f"minimax_text scene planner timed out after {self.settings.minimax_scene_plan_timeout_sec}s"
@@ -737,29 +786,34 @@ class ResilientCreativeProvider:
             except ProviderFailure as exc:
                 if self.strict_minimax_validation:
                     raise
-                scenes = self.fallback.plan_scenes(script, target_scene_count)
+                provider = getattr(self, "scene_provider", None) or self.fallback
+                scenes = provider.plan_scenes(script, target_scene_count)
                 for scene in scenes:
                     scene["provider_fallback_reason"] = str(exc)
                 return scenes
         if self.strict_minimax_validation:
             raise ProviderFailure("llm_registry", "strict minimax validation requires a primary llm provider")
-        return self.fallback.plan_scenes(script, target_scene_count)
+        provider = getattr(self, "scene_provider", None) or self.fallback
+        return provider.plan_scenes(script, target_scene_count)
 
     def repair_script(self, script: dict[str, Any], gate_reasons: list[str], topic_plan: dict[str, Any]) -> dict[str, Any]:
-        if self.primary:
+        provider = getattr(self, "repair_provider", None) or self.primary
+        if provider:
             try:
                 return self._run_primary_with_timeout(
-                    lambda: self.primary.repair_script(script, gate_reasons, topic_plan),
-                    timeout_sec=self.settings.minimax_script_timeout_sec,
+                    lambda: provider.repair_script(script, gate_reasons, topic_plan),
+                    timeout_sec=self._provider_timeout_sec(provider, self.settings.minimax_script_timeout_sec),
                 )
             except concurrent.futures.TimeoutError as exc:
                 if self.strict_minimax_validation:
-                    raise ProviderFailure("minimax_text", f"script repair timed out after {self.settings.minimax_script_timeout_sec}s") from exc
+                    timeout_sec = self._provider_timeout_sec(provider, self.settings.minimax_script_timeout_sec)
+                    raise ProviderFailure(getattr(provider, "failure_provider_name", "llm_provider"), f"script repair timed out after {timeout_sec}s") from exc
                 if self.settings.llm_enable_fallback and self.fallback:
                     payload = self.fallback.repair_script(script, [*gate_reasons, str(exc)], topic_plan)
                     payload.setdefault("qa_metrics", {})["fallback_used"] = True
+                    timeout_sec = self._provider_timeout_sec(provider, self.settings.minimax_script_timeout_sec)
                     payload["qa_metrics"]["fallback_reason"] = (
-                        f"minimax_text script repair timed out after {self.settings.minimax_script_timeout_sec}s"
+                        f"{getattr(provider, 'provider_name', 'llm')} script repair timed out after {timeout_sec}s"
                     )
                     payload["qa_metrics"]["fallback_stage"] = "script_repair_timeout"
                     return payload
@@ -787,15 +841,27 @@ class ResilientCreativeProvider:
         payload["qa_metrics"]["fallback_stage"] = "script_quality_gate"
         return payload
 
+    def _provider_timeout_sec(self, provider: LLMProvider, default_timeout_sec: float) -> float:
+        return float(getattr(provider, "timeout_sec", default_timeout_sec) or default_timeout_sec)
+
     def _run_primary_with_timeout(self, fn: Callable[[], Any], timeout_sec: float) -> Any:
-        executor: concurrent.futures.ThreadPoolExecutor | None = None
-        try:
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            future = executor.submit(fn)
-            return future.result(timeout=timeout_sec)
-        finally:
-            if executor is not None:
-                executor.shutdown(wait=False, cancel_futures=True)
+        result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+
+        def run() -> None:
+            try:
+                result_queue.put(("ok", fn()), block=False)
+            except BaseException as exc:  # noqa: BLE001
+                result_queue.put(("error", exc), block=False)
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(timeout=timeout_sec)
+        if thread.is_alive():
+            raise concurrent.futures.TimeoutError()
+        status, payload = result_queue.get_nowait()
+        if status == "error":
+            raise payload
+        return payload
 
 
 class LLMProviderRegistry:
@@ -808,8 +874,20 @@ class LLMProviderRegistry:
         return self._build_provider(self.settings.llm_primary_provider, required=True)
 
     def fallback_provider(self) -> LLMProvider:
+        if self.settings.use_mock_providers:
+            return MockCreativeProvider()
         provider = self._build_provider(self.settings.llm_fallback_provider, required=False)
         return provider or MockCreativeProvider()
+
+    def repair_provider(self) -> LLMProvider | None:
+        if self.settings.use_mock_providers:
+            return MockCreativeProvider()
+        return self._build_provider(self.settings.llm_repair_provider, required=False)
+
+    def scene_provider(self) -> LLMProvider | None:
+        if self.settings.use_mock_providers:
+            return MockCreativeProvider()
+        return self._build_provider(self.settings.llm_scene_provider, required=False)
 
     def _build_provider(self, name: str, required: bool) -> LLMProvider | None:
         normalized = (name or "").strip().lower()
@@ -819,8 +897,17 @@ class LLMProviderRegistry:
             return None
         if normalized in {"mock", "local"}:
             return MockCreativeProvider()
-        if normalized in {"minimax", "minimax_2_7", "minimax-m2.7"}:
-            return MinimaxCreativeProvider()
+        try:
+            if normalized in {"minimax", "minimax_2_7", "minimax-m2.7"}:
+                return MinimaxCreativeProvider()
+            if normalized in {"deepseek", "deepseek_v4_flash", "deepseek-v4-flash", "deepseek_v4"}:
+                return DeepSeekCreativeProvider()
+            if normalized in {"qwen", "qwen_max", "qwen-max", "qwen3-max", "qwen3.6-max-preview", "qwen3_6_max_preview"}:
+                return QwenCreativeProvider()
+        except ProviderFailure:
+            if required:
+                raise
+            return None
         if required:
             raise ProviderFailure("llm_registry", f"unknown llm provider: {name}")
         return None

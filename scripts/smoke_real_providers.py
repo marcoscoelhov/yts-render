@@ -81,10 +81,10 @@ def main() -> int:
             cta_style=args.cta_style,
         )
     )
-    print(json.dumps({"event": "job_created", "job_id": job_id, "data_dir": str(data_dir)}, ensure_ascii=False))
+    print(json.dumps({"event": "job_created", "job_id": job_id, "data_dir": str(data_dir)}, ensure_ascii=False), flush=True)
 
     status = orchestrator.process_job(job_id)
-    print(json.dumps({"event": "process_job_returned", "job_id": job_id, "status": status}, ensure_ascii=False))
+    print(json.dumps({"event": "process_job_returned", "job_id": job_id, "status": status}, ensure_ascii=False), flush=True)
 
     db_path = data_dir / "yts_render.db"
     started_at = time.monotonic()
@@ -111,7 +111,7 @@ def main() -> int:
         "final_video": str(final_video) if final_video.exists() else None,
         "quality_summary": quality_summary,
     }
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
     return 0 if final_status in {"ready_for_upload", "monetization_review", "blocked_for_monetization"} and final_video.exists() else 1
 
 
