@@ -75,7 +75,7 @@
       <label for="status">Status</label>
       <select id="status" name="status">
         <option value="">Todos</option>
-        {% for value in ["queued","running","script_quality_failed","scene_plan_quality_failed","asset_quality_failed","subtitle_quality_failed","render_quality_failed","waiting_review","approved_for_publish","published","approved","rejected","failed"] %}
+        {% for value in ["queued","running","script_quality_failed","scene_plan_quality_failed","asset_quality_failed","subtitle_quality_failed","render_quality_failed","monetization_review","blocked_for_monetization","ready_for_upload","approved_for_publish","published","approved","rejected","failed"] %}
         <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ value }}</option>
         {% endfor %}
       </select>

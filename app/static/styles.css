@@ -186,6 +186,21 @@ button.ghost {
   text-align: left;
 }
 
+.evidence-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.5rem 0 1rem;
+  font-size: 0.92rem;
+}
+
+.evidence-table th,
+.evidence-table td {
+  padding: 0.65rem 0.5rem;
+  border-bottom: 1px solid rgba(34, 28, 20, 0.08);
+  text-align: left;
+  vertical-align: top;
+}
+
 .badge {
   display: inline-flex;
   padding: 0.25rem 0.65rem;
@@ -196,12 +211,14 @@ button.ghost {
 }
 
 .badge.waiting_review,
-.badge.approved {
+.badge.approved,
+.badge.ready_for_upload {
   background: rgba(47, 125, 75, 0.15);
   color: var(--success);
 }
 
 .badge.failed,
+.badge.blocked_for_monetization,
 .badge.script_quality_failed,
 .badge.scene_plan_quality_failed,
 .badge.asset_quality_failed,
@@ -223,6 +240,11 @@ button.ghost {
   color: var(--warn);
 }
 
+.badge.monetization_review {
+  background: rgba(184, 90, 27, 0.12);
+  color: var(--warn);
+}
+
 .detail-grid {
   display: grid;
   gap: 1rem;
@@ -240,6 +262,46 @@ button.ghost {
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
+}
+
+.review-checklist {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0.5rem 0;
+}
+
+.review-checklist label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--ink);
+}
+
+.review-checklist input {
+  width: auto;
+}
+
+.review-checklist-status {
+  display: grid;
+  gap: 0.65rem;
+  margin: 0.8rem 0 1rem;
+}
+
+.review-status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.8rem 0.95rem;
+  border: 1px solid rgba(34, 28, 20, 0.08);
+  border-radius: 0.9rem;
+  background: #fffdf8;
+}
+
+.review-status-row small {
+  color: var(--muted);
 }
 
 .tab-strip {

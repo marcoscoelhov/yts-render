@@ -7,7 +7,16 @@
 {% set scene_plan = details.scene_plan %}
 {% set narration = details.narration %}
 {% set subtitles = details.subtitles %}
+{% set background_music = details.background_music %}
 {% set render = details.render %}
+{% set monetization = details.monetization_report or {} %}
+{% set publish_package = details.publish_package or {} %}
+{% set review_checklist = monetization.human_review_checklist or publish_package.human_review_checklist or {} %}
+{% set checklist_items = review_checklist.get("items", []) %}
+{% set repair = details.repair_telemetry or {} %}
+{% set can_approve = job.status in ["monetization_review", "ready_for_upload"] and not monetization.get("hard_blockers") %}
+{% set can_reject = job.status in ["monetization_review", "blocked_for_monetization", "ready_for_upload", "rejected", "failed", "script_quality_failed", "scene_plan_quality_failed", "asset_quality_failed", "subtitle_quality_failed", "render_quality_failed"] %}
+{% set can_retry = job.status in ["monetization_review", "blocked_for_monetization", "rejected", "failed", "script_quality_failed", "scene_plan_quality_failed", "asset_quality_failed", "subtitle_quality_failed", "render_quality_failed"] %}
 <section class="detail-grid" {% if job.status in ["queued", "running"] %}hx-get="/jobs/{{ job.job_id }}" hx-trigger="every 2s" hx-select=".detail-grid" hx-swap="outerHTML"{% endif %}>
   <div class="main-column">
     <section class="panel">
@@ -25,6 +34,9 @@
         <a href="#assets">Assets</a>
         <a href="#audio">Audio &amp; Subtitles</a>
         <a href="#render">Render</a>
+        <a href="#monetization">Monetization</a>
+        <a href="#performance">Performance</a>
+        <a href="#self-healing">Self-Healing</a>
         <a href="#logs">Logs</a>
       </div>
     </section>
@@ -65,6 +77,124 @@
         <div><strong>Resumo</strong><span>{{ job.topic_summary or "-" }}</span></div>
       </div>
       <pre>{{ job.quality_summary or {} }}</pre>
+    </section>
+
+    <section id="monetization" class="panel">
+      <h3>Monetization</h3>
+      {% if monetization %}
+      <div class="stats-grid">
+        <div><strong>Status</strong><span>{{ monetization.final_status }}</span></div>
+        <div><strong>Passou</strong><span>{{ monetization.passed }}</span></div>
+        <div><strong>Bloqueios</strong><span>{{ monetization.hard_blockers|length }}</span></div>
+        <div><strong>Revisão manual</strong><span>{{ monetization.manual_required|length }}</span></div>
+      </div>
+      <h4>Publish Verdict</h4>
+      {% if monetization.hard_blockers %}
+      <p><span class="badge blocked_for_monetization">bloqueado por qualidade</span></p>
+      <pre>{{ monetization.hard_blockers }}</pre>
+      {% elif monetization.manual_required %}
+      <p><span class="badge monetization_review">pendente humano</span></p>
+      {% elif monetization.passed %}
+      <p><span class="badge ready_for_upload">pronto para publicar</span></p>
+      {% else %}
+      <p><span class="badge queued">aguardando avaliação</span></p>
+      {% endif %}
+      {% if monetization.publish_readiness %}
+      <p><strong>Publish audit:</strong> {{ monetization.publish_readiness.passed }}</p>
+      <pre>{{ monetization.publish_readiness.reasons or [] }}</pre>
+      {% endif %}
+      <h4>Bloqueios</h4>
+      <pre>{{ monetization.hard_blockers }}</pre>
+      <h4>Confirmações pendentes</h4>
+      <pre>{{ monetization.manual_required }}</pre>
+      {% if checklist_items %}
+      <h4>Checklist humano</h4>
+      <div class="review-checklist-status">
+        {% for item in checklist_items %}
+        <div class="review-status-row">
+          <span><strong>{{ item.label }}</strong><br><small>{{ item.code }}</small></span>
+          {% if item.required %}
+          <span class="badge {% if item.completed %}approved{% else %}monetization_review{% endif %}">
+            {% if item.completed %}confirmado{% else %}pendente{% endif %}
+          </span>
+          {% else %}
+          <span class="badge queued">não exigido</span>
+          {% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+      <h4>Disclosure IA</h4>
+      <pre>{{ monetization.ai_disclosure }}</pre>
+      <h4>Direitos</h4>
+      <table class="evidence-table">
+        <thead>
+          <tr><th>Tipo</th><th>Provider</th><th>Status</th><th>Evidência</th></tr>
+        </thead>
+        <tbody>
+          {% for item in monetization.rights_registry.entries or [] %}
+          <tr>
+            <td>{{ item.asset_type }}{% if item.scene_id %} · {{ item.scene_id }}{% endif %}</td>
+            <td>{{ item.provider }}</td>
+            <td>
+              {% if item.commercial_use_allowed and not item.evidence_required %}
+              <span class="badge approved">ok</span>
+              {% elif item.evidence_required %}
+              <span class="badge monetization_review">evidência pendente</span>
+              {% else %}
+              <span class="badge blocked_for_monetization">pendente</span>
+              {% endif %}
+            </td>
+            <td>{{ item.rights_evidence_url or item.license_source or item.license_note or "-" }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="4">Nenhuma evidência de direitos encontrada.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <h4>Factualidade</h4>
+      <table class="evidence-table">
+        <thead>
+          <tr><th>Claim</th><th>Grounding</th><th>Fonte</th></tr>
+        </thead>
+        <tbody>
+          {% for item in monetization.fact_claims_report.claim_trace or [] %}
+          <tr>
+            <td>{{ item.text }}</td>
+            <td>{{ item.grounding or "-" }}</td>
+            <td>{{ item.source_fact_ids or [] }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="3">Nenhum claim trace registrado.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if monetization.fact_claims_report.claim_sources %}
+      <details>
+        <summary>Fontes verificadas</summary>
+        <pre>{{ monetization.fact_claims_report.claim_sources }}</pre>
+      </details>
+      {% endif %}
+      <h4>Metadata</h4>
+      <div class="stats-grid">
+        <div><strong>Título</strong><span>{{ monetization.metadata_review.title or "-" }}</span></div>
+        <div><strong>Hashtags</strong><span>{{ monetization.metadata_review.suggested_hashtags or [] }}</span></div>
+        <div><strong>Pendências</strong><span>{{ monetization.metadata_review.reasons or [] }}</span></div>
+      </div>
+      <h4>Repetição de canal</h4>
+      <pre>{{ monetization.channel_repetition_report }}</pre>
+      {% else %}
+      <p>Aguardando gate de monetização.</p>
+      {% endif %}
+    </section>
+
+    <section id="performance" class="panel">
+      <h3>Performance</h3>
+      {% if details.performance_metrics %}
+      <pre>{{ details.performance_metrics }}</pre>
+      {% else %}
+      <p>Nenhuma métrica real do YouTube Studio registrada ainda.</p>
+      {% endif %}
     </section>
 
     <section id="script" class="panel">
@@ -129,6 +259,14 @@
       <audio controls src="{{ artifact_url(narration.audio_uri) }}"></audio>
       <p><strong>Voice:</strong> {{ narration.voice }} · {{ (narration.duration_ms / 1000)|round(1) }} s</p>
       {% endif %}
+      {% if background_music %}
+      <audio controls src="{{ artifact_url(background_music.audio_uri) }}"></audio>
+      <p><strong>Music:</strong> {{ background_music.provider }} · mood {{ background_music.mood }} · {{ background_music.gain_db }} dB</p>
+      {% if background_music.mixed_audio_uri %}
+      <audio controls src="{{ artifact_url(background_music.mixed_audio_uri) }}"></audio>
+      <p><strong>Mixed master:</strong> narração + trilha pronta para render.</p>
+      {% endif %}
+      {% endif %}
       {% if subtitles %}
       <pre>{{ subtitles.items }}</pre>
       <a href="{{ artifact_url(subtitles.ass_uri) }}">Download ASS</a>
@@ -143,6 +281,22 @@
       <a href="{{ artifact_url(render.ffmpeg_log_uri) }}">FFmpeg log</a>
       {% else %}
       <p>Aguardando render.</p>
+      {% endif %}
+    </section>
+
+    <section id="self-healing" class="panel">
+      <h3>Self-Healing</h3>
+      {% if repair.topic_plan or repair.script or repair.background_music or repair.render %}
+      <h4>Topic Plan</h4>
+      <pre>{{ repair.topic_plan or {} }}</pre>
+      <h4>Script</h4>
+      <pre>{{ repair.script or {} }}</pre>
+      <h4>Background Music</h4>
+      <pre>{{ repair.background_music or {} }}</pre>
+      <h4>Render</h4>
+      <pre>{{ repair.render or {} }}</pre>
+      {% else %}
+      <p>Nenhuma telemetria de repair persistida ainda.</p>
       {% endif %}
     </section>
 
@@ -164,27 +318,49 @@
       <h3>Review</h3>
       <form method="post" action="/jobs/{{ job.job_id }}/review" class="review-form">
         <input type="hidden" name="reviewer_identity" value="tailscale:local-reviewer">
-        <label for="reason_codes">Reason codes</label>
-        <input id="reason_codes" name="reason_codes" placeholder="weak_hook,visual_incoherence">
+        {% if checklist_items %}
+        <h4>Confirmações exigidas</h4>
+        <div class="review-checklist">
+          {% for item in checklist_items %}
+            {% if item.required and item.auto_completed %}
+            <label><input type="checkbox" checked disabled> {{ item.label }} <small>automático</small></label>
+            {% elif item.required and item.completed %}
+            <label><input type="checkbox" checked disabled> {{ item.label }} <small>já confirmado</small></label>
+            {% elif item.required %}
+            <label><input type="checkbox" name="confirmation_codes" value="{{ item.confirmation_code }}"> {{ item.label }}</label>
+            {% endif %}
+          {% endfor %}
+        </div>
+        {% endif %}
+        <label>Reason codes para rejeição ou retry</label>
+        <div class="review-checklist">
+          <label><input type="checkbox" name="reason_codes" value="weak_hook"> Hook fraco</label>
+          <label><input type="checkbox" name="reason_codes" value="visual_incoherence"> Visual incoerente</label>
+          <label><input type="checkbox" name="reason_codes" value="unsupported_claim"> Claim sem suporte</label>
+          <label><input type="checkbox" name="reason_codes" value="rights_missing"> Direitos/evidência pendente</label>
+          <label><input type="checkbox" name="reason_codes" value="metadata_weak"> Título/descrição/hashtags fracos</label>
+        </div>
         <label for="notes">Notes</label>
         <textarea id="notes" name="notes" rows="4"></textarea>
         <div class="button-row">
+          {% if can_approve %}
           <button type="submit" name="action" value="approve">Approve</button>
+          {% endif %}
+          {% if can_reject %}
           <button type="submit" name="action" value="reject" class="secondary">Reject</button>
+          {% endif %}
         </div>
-        <label for="retry_step">Retry from step</label>
-        <select id="retry_step" name="retry_step">
-          <option value="">pipeline completo</option>
-          {% for step in ["topic_plan","script","scene_plan","asset_generation","tts","subtitle_alignment","render"] %}
-          <option value="{{ step }}">{{ step }}</option>
-          {% endfor %}
-        </select>
-        <button type="submit" name="action" value="retry_from_step" class="ghost">Criar novo retry job</button>
+        {% if can_retry %}
+        <button type="submit" name="action" value="retry" class="ghost">Criar novo job completo</button>
+        {% endif %}
+        {% if not can_approve and not can_reject and not can_retry %}
+        <p>Nenhuma ação de review disponível para o status atual.</p>
+        {% endif %}
       </form>
       {% if job.status == "approved_for_publish" %}
       <form method="post" action="/jobs/{{ job.job_id }}/publish" class="review-form">
         <label for="youtube_video_id">YouTube video id</label>
-        <input id="youtube_video_id" name="youtube_video_id" placeholder="opcional no modo manual">
+        <input id="youtube_video_id" name="youtube_video_id" placeholder="obrigatório se URL não for informada">
         <label for="youtube_url">YouTube URL</label>
         <input id="youtube_url" name="youtube_url" placeholder="https://youtube.com/shorts/...">
         <button type="submit">Marcar como publicado</button>
@@ -192,6 +368,23 @@
       {% endif %}
       <h3>Artefatos</h3>
       <pre>{{ job.artifact_index or {} }}</pre>
+      <h3>Performance</h3>
+      <form method="post" action="/jobs/{{ job.job_id }}/performance" class="review-form">
+        <input type="hidden" name="source" value="youtube_studio_manual">
+        <label for="retention_percent">Retenção média (%)</label>
+        <input id="retention_percent" name="retention_percent" type="number" min="0" max="100" step="0.1">
+        <label for="viewed_vs_swiped_away_percent">Viewed vs swiped away (%)</label>
+        <input id="viewed_vs_swiped_away_percent" name="viewed_vs_swiped_away_percent" type="number" min="0" max="100" step="0.1">
+        <label for="rewatch_rate">Rewatch rate</label>
+        <input id="rewatch_rate" name="rewatch_rate" type="number" min="0" step="0.01">
+        <label for="rpm_usd">RPM USD</label>
+        <input id="rpm_usd" name="rpm_usd" type="number" min="0" step="0.01">
+        <label for="monetization_status">Status monetização</label>
+        <input id="monetization_status" name="monetization_status" placeholder="monetized, limited, ineligible">
+        <label for="performance_notes">Notas</label>
+        <textarea id="performance_notes" name="notes" rows="3"></textarea>
+        <button type="submit">Registrar métricas</button>
+      </form>
     </section>
   </aside>
 </section>

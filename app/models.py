@@ -166,6 +166,27 @@ class SubtitleTrack(Base):
     raw_srt_uri: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class BackgroundMusicAsset(Base):
+    __tablename__ = "background_music_assets"
+
+    music_id: Mapped[str] = mapped_column(String, primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id"), unique=True, index=True)
+    schema_version: Mapped[str] = mapped_column(String, default="1.0.0")
+    content_hash: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    provider: Mapped[str] = mapped_column(String)
+    query: Mapped[str | None] = mapped_column(String, nullable=True)
+    mood: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    attribution: Mapped[str | None] = mapped_column(String, nullable=True)
+    license_note: Mapped[str | None] = mapped_column(String, nullable=True)
+    audio_uri: Mapped[str] = mapped_column(String)
+    mixed_audio_uri: Mapped[str | None] = mapped_column(String, nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer)
+    gain_db: Mapped[float] = mapped_column(Float)
+    provider_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
 class RenderOutput(Base):
     __tablename__ = "render_outputs"
 
@@ -198,6 +219,26 @@ class ReviewRecord(Base):
     reason_codes: Mapped[list] = mapped_column(JSON)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     retry_step: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class PerformanceMetric(Base):
+    __tablename__ = "performance_metrics"
+
+    metric_id: Mapped[str] = mapped_column(String, primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id"), index=True)
+    schema_version: Mapped[str] = mapped_column(String, default="1.0.0")
+    content_hash: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    source: Mapped[str] = mapped_column(String, default="youtube_studio_manual")
+    retention_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    viewed_vs_swiped_away_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rewatch_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    likes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    shares: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    comments: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rpm_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    monetization_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class FallbackEvent(Base):

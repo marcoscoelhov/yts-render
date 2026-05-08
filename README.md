@@ -79,6 +79,7 @@ Principais variaveis:
 | `YTS_MINIMAX_TEXT_API_KEY` | Chave MiniMax dedicada para pauta, roteiro e plano de cenas. |
 | `YTS_MINIMAX_IMAGE_API_KEY` | Chave MiniMax dedicada para geracao de imagens. |
 | `YTS_MINIMAX_TEXT_TIMEOUT_SEC` | Timeout por chamada do provider de texto. |
+| `YTS_MINIMAX_MUSIC_TIMEOUT_SEC` | Timeout por chamada do provider de musica MiniMax. |
 | `YTS_MINIMAX_SCENE_PLAN_TIMEOUT_SEC` | Timeout especifico do planejamento de cenas antes de fallback local. |
 | `YTS_PEXELS_API_KEY` | Chave Pexels para fallback visual. |
 | `YTS_PIXABAY_API_KEY` | Chave Pixabay para fallback visual. |
@@ -217,6 +218,8 @@ tailscale serve --bg 8080
 
 ## Onde Continuar o Desenvolvimento
 
+Para entender a arquitetura e os pontos de manutencao, leia a [documentacao do app](docs/app.md).
+
 Prioridade sugerida para a proxima fase:
 
 1. Criar um provider de imagem barato, por exemplo Z-Image Turbo, e plugar em `ProviderRegistry.image`.
@@ -235,6 +238,8 @@ Arquivos mais importantes para essa mudanca:
 - `tests/test_e2e.py`: teste com provider mock equivalente ao novo contrato.
 
 ## Comandos Uteis
+
+Para retomar o projeto do zero, use o [runbook de inicializacao](docs/runbook-inicializacao.md).
 
 ```bash
 # Rodar app

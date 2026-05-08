@@ -9,6 +9,8 @@ from urllib.parse import unquote
 
 import httpx
 
+from app.schemas import SUPPORTED_NICHES
+
 
 @dataclass(frozen=True)
 class TrendCandidate:
@@ -59,7 +61,7 @@ class TrendResearcher:
         self.timeout_sec = timeout_sec
 
     def find_topic(self, niche_id: str = "curiosidades") -> TrendCandidate | None:
-        if niche_id != "curiosidades":
+        if niche_id not in SUPPORTED_NICHES:
             return None
         google_candidates = self._google_trends_candidates()
         if google_candidates:
