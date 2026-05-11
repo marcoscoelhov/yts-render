@@ -681,6 +681,51 @@ class DeepSeekCreativeProvider(MinimaxCreativeProvider):
         )
 
 
+class OpenAICreativeProvider(MinimaxCreativeProvider):
+    provider_name = "openai"
+    failure_provider_name = "openai_text"
+
+    def __init__(self) -> None:
+        settings = get_settings()
+        if not settings.openai_api_key:
+            raise ProviderFailure(self.failure_provider_name, "missing openai api key")
+        self.timeout_sec = settings.openai_timeout_sec
+        self.model_name = settings.openai_model
+        self.client = OpenAI(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            timeout=self.timeout_sec,
+        )
+
+    def _json_completion(self, prompt: str) -> Any:
+        try:
+            response = self.client.responses.create(
+                model=self.model_name,
+                instructions="Return valid JSON only. No markdown fences.",
+                input=prompt,
+                text={"format": {"type": "json_object"}},
+                timeout=self.timeout_sec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderFailure(self.failure_provider_name, str(exc)) from exc
+        raw = (getattr(response, "output_text", None) or "").strip()
+        if not raw:
+            raise ProviderFailure(self.failure_provider_name, "empty text response")
+        raw = self._strip_think(raw)
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        try:
+            return json.loads(raw)
+        except Exception as exc:  # noqa: BLE001
+            extracted = self._extract_json(raw)
+            if extracted is not None:
+                try:
+                    return json.loads(extracted)
+                except Exception:
+                    pass
+            raise ProviderFailure(self.failure_provider_name, f"invalid json: {raw[:300]}") from exc
+
+
 class QwenCreativeProvider(MinimaxCreativeProvider):
     provider_name = "qwen"
     failure_provider_name = "qwen_text"
@@ -1004,6 +1049,8 @@ class LLMProviderRegistry:
                 return None
             return MockCreativeProvider()
         try:
+            if normalized in {"openai", "gpt-5", "gpt5", "gpt-5.4", "gpt5.4"}:
+                return OpenAICreativeProvider()
             if normalized in {"minimax", "minimax_2_7", "minimax-m2.7"}:
                 return MinimaxCreativeProvider()
             if normalized in {"deepseek", "deepseek_v4_flash", "deepseek-v4-flash", "deepseek_v4"}:

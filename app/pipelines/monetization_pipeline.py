@@ -18,6 +18,9 @@ from app.utils import iso_now, stable_hash, word_tokens
 class MonetizationPipeline(BasePipeline):
     AI_GENERATED_RIGHTS_PROVIDERS = {"minimax", "minimax_music", "edge_tts", "mock", "mock_music", "synthetic_wav"}
 
+    def _simple_mode_fact_skip(self, fact_pack: dict[str, Any]) -> bool:
+        return self.settings.simple_shorts_mode and fact_pack.get("status") == "skipped"
+
     def step_monetization_readiness(self, session: Session, job: Job, attempt: int) -> list[str]:
         report = self.build_monetization_report(session, job)
         self.storage.persist_json(job.job_id, "rights_registry.json", self._serialize_for_json(report["rights_registry"]))
@@ -73,7 +76,7 @@ class MonetizationPipeline(BasePipeline):
             "subtitle_gate_pass": bool((job.quality_summary or {}).get("subtitles", {}).get("subtitle_gate_pass")),
             "render_gate_pass": bool((job.quality_summary or {}).get("render", {}).get("render_gate_pass")),
         }
-        if self.settings.simple_shorts_mode:
+        if self._simple_mode_fact_skip(fact_pack):
             checklist["script_gate_pass"] = True
         confirmations = self.manual_monetization_confirmations(session, job.job_id)
         confirmations.update(extra_confirmations or set())
@@ -81,7 +84,7 @@ class MonetizationPipeline(BasePipeline):
         rights_registry = self.build_rights_registry(job, assets, narration, background_music)
         ai_disclosure = self.build_ai_disclosure_report(assets)
         fact_claims_report = self.build_fact_claims_report(script, topic_plan, fact_pack, script_artifact)
-        if self.settings.simple_shorts_mode:
+        if self._simple_mode_fact_skip(fact_pack):
             fact_claims_report = {
                 **fact_claims_report,
                 "requires_fact_review": False,
@@ -89,7 +92,7 @@ class MonetizationPipeline(BasePipeline):
             }
         channel_repetition_report = self.build_channel_repetition_report(session, job, topic_plan, script)
         metadata_review = self.build_metadata_review(topic_plan, script, tags)
-        if self.settings.simple_shorts_mode:
+        if self._simple_mode_fact_skip(fact_pack):
             channel_repetition_report = {
                 **channel_repetition_report,
                 "repetition_risk": "low",
@@ -635,7 +638,7 @@ class MonetizationPipeline(BasePipeline):
         }
 
     def provider_publish_audit(self, script_artifact: dict[str, Any], fact_pack: dict[str, Any], tags: list[str], job_id: str | None = None) -> dict[str, Any]:
-        if self.settings.simple_shorts_mode:
+        if self._simple_mode_fact_skip(fact_pack):
             return {"passed": True, "reasons": [], "provider": "simple_shorts_mode", "skipped": True}
         auditor = getattr(self.providers.creative, "audit_publish_package", None)
         if auditor is None:
@@ -758,7 +761,7 @@ class MonetizationPipeline(BasePipeline):
         reasons: list[str] = []
         if not all(checklist.values()):
             reasons.append("quality_checklist_failed")
-        if self.settings.simple_shorts_mode:
+        if self._simple_mode_fact_skip(fact_pack):
             claim_trace = script_dict.get("claim_trace") or script_dict.get("qa_metrics", {}).get("claim_trace") or []
             if not isinstance(claim_trace, list):
                 claim_trace = []

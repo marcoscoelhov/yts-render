@@ -39,10 +39,10 @@ class Settings(BaseSettings):
     llm_script_draft_provider: str = "deepseek"
     llm_script_repair_attempts: int = 1
     llm_topic_repair_attempts: int = 2
-    llm_topic_timeout_sec: float = 45.0
+    llm_topic_timeout_sec: float = 75.0
     llm_script_draft_timeout_sec: float = 45.0
     minimax_script_timeout_sec: float = 150.0
-    llm_publish_audit_timeout_sec: float = 45.0
+    llm_publish_audit_timeout_sec: float = 75.0
     real_run_allow_mock_fallback: bool = False
     scene_prompt_gate_enabled: bool = True
     asset_semantic_threshold: float = 0.80
@@ -73,10 +73,14 @@ class Settings(BaseSettings):
     minimax_text_base_url: str = "https://api.minimax.io/v1"
     minimax_image_base_url: str = "https://api.minimax.io/v1/image_generation"
     minimax_music_base_url: str = "https://api.minimax.io/v1"
-    minimax_text_timeout_sec: float = 150.0
+    minimax_text_timeout_sec: float = 180.0
     minimax_music_timeout_sec: float = 240.0
-    minimax_scene_plan_timeout_sec: float = 90.0
-    llm_scene_plan_timeout_sec: float = 45.0
+    minimax_scene_plan_timeout_sec: float = 120.0
+    llm_scene_plan_timeout_sec: float = 75.0
+    openai_api_key: str | None = None
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = "gpt-5.4"
+    openai_timeout_sec: float = 180.0
     deepseek_api_key: str | None = None
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-flash"
@@ -135,6 +139,7 @@ class Settings(BaseSettings):
         "minimax_music_timeout_sec",
         "minimax_scene_plan_timeout_sec",
         "llm_scene_plan_timeout_sec",
+        "openai_timeout_sec",
         "deepseek_timeout_sec",
         "qwen_timeout_sec",
     )

@@ -31,7 +31,7 @@ from app.editorial.repetition import build_channel_repetition_report  # noqa: E4
 from app.main import app, artifact_url  # noqa: E402
 from app.models import BackgroundMusicAsset, Job, NarrationAsset, PerformanceMetric, RenderOutput, SceneAsset, Script, SubtitleTrack, TopicPlan, TopicRegistry, TopicRequest  # noqa: E402
 from app.orchestrator import JobOrchestrator, RecoverableStepError, StepDefinition, normalize_script_metrics, orchestrator  # noqa: E402
-from app.providers import DeepSeekCreativeProvider, LLMProviderRegistry, LocalSpeechFallbackProvider, MiniMaxBackgroundMusicProvider, MinimaxCreativeProvider, MinimaxImageProvider, MockCreativeProvider, ProviderFailure, ResilientCreativeProvider, ResilientMusicProvider  # noqa: E402
+from app.providers import DeepSeekCreativeProvider, LLMProviderRegistry, LocalSpeechFallbackProvider, MiniMaxBackgroundMusicProvider, MinimaxCreativeProvider, MinimaxImageProvider, MockCreativeProvider, OpenAICreativeProvider, ProviderFailure, ResilientCreativeProvider, ResilientMusicProvider  # noqa: E402
 from app.quality.asset_gate import AssetGate  # noqa: E402
 from app.quality.render_gate import RenderGate  # noqa: E402
 from app.quality.scene_gate import ScenePlanGate  # noqa: E402
@@ -520,6 +520,60 @@ def test_deepseek_provider_uses_v4_flash_openai_compatible_client(monkeypatch) -
     assert result["qa_metrics"]["repair_provider"] == "deepseek"
 
 
+def test_openai_provider_uses_responses_api_with_json_output(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                output_text=json.dumps(
+                    {
+                        "title": "Cafe mascara a fadiga",
+                        "hook": "Cafe nao cria energia do nada.",
+                        "body_beats": ["A cafeina atrasa a percepcao do cansaco."],
+                        "ending": "Na segunda olhada, o primeiro aviso vira pista.",
+                        "cta": None,
+                        "full_narration": "Cafe nao cria energia do nada. A cafeina atrasa a percepcao do cansaco. Na segunda olhada, o primeiro aviso vira pista.",
+                        "estimated_duration_sec": 35,
+                        "key_facts": ["A cafeina atrasa a percepcao do cansaco."],
+                        "source_fact_ids": ["F1"],
+                        "claim_trace": [{"text": "A cafeina atrasa a percepcao do cansaco.", "source_fact_ids": ["F1"], "grounding": "fact_pack"}],
+                        "token_count": 20,
+                        "language": "pt-BR",
+                        "retention_map": {},
+                        "visual_opening": {},
+                        "qa_metrics": {},
+                        "prompt_version": EDITORIAL_PROMPT_VERSION,
+                    }
+                )
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr(
+        "app.providers.get_settings",
+        lambda: SimpleNamespace(
+            openai_api_key="openai-key",
+            openai_base_url="https://api.openai.com/v1",
+            openai_model="gpt-5.4",
+            openai_timeout_sec=120,
+        ),
+    )
+    monkeypatch.setattr("app.providers.OpenAI", FakeOpenAI)
+
+    provider = OpenAICreativeProvider()
+    result = provider.generate_script({"canonical_topic": "cafeina e sono", "title_candidates": ["Cafe mascara a fadiga"]})
+
+    assert captured["client_kwargs"]["api_key"] == "openai-key"
+    assert captured["model"] == "gpt-5.4"
+    assert captured["text"] == {"format": {"type": "json_object"}}
+    assert result["qa_metrics"]["source_provider"] == "openai"
+
+
 def test_llm_registry_uses_deepseek_for_repair_and_scene_defaults(monkeypatch) -> None:
     monkeypatch.setattr(
         "app.providers.get_settings",
@@ -545,6 +599,38 @@ def test_llm_registry_uses_deepseek_for_repair_and_scene_defaults(monkeypatch) -
 
     assert registry.repair_provider().provider_name == "deepseek"
     assert registry.scene_provider().provider_name == "deepseek"
+
+
+def test_llm_registry_supports_openai_primary_provider(monkeypatch) -> None:
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            self.responses = SimpleNamespace(create=lambda **_kwargs: None)
+
+    monkeypatch.setattr(
+        "app.providers.get_settings",
+        lambda: SimpleNamespace(
+            use_mock_providers=False,
+            llm_primary_provider="openai",
+            llm_fallback_provider="deepseek",
+            llm_script_draft_provider="deepseek",
+            llm_repair_provider="deepseek",
+            llm_scene_provider="deepseek",
+            real_run_allow_mock_fallback=False,
+            openai_api_key="openai-key",
+            openai_base_url="https://api.openai.com/v1",
+            openai_model="gpt-5.4",
+            openai_timeout_sec=120,
+            deepseek_api_key="deepseek-key",
+            deepseek_base_url="https://api.deepseek.com",
+            deepseek_model="deepseek-v4-flash",
+            deepseek_timeout_sec=90,
+        ),
+    )
+    monkeypatch.setattr("app.providers.OpenAI", FakeOpenAI)
+
+    registry = LLMProviderRegistry()
+
+    assert registry.primary_provider().provider_name == "openai"
 
 
 def test_scene_plan_gate_rejects_generic_prompt_without_no_text_constraint() -> None:
@@ -2388,6 +2474,83 @@ def test_script_pipeline_requires_verified_fact_pack_for_factual_real_topics(mon
     assert pipeline._requires_verified_fact_pack(topic_plan, request, {"status": "verified", "facts": [{"fact_id": "F1"}]}) is False
 
 
+def test_step_script_disables_simple_prompt_rules_when_fact_pack_is_required(monkeypatch) -> None:
+    pipeline = orchestrator.script_pipeline
+    monkeypatch.setattr(pipeline.settings, "simple_shorts_mode", True)
+    monkeypatch.setattr(pipeline.settings, "use_mock_providers", False)
+    captured: dict[str, object] = {}
+    job_id = orchestrator.create_job(
+        {
+            "seed_theme": "por que cafe tira o sono",
+            "niche_id": "curiosidades",
+            "language": "pt-BR",
+            "target_duration_sec": 45,
+            "tone": "intrigante_direto",
+            "cta_style": "none",
+            "notes": "teste",
+            "requested_angle": None,
+        }
+    )
+    with SessionLocal() as session:
+        session.add(
+            TopicPlan(
+                topic_id=f"topic-{job_id}",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="topic",
+                canonical_topic="cafeina e sono",
+                angle="desconstrucao de crenca popular",
+                hook_promise="revela o mecanismo biologico real",
+                entities=["cafeina", "adenosina"],
+                search_terms=["cafeina sono"],
+                title_candidates=["Cafe nao te da energia"],
+                quality_metrics={},
+            )
+        )
+        session.commit()
+        job = session.get(Job, job_id)
+        assert job is not None
+
+        monkeypatch.setattr(
+            pipeline,
+            "_build_fact_pack",
+            lambda *_args, **_kwargs: {"status": "verified", "facts": [{"fact_id": "F1", "claim": "Cafeina bloqueia receptores de adenosina."}]},
+        )
+
+        def fake_generate_script(topic_plan: dict[str, object]) -> dict[str, object]:
+            captured.update(topic_plan)
+            return {
+                "title": "Cafe nao te da energia",
+                "hook": "Cafe mascara o cansaco.",
+                "body_beats": ["Cafeina bloqueia receptores de adenosina."],
+                "ending": "Na segunda olhada, o começo vira pista.",
+                "cta": None,
+                "full_narration": "Cafe mascara o cansaco. Cafeina bloqueia receptores de adenosina. Na segunda olhada, o começo vira pista.",
+                "estimated_duration_sec": 35,
+                "key_facts": ["Cafeina bloqueia receptores de adenosina."],
+                "source_fact_ids": ["F1"],
+                "claim_trace": [{"text": "Cafeina bloqueia receptores de adenosina.", "source_fact_ids": ["F1"], "grounding": "fact_pack"}],
+                "token_count": 15,
+                "language": "pt-BR",
+                "qa_metrics": {},
+                "retention_map": {},
+                "visual_opening": {},
+                "prompt_version": "test",
+            }
+
+        monkeypatch.setattr(orchestrator.providers.creative, "generate_script", fake_generate_script)
+        monkeypatch.setattr(
+            pipeline,
+            "_validate_or_repair_script",
+            lambda script, *_args, **_kwargs: (script, {"script_quality_gate_pass": True, "fact_pack_consistency_pass": True}),
+        )
+        monkeypatch.setattr(pipeline, "_text_publish_audit", lambda *_args, **_kwargs: {"passed": True, "reasons": []})
+
+        pipeline.step_script(session, job, 1)
+
+    assert captured["simple_shorts_mode"] is False
+
+
 def test_job_lease_delta_has_floor_for_real_provider_steps(monkeypatch) -> None:
     test_orchestrator = JobOrchestrator()
     monkeypatch.setattr(test_orchestrator.settings, "job_lease_seconds", 60)
@@ -2559,6 +2722,28 @@ def test_simple_shorts_mode_skips_text_publish_audit(monkeypatch) -> None:
     assert audit == {"passed": True, "reasons": [], "provider": "simple_shorts_mode", "skipped": True}
 
 
+def test_simple_shorts_mode_runs_text_publish_audit_for_verified_fact_pack(monkeypatch) -> None:
+    pipeline = orchestrator.script_pipeline
+    monkeypatch.setattr(pipeline.settings, "simple_shorts_mode", True)
+    captured: dict[str, object] = {}
+
+    def auditor(payload: dict) -> dict:
+        captured.update(payload)
+        return {"passed": True, "reasons": [], "provider": "test"}
+
+    monkeypatch.setattr(orchestrator.providers.creative, "audit_publish_package", auditor)
+
+    audit = pipeline._text_publish_audit(
+        "job-simple-audit-verified",
+        {"title": "Cafe", "hook": "Cafe muda seu alerta.", "ending": "Agora a ultima frase fecha o loop.", "full_narration": "Cafe muda seu alerta."},
+        {"status": "verified", "facts": [{"fact_id": "F1", "claim": "Cafeina bloqueia receptores de adenosina."}]},
+    )
+
+    assert audit["passed"] is True
+    assert audit["provider"] == "test"
+    assert captured["audit_phase"] == "text_before_assets"
+
+
 def test_simple_shorts_mode_publish_readiness_requires_manual_publish_audit(monkeypatch) -> None:
     monkeypatch.setattr(orchestrator.monetization_pipeline.settings, "simple_shorts_mode", True)
     readiness = orchestrator._publish_readiness_report(
@@ -2633,6 +2818,36 @@ def test_simple_shorts_mode_makes_script_gate_non_blocking(monkeypatch) -> None:
     assert metrics["script_quality_gate_pass"] is True
     assert metrics["script_quality_gate_blocking"] is False
     assert metrics["simple_shorts_mode"] is True
+
+
+def test_simple_shorts_mode_verified_fact_pack_keeps_script_gate_blocking(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.settings, "simple_shorts_mode", True)
+    monkeypatch.setattr(orchestrator.settings, "llm_script_repair_attempts", 0)
+    monkeypatch.setattr(
+        orchestrator.script_pipeline.script_gate,
+        "validate",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            passed=False,
+            reasons=["factual_claim_trace_missing"],
+            metrics={"fact_risk": {"blocked": False, "claim_count": 1}},
+        ),
+    )
+    monkeypatch.setattr(orchestrator.script_pipeline, "_fact_pack_consistency_reasons", lambda *_args, **_kwargs: [])
+    script = _base_script("Cafe muda seu estado de alerta. Na segunda olhada, a primeira frase vira pista.")
+    plan_dict = {
+        "canonical_topic": "cafe",
+        "fact_pack": {
+            "status": "verified",
+            "facts": [{"fact_id": "F1", "claim": "Cafeina interage com receptores de adenosina."}],
+        },
+    }
+
+    try:
+        orchestrator._validate_or_repair_script(script, plan_dict, 35, "none")
+    except RecoverableStepError as exc:
+        assert "factual_claim_trace_missing" in str(exc)
+    else:
+        raise AssertionError("expected RecoverableStepError")
 
 
 def test_build_monetization_report_turns_skipped_publish_audit_into_manual_review(monkeypatch) -> None:
@@ -2719,6 +2934,111 @@ def test_build_monetization_report_turns_skipped_publish_audit_into_manual_revie
     assert report["passed"] is False
     assert report["hard_blockers"] == []
     assert "publish_audit_required" in report["manual_required"]
+
+
+def test_build_monetization_report_keeps_fact_review_in_simple_mode_with_verified_fact_pack(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.monetization_pipeline.settings, "simple_shorts_mode", True)
+    job_id = orchestrator.create_job(
+        {
+            "seed_theme": "por que cafe tira o sono",
+            "niche_id": "curiosidades",
+            "language": "pt-BR",
+            "target_duration_sec": 45,
+            "tone": "intrigante_direto",
+            "cta_style": "none",
+            "notes": "teste",
+            "requested_angle": None,
+        }
+    )
+    with SessionLocal() as session:
+        session.add(
+            TopicPlan(
+                topic_id=f"topic-{job_id}",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="topic",
+                canonical_topic="Por que cafe tira o sono",
+                angle="neurociencia",
+                hook_promise="cafe muda sua percepcao de cansaco",
+                entities=["cafe"],
+                search_terms=["cafe adenosina"],
+                title_candidates=["Por que cafe tira o sono"],
+                quality_metrics={},
+            )
+        )
+        session.add(
+            Script(
+                script_id=f"script-{job_id}",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="script",
+                title="Por que cafe tira o sono",
+                hook="Cafe muda seu estado de alerta.",
+                body_beats=[],
+                ending="No fim, a primeira frase vira pista.",
+                cta=None,
+                full_narration="Cafe muda seu estado de alerta.",
+                estimated_duration_sec=35,
+                key_facts=["Cafeina interfere na sinalizacao de adenosina."],
+                token_count=6,
+                language="pt-BR",
+                qa_metrics={"script_quality_gate_pass": True},
+            )
+        )
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.quality_summary = {
+            "script": {"script_quality_gate_pass": True},
+            "scene_plan": {"scene_plan_gate_pass": True},
+            "assets": {"semantic_threshold_pass": True},
+            "subtitles": {"subtitle_gate_pass": True},
+            "render": {"render_gate_pass": True},
+        }
+        session.commit()
+
+    fact_pack_path = Path(os.environ["YTS_DATA_DIR"]).resolve() / "artifacts" / job_id / "fact_pack.json"
+    fact_pack_path.parent.mkdir(parents=True, exist_ok=True)
+    fact_pack_path.write_text(
+        json.dumps(
+            {
+                "status": "verified",
+                "facts": [{"fact_id": "F1", "claim": "Cafeina bloqueia receptores de adenosina."}],
+                "sources": [{"title": "Review on caffeine and adenosine receptors"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        orchestrator.monetization_pipeline,
+        "build_fact_claims_report",
+        lambda *args, **kwargs: {
+            "fact_pack_status": "verified",
+            "requires_fact_review": True,
+            "source_fact_ids": ["F1"],
+            "grounded_source_fact_ids": ["F1"],
+            "claim_trace": [{"text": "Cafe muda seu estado de alerta.", "source_fact_ids": ["F1"], "grounding": "fact_pack"}],
+            "grounded_claim_trace": [{"text": "Cafe muda seu estado de alerta.", "source_fact_ids": ["F1"], "grounding": "fact_pack"}],
+            "ungrounded_claim_trace": [],
+            "claim_sources": [{"fact_id": "F1"}],
+            "risk_report": {"score": 0, "blocked": False, "claim_count": 0, "high_risk_claim_count": 0, "claims": []},
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator.monetization_pipeline,
+        "provider_publish_audit",
+        lambda *args, **kwargs: {"passed": True, "reasons": [], "provider": "test", "skipped": False},
+    )
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        report = orchestrator.monetization_pipeline.build_monetization_report(session, job)
+
+    assert report["final_status"] == "monetization_review"
+    assert report["passed"] is False
+    assert "fact_review_required" in report["manual_required"]
+    assert "publish_audit_required" not in report["manual_required"]
 
 
 def test_rights_registry_requires_evidence_for_confirmed_minimax_assets(monkeypatch) -> None:

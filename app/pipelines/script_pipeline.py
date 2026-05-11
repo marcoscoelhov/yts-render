@@ -47,6 +47,7 @@ class ScriptPipeline(BasePipeline):
         topic_plan = session.scalar(select(TopicPlan).where(TopicPlan.job_id == job.job_id))
         request = session.scalar(select(TopicRequest).where(TopicRequest.job_id == job.job_id))
         assert topic_plan and request
+        simple_mode_fact_skip = self.settings.simple_shorts_mode and not self._topic_requires_verified_fact_pack(topic_plan, request)
         plan_dict = {
             "canonical_topic": topic_plan.canonical_topic,
             "angle": topic_plan.angle,
@@ -56,7 +57,7 @@ class ScriptPipeline(BasePipeline):
             "requested_angle": request.requested_angle,
             "hub_notes": request.notes,
             "original_input": request.seed_theme,
-            "simple_shorts_mode": self.settings.simple_shorts_mode,
+            "simple_shorts_mode": simple_mode_fact_skip,
         }
         plan_dict = enrich_plan_for_script_generation(
             plan_dict,
@@ -65,7 +66,7 @@ class ScriptPipeline(BasePipeline):
         )
         plan_dict["channel_learning_brief"] = self._channel_learning_brief(session, request.niche_id)
         fact_started = time.monotonic()
-        fact_pack = self._simple_mode_fact_pack(request) if self.settings.simple_shorts_mode else self._build_fact_pack(topic_plan, request)
+        fact_pack = self._simple_mode_fact_pack(request) if simple_mode_fact_skip else self._build_fact_pack(topic_plan, request)
         stage_timings_ms["fact_pack_ms"] = round((time.monotonic() - fact_started) * 1000, 1)
         plan_dict["fact_pack"] = fact_pack
         self.storage.persist_json(job.job_id, "fact_pack.json", self._serialize_for_json(fact_pack))
@@ -193,12 +194,13 @@ class ScriptPipeline(BasePipeline):
         return ["fact_pack.json", "script.json", "script_generation_debug.json", "text_publish_audit.json", script_telemetry_file]
 
     def _requires_verified_fact_pack(self, topic_plan: TopicPlan, request: TopicRequest, fact_pack: dict[str, Any]) -> bool:
-        if self.settings.simple_shorts_mode:
-            return False
         if self.settings.use_mock_providers:
             return False
         if fact_pack.get("status") == "verified":
             return False
+        return self._topic_requires_verified_fact_pack(topic_plan, request)
+
+    def _topic_requires_verified_fact_pack(self, topic_plan: TopicPlan, request: TopicRequest) -> bool:
         source_text = f"{request.seed_theme} {topic_plan.canonical_topic} {topic_plan.angle} {topic_plan.hook_promise}"
         return bool(
             re.search(
@@ -222,7 +224,7 @@ class ScriptPipeline(BasePipeline):
         }
 
     def _text_publish_audit(self, job_id: str, script: dict[str, Any], fact_pack: dict[str, Any]) -> dict[str, Any]:
-        if self.settings.simple_shorts_mode:
+        if self.settings.simple_shorts_mode and fact_pack.get("status") == "skipped":
             audit = {"passed": True, "reasons": [], "provider": "simple_shorts_mode", "skipped": True}
             self.storage.persist_json(
                 job_id,
@@ -1417,7 +1419,9 @@ class ScriptPipeline(BasePipeline):
         script = self._postprocess_script_for_quality(script, plan_dict, [])
         script["qa_metrics"] = normalize_script_metrics(dict(script.get("qa_metrics") or {}))
         gate_result = self.script_gate.validate(script, target_duration_sec)
-        consistency_reasons = [] if self.settings.simple_shorts_mode else self._fact_pack_consistency_reasons(script, plan_dict.get("fact_pack"))
+        fact_pack = plan_dict.get("fact_pack") if isinstance(plan_dict.get("fact_pack"), dict) else {}
+        simple_mode_fact_skip = self.settings.simple_shorts_mode and fact_pack.get("status") == "skipped"
+        consistency_reasons = [] if simple_mode_fact_skip else self._fact_pack_consistency_reasons(script, fact_pack)
         attempts_log: list[dict[str, Any]] = [
             {
                 "repair_attempt": 0,
@@ -1426,7 +1430,7 @@ class ScriptPipeline(BasePipeline):
                 "used_fallback": False,
             }
         ]
-        if self.settings.simple_shorts_mode:
+        if simple_mode_fact_skip:
             critical_reasons = self._simple_mode_blocking_script_reasons(gate_result.reasons)
             if critical_reasons:
                 raise RecoverableStepError(f"script quality gate failed: {', '.join(critical_reasons)}")
