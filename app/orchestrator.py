@@ -4,6 +4,7 @@ import json
 import math
 import queue
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -13,9 +14,10 @@ import wave
 import ast
 import httpx
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo
 
 import imageio_ffmpeg
 from PIL import Image
@@ -38,6 +40,7 @@ from app.models import (
     Job,
     NarrationAsset,
     PerformanceMetric,
+    PublicationSchedule,
     RenderOutput,
     ReviewRecord,
     SceneAsset,
@@ -56,7 +59,7 @@ from app.quality.render_gate import RenderGate
 from app.quality.scene_gate import ScenePlanGate
 from app.quality.script_gate import ScriptQualityGate
 from app.quality.subtitle_gate import BAD_ENDINGS, SubtitleGate
-from app.schemas import SUPPORTED_LANGUAGES, SUPPORTED_NICHES, TopicRequestCreate
+from app.schemas import PublicationSchedulePayload, SUPPORTED_LANGUAGES, SUPPORTED_NICHES, TopicRequestCreate
 from app.storage import StorageManager
 from app.utils import (
     avg_words_per_sentence,
@@ -79,6 +82,7 @@ from app.utils import (
     wrap_caption,
     write_json,
 )
+from app.youtube_api import YouTubeIntegrationError, YouTubePublisher
 
 
 def normalize_script_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
@@ -200,6 +204,36 @@ SCENE_VISUAL_HINTS = [
     (("cor", "textura", "predadores"), "octopus rapidly changing skin color and texture while camouflaging from a predator"),
 ]
 
+RETENTION_HARD_FAILURE_STATUSES = {
+    "failed",
+    "script_quality_failed",
+    "scene_plan_quality_failed",
+    "asset_quality_failed",
+    "subtitle_quality_failed",
+    "render_quality_failed",
+}
+RETENTION_RECOVERABLE_STATUSES = {
+    "monetization_review",
+    "blocked_for_monetization",
+    "rejected",
+}
+RETENTION_EXCLUDED_JOB_STATUSES = {
+    "queued",
+    "running",
+    "published",
+    "cancelled",
+}
+RETENTION_EXCLUDED_SCHEDULE_STATUSES = {
+    "publishing",
+    "published",
+}
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=UTC)
+
 
 @dataclass
 class StepDefinition:
@@ -213,6 +247,8 @@ class JobOrchestrator:
         self.settings = get_settings()
         self.storage = StorageManager()
         self.providers = ProviderRegistry()
+        self.youtube = YouTubePublisher(self.settings)
+        self._last_retention_sweep_at = 0.0
         from app.pipelines.asset_pipeline import AssetPipeline
         from app.pipelines.monetization_pipeline import MonetizationPipeline
         from app.pipelines.render_pipeline import RenderPipeline
@@ -354,6 +390,7 @@ class JobOrchestrator:
             job.lease_owner = None
             job.lease_expires_at = None
             self._upsert_topic_registry(session, job_id, approved=False)
+            self._refresh_retention_state(session, job)
         self._append_event(job_id, "render.completed", "succeeded", {"status": job.status})
         self._cli_progress(job_id, "job", "finished", f"status={job.status}")
         return job.status
@@ -362,6 +399,9 @@ class JobOrchestrator:
         job = session.get(Job, job_id)
         if not job:
             raise KeyError(job_id)
+        retention = dict((job.quality_summary or {}).get("retention") or {})
+        retention_cleanup = self._read_job_json(job_id, "retention_cleanup.json")
+        artifacts_cleaned = bool(retention.get("cleaned") or retention_cleanup)
         topic_request = session.scalar(select(TopicRequest).where(TopicRequest.job_id == job_id))
         topic_plan = session.scalar(select(TopicPlan).where(TopicPlan.job_id == job_id))
         script = session.scalar(select(Script).where(Script.job_id == job_id))
@@ -370,16 +410,26 @@ class JobOrchestrator:
         subtitles = session.scalar(select(SubtitleTrack).where(SubtitleTrack.job_id == job_id))
         background_music = session.scalar(select(BackgroundMusicAsset).where(BackgroundMusicAsset.job_id == job_id))
         render = session.scalar(select(RenderOutput).where(RenderOutput.job_id == job_id))
+        publication_schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
         assets = session.scalars(select(SceneAsset).where(SceneAsset.job_id == job_id).order_by(SceneAsset.scene_id, SceneAsset.provider)).all()
         fallbacks = session.scalars(select(FallbackEvent).where(FallbackEvent.job_id == job_id).order_by(FallbackEvent.created_at)).all()
         errors = session.scalars(select(ErrorLog).where(ErrorLog.job_id == job_id).order_by(ErrorLog.created_at)).all()
         reviews = session.scalars(select(ReviewRecord).where(ReviewRecord.job_id == job_id).order_by(ReviewRecord.created_at)).all()
+        cleanup_snapshots = dict(retention_cleanup.get("snapshots") or {})
+        if artifacts_cleaned:
+            render = None
+            narration = None
+            subtitles = None
+            background_music = None
+            assets = []
         repair_telemetry = {
             "topic_plan": self._read_job_json(job_id, "topic_plan_repair_telemetry.json"),
             "script": self._read_job_json(job_id, "script_repair_telemetry.json"),
             "background_music": self._read_job_json(job_id, "background_music_repair_telemetry.json"),
             "render": self._read_job_json(job_id, "render_repair_telemetry.json"),
         }
+        if artifacts_cleaned:
+            repair_telemetry = {}
         return {
             "job": job,
             "topic_request": topic_request,
@@ -391,6 +441,7 @@ class JobOrchestrator:
             "subtitles": subtitles,
             "background_music": background_music,
             "render": render,
+            "publication_schedule": publication_schedule,
             "fallbacks": fallbacks,
             "errors": errors,
             "reviews": reviews,
@@ -399,8 +450,314 @@ class JobOrchestrator:
             ).all(),
             "repair_telemetry": repair_telemetry,
             "events": self._read_events(job_id),
-            "monetization_report": self._read_job_json(job_id, "monetization_report.json"),
-            "publish_package": self._read_job_json(job_id, "publish_package.json"),
+            "monetization_report": self._read_job_json(job_id, "monetization_report.json") or cleanup_snapshots.get("monetization_report", {}),
+            "publish_package": self._read_job_json(job_id, "publish_package.json") or cleanup_snapshots.get("publish_package", {}),
+            "publish_result": self._read_job_json(job_id, "publish_result.json") or cleanup_snapshots.get("publish_result", {}),
+            "publication_attempts": self._read_job_json(job_id, "youtube_publish_attempts.json").get("attempts", []) or cleanup_snapshots.get("publication_attempts", []),
+            "retention_cleanup": retention_cleanup,
+            "artifacts_cleaned": artifacts_cleaned,
+        }
+
+    def _scheduled_local_to_utc(self, scheduled_for_local: str, timezone_name: str) -> datetime:
+        local_naive = datetime.fromisoformat(scheduled_for_local)
+        local_aware = local_naive.replace(tzinfo=ZoneInfo(timezone_name))
+        return local_aware.astimezone(UTC)
+
+    def _publication_schedule_payload(self, schedule: PublicationSchedule) -> dict[str, Any]:
+        scheduled_for_utc = schedule.scheduled_for_utc if schedule.scheduled_for_utc.tzinfo else schedule.scheduled_for_utc.replace(tzinfo=UTC)
+        published_at = schedule.published_at if schedule.published_at and schedule.published_at.tzinfo else (
+            schedule.published_at.replace(tzinfo=UTC) if schedule.published_at else None
+        )
+        local_dt = scheduled_for_utc.astimezone(ZoneInfo(schedule.timezone))
+        return {
+            "schema_version": self.settings.schema_version,
+            "job_id": schedule.job_id,
+            "schedule_id": schedule.schedule_id,
+            "created_at": schedule.created_at.isoformat() if schedule.created_at else None,
+            "updated_at": schedule.updated_at.isoformat() if schedule.updated_at else None,
+            "status": schedule.status,
+            "scheduled_for_utc": scheduled_for_utc.isoformat(),
+            "scheduled_for_local": local_dt.isoformat(),
+            "local_date": local_dt.date().isoformat(),
+            "local_time": local_dt.strftime("%H:%M"),
+            "timezone": schedule.timezone,
+            "youtube_visibility": schedule.youtube_visibility,
+            "notes": schedule.notes,
+            "published_at": published_at.isoformat() if published_at else None,
+            "youtube_video_id": schedule.youtube_video_id,
+            "youtube_url": schedule.youtube_url,
+        }
+
+    def _persist_publication_schedule_artifact(self, job: Job, schedule: PublicationSchedule) -> None:
+        payload = self._publication_schedule_payload(schedule)
+        self.storage.persist_json(job.job_id, "publication_schedule.json", self._serialize_for_json(payload))
+        artifact_index = dict(job.artifact_index or {})
+        artifact_index["publication_schedule"] = "publication_schedule.json"
+        job.artifact_index = artifact_index
+        quality_summary = dict(job.quality_summary or {})
+        quality_summary["publication_schedule"] = {
+            "status": schedule.status,
+            "scheduled_for_utc": payload["scheduled_for_utc"],
+            "scheduled_for_local": payload["scheduled_for_local"],
+            "timezone": schedule.timezone,
+            "youtube_visibility": schedule.youtube_visibility,
+        }
+        job.quality_summary = quality_summary
+
+    def _append_publication_attempt(self, job_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        attempts_payload = self._read_job_json(job_id, "youtube_publish_attempts.json")
+        attempts = list(attempts_payload.get("attempts") or [])
+        attempts.append(payload)
+        persisted = {
+            "schema_version": self.settings.schema_version,
+            "job_id": job_id,
+            "updated_at": iso_now(),
+            "attempts": attempts[-20:],
+        }
+        self.storage.persist_json(job_id, "youtube_publish_attempts.json", self._serialize_for_json(persisted))
+        return attempts[-20:]
+
+    def _youtube_api_mode_enabled(self) -> bool:
+        return bool(self.settings.youtube_api_enabled and self.settings.youtube_publish_mode == "api")
+
+    def _ensure_youtube_api_ready(self) -> None:
+        status = self.youtube.connection_status()
+        blockers = [
+            item
+            for item in status.missing_items
+            if item
+            not in {"YTS_YOUTUBE_PUBLISH_MODE != api", "YTS_YOUTUBE_API_ENABLED=false"}
+        ]
+        if blockers:
+            raise FatalStepError("integração YouTube indisponível: " + ", ".join(blockers))
+
+    def _update_publication_artifact_index(self, job: Job) -> None:
+        artifact_index = dict(job.artifact_index or {})
+        artifact_index["youtube_publish_attempts"] = "youtube_publish_attempts.json"
+        job_dir = self.storage.job_dir(job.job_id, create=False)
+        if (job_dir / "publish_result.json").exists():
+            artifact_index["publish_result"] = "publish_result.json"
+        if (job_dir / "publish_package.json").exists():
+            artifact_index["publish_package"] = "publish_package.json"
+        if (job_dir / "publish_metadata_overrides.json").exists():
+            artifact_index["publish_metadata_overrides"] = "publish_metadata_overrides.json"
+        job.artifact_index = artifact_index
+
+    def _retention_classification(self, job: Job, schedule: PublicationSchedule | None) -> str | None:
+        schedule_status = str(schedule.status or "") if schedule else ""
+        if job.status in RETENTION_EXCLUDED_JOB_STATUSES or schedule_status in RETENTION_EXCLUDED_SCHEDULE_STATUSES:
+            return None
+        if schedule_status == "scheduled":
+            return "publishable"
+        if schedule_status == "publish_failed":
+            return "recoverable"
+        if job.status in {"ready_for_upload", "approved_for_publish"}:
+            return "publishable"
+        if job.status in RETENTION_HARD_FAILURE_STATUSES:
+            return "hard_failure"
+        if job.status in RETENTION_RECOVERABLE_STATUSES:
+            return "recoverable"
+        return None
+
+    def _retention_base_timestamp(self, job: Job, schedule: PublicationSchedule | None) -> datetime:
+        timestamps = [_as_utc(job.updated_at) or _as_utc(job.created_at) or utcnow()]
+        if schedule and schedule.updated_at:
+            timestamps.append(_as_utc(schedule.updated_at) or utcnow())
+        return max(timestamps)
+
+    def _retention_ttl(self, classification: str) -> timedelta:
+        if classification == "hard_failure":
+            return timedelta(hours=self.settings.artifact_ttl_hard_failure_hours)
+        if classification == "recoverable":
+            return timedelta(hours=self.settings.artifact_ttl_recoverable_hours)
+        return timedelta(hours=self.settings.artifact_ttl_publishable_hours)
+
+    def _retention_metadata(
+        self,
+        job: Job,
+        schedule: PublicationSchedule | None,
+        *,
+        now: datetime,
+        cleaned: bool = False,
+        cleaned_at: str | None = None,
+        cleanup_reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        classification = self._retention_classification(job, schedule)
+        if not classification:
+            return None
+        base_timestamp = self._retention_base_timestamp(job, schedule)
+        expires_at = base_timestamp + self._retention_ttl(classification)
+        return {
+            "classification": classification,
+            "base_timestamp": base_timestamp.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "last_evaluated_at": now.isoformat(),
+            "cleaned": cleaned,
+            "cleaned_at": cleaned_at,
+            "cleanup_reason": cleanup_reason,
+        }
+
+    def _set_retention_metadata(self, job: Job, metadata: dict[str, Any] | None) -> None:
+        quality_summary = dict(job.quality_summary or {})
+        if metadata is None:
+            quality_summary.pop("retention", None)
+        else:
+            quality_summary["retention"] = metadata
+        job.quality_summary = quality_summary
+
+    def _retention_cleanup_snapshot(
+        self,
+        job: Job,
+        schedule: PublicationSchedule | None,
+        metadata: dict[str, Any],
+    ) -> dict[str, Any]:
+        snapshots = {
+            "monetization_report": self._read_job_json(job.job_id, "monetization_report.json"),
+            "publish_package": self._read_job_json(job.job_id, "publish_package.json"),
+            "publish_result": self._read_job_json(job.job_id, "publish_result.json"),
+            "publication_attempts": self._read_job_json(job.job_id, "youtube_publish_attempts.json").get("attempts", []),
+        }
+        if schedule:
+            snapshots["publication_schedule"] = self._publication_schedule_payload(schedule)
+        return {
+            "schema_version": self.settings.schema_version,
+            "job_id": job.job_id,
+            "cleaned_at": metadata.get("cleaned_at"),
+            "classification": metadata.get("classification"),
+            "expires_at": metadata.get("expires_at"),
+            "cleanup_reason": metadata.get("cleanup_reason"),
+            "snapshots": snapshots,
+        }
+
+    def _cleanup_expired_job_artifacts(self, job_id: str) -> bool:
+        if not self.settings.artifact_retention_enabled:
+            return False
+        now = utcnow()
+        with session_scope() as session:
+            job = session.get(Job, job_id)
+            if not job:
+                return False
+            schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
+            current_retention = dict((job.quality_summary or {}).get("retention") or {})
+            if current_retention.get("cleaned"):
+                return False
+            metadata = current_retention or self._retention_metadata(job, schedule, now=now)
+            self._set_retention_metadata(job, metadata)
+            if not metadata:
+                return False
+            expires_at = _as_utc(datetime.fromisoformat(str(metadata["expires_at"]))) or now
+            if expires_at > now:
+                return False
+            cleaned_at = iso_now()
+            metadata = {
+                **metadata,
+                "cleaned": True,
+                "cleaned_at": cleaned_at,
+                "cleanup_reason": "ttl_expired",
+                "last_evaluated_at": cleaned_at,
+            }
+            snapshot = self._retention_cleanup_snapshot(job, schedule, metadata)
+            self.storage.remove_job_artifacts(job_id)
+            self.storage.persist_json(job_id, "retention_cleanup.json", self._serialize_for_json(snapshot))
+            self._set_retention_metadata(job, metadata)
+            job.artifact_index = {"retention_cleanup": "retention_cleanup.json"}
+        self._append_event(job_id, "job.artifacts.cleaned", "succeeded", {"reason": "ttl_expired"})
+        return True
+
+    def _refresh_retention_state(self, session: Session, job: Job, schedule: PublicationSchedule | None = None) -> None:
+        if not self.settings.artifact_retention_enabled:
+            return
+        schedule = schedule if schedule is not None else session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job.job_id))
+        current_retention = dict((job.quality_summary or {}).get("retention") or {})
+        metadata = self._retention_metadata(job, schedule, now=utcnow())
+        if current_retention.get("cleaned"):
+            self._set_retention_metadata(
+                job,
+                {
+                    **current_retention,
+                    "last_evaluated_at": iso_now(),
+                },
+            )
+            return
+        self._set_retention_metadata(job, metadata)
+
+    def _run_retention_sweep(self) -> int:
+        if not self.settings.artifact_retention_enabled:
+            return 0
+        with session_scope() as session:
+            rows = set(
+                session.execute(
+                select(Job.job_id).where(
+                    Job.status.in_(
+                        tuple(
+                            RETENTION_HARD_FAILURE_STATUSES
+                            | RETENTION_RECOVERABLE_STATUSES
+                            | {"ready_for_upload", "approved_for_publish"}
+                        )
+                    )
+                )
+                ).scalars().all()
+            )
+            rows.update(
+                session.execute(
+                    select(PublicationSchedule.job_id).where(PublicationSchedule.status.in_(("scheduled", "publish_failed")))
+                ).scalars().all()
+            )
+            for job_id in rows:
+                job = session.get(Job, job_id)
+                if job:
+                    self._refresh_retention_state(session, job)
+        cleaned = 0
+        for job_id in rows:
+            if self._cleanup_expired_job_artifacts(job_id):
+                cleaned += 1
+        self._last_retention_sweep_at = time.monotonic()
+        return cleaned
+
+    def _sync_monetization_report_from_quality_summary(self, job: Job) -> dict[str, Any] | None:
+        summary = dict((job.quality_summary or {}).get("monetization") or {})
+        if not summary:
+            return None
+        report = dict(self._read_job_json(job.job_id, "monetization_report.json") or {})
+        report.update(
+            {
+                "schema_version": self.settings.schema_version,
+                "job_id": job.job_id,
+                "created_at": report.get("created_at") or iso_now(),
+                "passed": bool(summary.get("passed")),
+                "final_status": summary.get("final_status"),
+                "hard_blockers": list(summary.get("hard_blockers") or []),
+                "manual_required": list(summary.get("manual_required") or []),
+                "warnings": list(summary.get("warnings") or []),
+            }
+        )
+        self.storage.persist_json(job.job_id, "monetization_report.json", self._serialize_for_json(report))
+        return report
+
+    def _upload_publish_package(self, package: dict[str, Any], visibility: str) -> dict[str, Any]:
+        video_uri = str(package.get("video_uri") or "").strip()
+        if not video_uri:
+            raise FatalStepError("publish package missing video_uri")
+        try:
+            upload = self.youtube.upload_video(
+                video_path=path_from_uri(video_uri),
+                title=str(package.get("title") or "") or "Short",
+                description=str(package.get("description") or ""),
+                tags=list(package.get("hashtags") or []),
+                privacy_status=visibility,
+                altered_or_synthetic=bool(package.get("altered_or_synthetic")),
+            )
+        except YouTubeIntegrationError as exc:
+            raise FatalStepError(str(exc)) from exc
+        return {
+            "mode": "api",
+            "api_enabled": True,
+            "video_id": str(upload.get("id") or "").strip() or None,
+            "url": upload.get("youtube_url"),
+            "published_at": iso_now(),
+            "response": upload,
+            "target_visibility": visibility,
+            "actual_visibility": ((upload.get("status") or {}).get("privacyStatus") if isinstance(upload.get("status"), dict) else None),
         }
 
     def review_job(self, payload: dict[str, Any], job_id: str) -> str | None:
@@ -437,6 +794,7 @@ class JobOrchestrator:
                     }
                     job.quality_summary = quality_summary
                     job.status = report["final_status"]
+                    self._refresh_retention_state(session, job)
                     raise FatalStepError(f"monetization readiness incomplete: {', '.join(report['hard_blockers'] + report['manual_required'])}")
                 self.storage.persist_json(job.job_id, "monetization_report.json", self._serialize_for_json(report))
                 quality_summary = dict(job.quality_summary or {})
@@ -452,11 +810,13 @@ class JobOrchestrator:
                 job.status = "approved_for_publish"
                 job.review_state = "approved"
                 self._upsert_topic_registry(session, job_id, approved=True)
+                self._refresh_retention_state(session, job)
                 self._append_event(job_id, "review.approved", "succeeded", payload)
                 return None
             if payload["action"] == "reject":
                 job.status = "rejected"
                 job.review_state = "rejected"
+                self._refresh_retention_state(session, job)
                 self._append_event(job_id, "review.rejected", "succeeded", payload)
                 return None
             request = session.scalar(select(TopicRequest).where(TopicRequest.job_id == job_id))
@@ -502,33 +862,362 @@ class JobOrchestrator:
         if action == "retry" and job.status not in retryable_statuses:
             raise FatalStepError(f"job status {job.status} cannot be retried")
 
-    def publish_job(self, job_id: str, youtube_video_id: str | None = None, youtube_url: str | None = None) -> None:
+    def publish_job(
+        self,
+        job_id: str,
+        youtube_video_id: str | None = None,
+        youtube_url: str | None = None,
+        *,
+        trigger: str = "manual",
+    ) -> None:
+        attempt_id = new_id()
         with session_scope() as session:
             job = session.get(Job, job_id)
             if not job:
                 raise KeyError(job_id)
             if job.status not in {"approved_for_publish", "published"}:
                 raise FatalStepError("job must be approved_for_publish before publishing")
-            if self.settings.youtube_publish_mode == "manual" and not (str(youtube_video_id or "").strip() or str(youtube_url or "").strip()):
-                raise FatalStepError("manual publish requires youtube_video_id or youtube_url")
+            schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
             monetization_report = self._read_job_json(job.job_id, "monetization_report.json")
+            monetization_summary = dict((job.quality_summary or {}).get("monetization") or {})
+            if monetization_summary.get("passed") is True and not monetization_report.get("passed"):
+                monetization_report = self._sync_monetization_report_from_quality_summary(job) or monetization_report
             if monetization_report and not monetization_report.get("passed"):
                 raise FatalStepError("job has not passed monetization readiness gate")
+            if self._youtube_api_mode_enabled():
+                self._ensure_youtube_api_ready()
+            elif not (str(youtube_video_id or "").strip() or str(youtube_url or "").strip()):
+                raise FatalStepError("manual publish requires youtube_video_id or youtube_url")
             package = self._build_publish_package(session, job)
-            package["youtube"] = {
-                "mode": self.settings.youtube_publish_mode,
-                "api_enabled": self.settings.youtube_api_enabled,
-                "video_id": youtube_video_id,
-                "url": youtube_url,
-                "published_at": iso_now(),
-            }
-            self.storage.persist_json(job.job_id, "publish_result.json", self._serialize_for_json(package))
+            published_at = utcnow()
+            if schedule is None:
+                schedule = PublicationSchedule(
+                    schedule_id=new_id(),
+                    job_id=job_id,
+                    schema_version=self.settings.schema_version,
+                    content_hash="",
+                    created_at=published_at,
+                    scheduled_for_utc=published_at,
+                    timezone="UTC",
+                    youtube_visibility="private",
+                    status="scheduled" if self._youtube_api_mode_enabled() else "published",
+                )
+                session.add(schedule)
+            if self._youtube_api_mode_enabled():
+                schedule.status = "publishing"
+                self._persist_publication_schedule_artifact(job, schedule)
+            package_snapshot = self._serialize_for_json(package)
+            visibility = schedule.youtube_visibility or "private"
+            notes = schedule.notes
+
+        started_at = iso_now()
+        attempt_payload = {
+            "attempt_id": attempt_id,
+            "trigger": trigger,
+            "started_at": started_at,
+            "status": "started",
+            "mode": "api" if self._youtube_api_mode_enabled() else "manual",
+            "target_visibility": visibility,
+            "notes": notes,
+        }
+        self._append_publication_attempt(job_id, attempt_payload)
+
+        try:
+            if self._youtube_api_mode_enabled():
+                youtube_payload = self._upload_publish_package(package_snapshot, visibility)
+                youtube_video_id = youtube_payload.get("video_id")
+                youtube_url = youtube_payload.get("url")
+            else:
+                youtube_payload = {
+                    "mode": self.settings.youtube_publish_mode,
+                    "api_enabled": self.settings.youtube_api_enabled,
+                    "video_id": str(youtube_video_id or "").strip() or None,
+                    "url": str(youtube_url or "").strip() or None,
+                    "published_at": iso_now(),
+                }
+        except Exception as exc:
+            with session_scope() as session:
+                job = session.get(Job, job_id)
+                if not job:
+                    raise
+                schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
+                if schedule is not None:
+                    schedule.status = "publish_failed"
+                    schedule.content_hash = stable_hash(
+                        {
+                            "job_id": job_id,
+                            "scheduled_for_utc": schedule.scheduled_for_utc.isoformat(),
+                            "timezone": schedule.timezone,
+                            "youtube_visibility": schedule.youtube_visibility,
+                            "status": schedule.status,
+                            "notes": schedule.notes,
+                        }
+                    )
+                    self._persist_publication_schedule_artifact(job, schedule)
+                quality_summary = dict(job.quality_summary or {})
+                quality_summary["youtube_publish"] = {
+                    "status": "publish_failed",
+                    "last_error": str(exc),
+                    "last_attempt_at": iso_now(),
+                }
+                job.quality_summary = quality_summary
+                self._update_publication_artifact_index(job)
+                self._refresh_retention_state(session, job, schedule)
+            self._append_publication_attempt(
+                job_id,
+                {
+                    "attempt_id": attempt_id,
+                    "trigger": trigger,
+                    "started_at": started_at,
+                    "finished_at": iso_now(),
+                    "status": "failed",
+                    "mode": "api" if self._youtube_api_mode_enabled() else "manual",
+                    "target_visibility": visibility,
+                    "error": str(exc),
+                },
+            )
+            self._append_event(job_id, "youtube.publish_failed", "failed", {"error": str(exc), "trigger": trigger})
+            if isinstance(exc, FatalStepError):
+                raise
+            raise FatalStepError(str(exc)) from exc
+
+        with session_scope() as session:
+            job = session.get(Job, job_id)
+            if not job:
+                raise KeyError(job_id)
+            schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
+            published_at = utcnow()
+            if schedule is None:
+                schedule = PublicationSchedule(
+                    schedule_id=new_id(),
+                    job_id=job_id,
+                    schema_version=self.settings.schema_version,
+                    content_hash="",
+                    created_at=published_at,
+                    scheduled_for_utc=published_at,
+                    timezone="UTC",
+                    youtube_visibility=visibility,
+                    status="published",
+                )
+                session.add(schedule)
+            package_snapshot["youtube"] = youtube_payload
+            self.storage.persist_json(job.job_id, "publish_result.json", self._serialize_for_json(package_snapshot))
+            schedule.status = "published"
+            schedule.published_at = published_at
+            schedule.youtube_video_id = str(youtube_video_id or "").strip() or None
+            schedule.youtube_url = str(youtube_url or "").strip() or None
+            schedule.content_hash = stable_hash(
+                {
+                    "job_id": job_id,
+                    "scheduled_for_utc": schedule.scheduled_for_utc.isoformat(),
+                    "timezone": schedule.timezone,
+                    "youtube_visibility": schedule.youtube_visibility,
+                    "status": schedule.status,
+                    "notes": schedule.notes,
+                    "published_at": schedule.published_at.isoformat() if schedule.published_at else None,
+                    "youtube_video_id": schedule.youtube_video_id,
+                    "youtube_url": schedule.youtube_url,
+                }
+            )
+            self._persist_publication_schedule_artifact(job, schedule)
             job.status = "published"
             job.review_state = "published"
             quality_summary = dict(job.quality_summary or {})
-            quality_summary["youtube"] = package["youtube"]
+            quality_summary["youtube"] = youtube_payload
+            quality_summary["youtube_publish"] = {
+                "status": "published",
+                "last_attempt_at": iso_now(),
+                "mode": youtube_payload.get("mode"),
+                "video_id": schedule.youtube_video_id,
+                "youtube_url": schedule.youtube_url,
+            }
             job.quality_summary = quality_summary
-        self._append_event(job_id, "youtube.published", "succeeded", {"video_id": youtube_video_id, "url": youtube_url})
+            self._update_publication_artifact_index(job)
+            self._refresh_retention_state(session, job, schedule)
+        self._append_publication_attempt(
+            job_id,
+            {
+                "attempt_id": attempt_id,
+                "trigger": trigger,
+                "started_at": started_at,
+                "finished_at": iso_now(),
+                "status": "published",
+                "mode": youtube_payload.get("mode"),
+                "target_visibility": visibility,
+                "youtube_video_id": youtube_video_id,
+                "youtube_url": youtube_url,
+            },
+        )
+        self._append_event(job_id, "youtube.published", "succeeded", {"video_id": youtube_video_id, "url": youtube_url, "trigger": trigger})
+
+    def update_publish_metadata(self, job_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        with session_scope() as session:
+            job = session.get(Job, job_id)
+            if not job:
+                raise KeyError(job_id)
+            overrides = self.monetization_pipeline.normalize_publish_metadata_overrides(
+                payload.get("title"),
+                payload.get("description"),
+                payload.get("hashtags"),
+            )
+            persisted = {
+                "schema_version": self.settings.schema_version,
+                "job_id": job_id,
+                "updated_at": iso_now(),
+                **overrides,
+            }
+            self.storage.persist_json(job_id, "publish_metadata_overrides.json", self._serialize_for_json(persisted))
+            package = self._build_publish_package(session, job)
+            self.storage.persist_json(job_id, "publish_package.json", self._serialize_for_json(package))
+            self._refresh_retention_state(session, job)
+            self._update_publication_artifact_index(job)
+        self._append_event(
+            job_id,
+            "publish.metadata.updated",
+            "succeeded",
+            {
+                "title": package.get("title"),
+                "hashtags": package.get("hashtags"),
+            },
+        )
+        return package
+
+    def schedule_publication(self, job_id: str, payload: dict[str, Any]) -> None:
+        validated = PublicationSchedulePayload(**payload)
+        scheduled_for_utc = self._scheduled_local_to_utc(validated.scheduled_for_local, validated.timezone)
+        if scheduled_for_utc <= utcnow():
+            raise FatalStepError("scheduled publish time must be in the future")
+        if self._youtube_api_mode_enabled():
+            self._ensure_youtube_api_ready()
+        with session_scope() as session:
+            job = session.get(Job, job_id)
+            if not job:
+                raise KeyError(job_id)
+            if job.status != "approved_for_publish":
+                raise FatalStepError("job must be approved_for_publish before entering the publication schedule")
+            schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
+            if schedule is None:
+                schedule = PublicationSchedule(
+                    schedule_id=new_id(),
+                    job_id=job_id,
+                    schema_version=self.settings.schema_version,
+                    content_hash="",
+                    created_at=utcnow(),
+                    scheduled_for_utc=scheduled_for_utc,
+                    timezone=validated.timezone,
+                    youtube_visibility=validated.youtube_visibility,
+                    status="scheduled",
+                    notes=validated.notes,
+                )
+                session.add(schedule)
+            else:
+                schedule.scheduled_for_utc = scheduled_for_utc
+                schedule.timezone = validated.timezone
+                schedule.youtube_visibility = validated.youtube_visibility
+                schedule.status = "scheduled"
+                schedule.notes = validated.notes
+                schedule.published_at = None
+                schedule.youtube_video_id = None
+                schedule.youtube_url = None
+            schedule.content_hash = stable_hash(
+                {
+                    "job_id": job_id,
+                    "scheduled_for_utc": schedule.scheduled_for_utc.isoformat(),
+                    "timezone": schedule.timezone,
+                    "youtube_visibility": schedule.youtube_visibility,
+                    "status": schedule.status,
+                    "notes": schedule.notes,
+                }
+            )
+            self._persist_publication_schedule_artifact(job, schedule)
+            self._refresh_retention_state(session, job, schedule)
+        self._append_event(
+            job_id,
+            "youtube.schedule.updated",
+            "succeeded",
+            {
+                "scheduled_for_utc": scheduled_for_utc.isoformat(),
+                "timezone": validated.timezone,
+                "youtube_visibility": validated.youtube_visibility,
+            },
+        )
+
+    def clear_publication_schedule(self, job_id: str) -> None:
+        with session_scope() as session:
+            job = session.get(Job, job_id)
+            if not job:
+                raise KeyError(job_id)
+            schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
+            if schedule is None:
+                return
+            if schedule.status == "published":
+                raise FatalStepError("published job schedule cannot be cleared")
+            schedule.status = "cancelled"
+            schedule.content_hash = stable_hash(
+                {
+                    "job_id": job_id,
+                    "scheduled_for_utc": schedule.scheduled_for_utc.isoformat(),
+                    "timezone": schedule.timezone,
+                    "youtube_visibility": schedule.youtube_visibility,
+                    "status": schedule.status,
+                    "notes": schedule.notes,
+                }
+            )
+            self._persist_publication_schedule_artifact(job, schedule)
+            self._refresh_retention_state(session, job, schedule)
+        self._append_event(job_id, "youtube.schedule.cleared", "succeeded", {})
+
+    def reopen_publication_for_republish(self, job_id: str) -> None:
+        reopened_at = iso_now()
+        with session_scope() as session:
+            job = session.get(Job, job_id)
+            if not job:
+                raise KeyError(job_id)
+            if job.status != "published":
+                raise FatalStepError("only published jobs can be reopened for republication")
+            schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
+            if schedule is None or schedule.status != "published":
+                raise FatalStepError("published job is missing a published schedule record")
+            previous_video_id = schedule.youtube_video_id
+            previous_youtube_url = schedule.youtube_url
+            schedule.status = "cancelled"
+            schedule.published_at = None
+            schedule.youtube_video_id = None
+            schedule.youtube_url = None
+            schedule.content_hash = stable_hash(
+                {
+                    "job_id": job_id,
+                    "scheduled_for_utc": schedule.scheduled_for_utc.isoformat(),
+                    "timezone": schedule.timezone,
+                    "youtube_visibility": schedule.youtube_visibility,
+                    "status": schedule.status,
+                    "notes": schedule.notes,
+                }
+            )
+            self._persist_publication_schedule_artifact(job, schedule)
+            job.status = "approved_for_publish"
+            job.review_state = "approved"
+            quality_summary = dict(job.quality_summary or {})
+            quality_summary["youtube_publish"] = {
+                "status": "reopened_for_republish",
+                "last_reopened_at": reopened_at,
+                "previous_video_id": previous_video_id,
+                "previous_youtube_url": previous_youtube_url,
+            }
+            job.quality_summary = quality_summary
+            self._update_publication_artifact_index(job)
+            self._refresh_retention_state(session, job, schedule)
+        self._append_publication_attempt(
+            job_id,
+            {
+                "attempt_id": new_id(),
+                "trigger": "reopen_for_republish",
+                "started_at": reopened_at,
+                "finished_at": reopened_at,
+                "status": "reopened_for_republish",
+            },
+        )
+        self._append_event(job_id, "youtube.reopened_for_republish", "succeeded", {"status": "approved_for_publish"})
 
     def record_performance_metrics(self, job_id: str, payload: dict[str, Any]) -> None:
         with session_scope() as session:
@@ -1471,6 +2160,7 @@ class JobOrchestrator:
         fact_claims_report: dict[str, Any],
         metadata_review: dict[str, Any],
         channel_repetition_report: dict[str, Any],
+        publish_audit_required: bool,
         confirmations: set[str],
     ) -> dict[str, Any]:
         return self.monetization_pipeline.build_human_review_checklist(
@@ -1479,6 +2169,7 @@ class JobOrchestrator:
             fact_claims_report=fact_claims_report,
             metadata_review=metadata_review,
             channel_repetition_report=channel_repetition_report,
+            publish_audit_required=publish_audit_required,
             confirmations=confirmations,
         )
 
@@ -1570,7 +2261,7 @@ class JobOrchestrator:
             handle.write(line + "\n")
 
     def _read_events(self, job_id: str) -> list[dict[str, Any]]:
-        event_path = self.storage.job_dir(job_id) / "events.jsonl"
+        event_path = self.storage.job_dir(job_id, create=False) / "events.jsonl"
         if not event_path.exists():
             return []
         return [json.loads(line) for line in event_path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -1611,12 +2302,20 @@ class JobOrchestrator:
 
     def _worker_loop(self) -> None:
         while not self.stop_event.is_set():
+            if self.settings.artifact_retention_enabled:
+                should_sweep = time.monotonic() - self._last_retention_sweep_at >= self.settings.artifact_retention_sweep_seconds
+                if should_sweep:
+                    self._run_retention_sweep()
             with session_scope() as session:
                 claimed_job_id = self._claim_next_job(session)
             if claimed_job_id:
                 self.process_job(claimed_job_id)
-            else:
-                time.sleep(self.settings.worker_poll_seconds)
+                continue
+            claimed_publication_job_id = self._claim_due_publication_schedule()
+            if claimed_publication_job_id:
+                self.publish_job(claimed_publication_job_id, trigger="schedule_worker")
+                continue
+            time.sleep(self.settings.worker_poll_seconds)
 
     def _claim_next_job(self, session: Session) -> str | None:
         now = utcnow()
@@ -1644,6 +2343,37 @@ class JobOrchestrator:
             .returning(Job.job_id)
         )
         return session.execute(claim).scalar_one_or_none()
+
+    def _claim_due_publication_schedule(self) -> str | None:
+        if not self._youtube_api_mode_enabled():
+            return None
+        now = utcnow()
+        with session_scope() as session:
+            claimable_job_id = (
+                select(PublicationSchedule.job_id)
+                .join(Job, Job.job_id == PublicationSchedule.job_id)
+                .where(PublicationSchedule.status == "scheduled")
+                .where(PublicationSchedule.scheduled_for_utc <= now)
+                .where(Job.status == "approved_for_publish")
+                .order_by(PublicationSchedule.scheduled_for_utc)
+                .limit(1)
+                .scalar_subquery()
+            )
+            claim = (
+                update(PublicationSchedule)
+                .where(PublicationSchedule.job_id == claimable_job_id)
+                .where(PublicationSchedule.status == "scheduled")
+                .values(status="publishing", updated_at=utcnow())
+                .returning(PublicationSchedule.job_id)
+            )
+            claimed_job_id = session.execute(claim).scalar_one_or_none()
+            if not claimed_job_id:
+                return None
+            job = session.get(Job, claimed_job_id)
+            schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == claimed_job_id))
+            if job and schedule:
+                self._persist_publication_schedule_artifact(job, schedule)
+            return claimed_job_id
 
 
 orchestrator = JobOrchestrator()

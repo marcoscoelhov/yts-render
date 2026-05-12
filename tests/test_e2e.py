@@ -8,11 +8,12 @@ import shutil
 import threading
 import time
 import wave
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -25,11 +26,12 @@ import app.main as main_module  # noqa: E402
 import app.orchestrator as orchestrator_module  # noqa: E402
 import app.pipelines.script_pipeline as script_pipeline_module  # noqa: E402
 from app.compliance.review import build_human_review_checklist  # noqa: E402
+from app.config import Settings  # noqa: E402
 from app.db import SessionLocal, engine, init_db  # noqa: E402
 from app.editorial.retention import EDITORIAL_PROMPT_VERSION, build_retention_map  # noqa: E402
 from app.editorial.repetition import build_channel_repetition_report  # noqa: E402
 from app.main import app, artifact_url  # noqa: E402
-from app.models import BackgroundMusicAsset, Job, NarrationAsset, PerformanceMetric, RenderOutput, SceneAsset, Script, SubtitleTrack, TopicPlan, TopicRegistry, TopicRequest  # noqa: E402
+from app.models import BackgroundMusicAsset, Job, NarrationAsset, PerformanceMetric, PublicationSchedule, RenderOutput, SceneAsset, Script, SubtitleTrack, TopicPlan, TopicRegistry, TopicRequest  # noqa: E402
 from app.orchestrator import JobOrchestrator, RecoverableStepError, StepDefinition, normalize_script_metrics, orchestrator  # noqa: E402
 from app.providers import DeepSeekCreativeProvider, LLMProviderRegistry, LocalSpeechFallbackProvider, MiniMaxBackgroundMusicProvider, MinimaxCreativeProvider, MinimaxImageProvider, MockCreativeProvider, OpenAICreativeProvider, ProviderFailure, ResilientCreativeProvider, ResilientMusicProvider  # noqa: E402
 from app.quality.asset_gate import AssetGate  # noqa: E402
@@ -39,6 +41,15 @@ from app.quality.scene_gate import ScenePlanGate  # noqa: E402
 from app.quality.script_gate import ScriptQualityGate  # noqa: E402
 from app.quality.subtitle_gate import SubtitleGate  # noqa: E402
 from app.utils import parse_srt, split_caption_chunks, utcnow, word_tokens, wrap_caption  # noqa: E402
+from app.youtube_api import YouTubeConnectionStatus, YouTubePublisher  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def isolate_youtube_settings(monkeypatch):
+    monkeypatch.setattr(main_module.settings, "youtube_publish_mode", "manual")
+    monkeypatch.setattr(main_module.settings, "youtube_api_enabled", False)
+    monkeypatch.setattr(orchestrator.settings, "youtube_publish_mode", "manual")
+    monkeypatch.setattr(orchestrator.settings, "youtube_api_enabled", False)
 
 
 def wait_for_status(job_id: str, expected: str, timeout: float = 90.0) -> None:
@@ -76,6 +87,58 @@ def setup_module() -> None:
 
 def teardown_module() -> None:
     orchestrator.stop_worker()
+
+
+def _create_basic_job(
+    session,
+    *,
+    job_id: str,
+    status: str,
+    seed_theme: str = "Polvos",
+    updated_at: datetime | None = None,
+    quality_summary: dict | None = None,
+    artifact_index: dict | None = None,
+    review_state: str | None = None,
+) -> str:
+    topic_request_id = f"{job_id}-request"
+    timestamp = updated_at or utcnow()
+    session.add(
+        Job(
+            job_id=job_id,
+            schema_version="1.0.0",
+            content_hash=f"{job_id}-hash",
+            created_at=timestamp,
+            updated_at=timestamp,
+            status=status,
+            niche_id="curiosidades",
+            language="pt-BR",
+            target_duration_sec=35,
+            topic_request_id=topic_request_id,
+            quality_summary=quality_summary or {},
+            artifact_index=artifact_index or {},
+            review_state=review_state,
+        )
+    )
+    session.add(
+        TopicRequest(
+            topic_request_id=topic_request_id,
+            job_id=job_id,
+            schema_version="1.0.0",
+            content_hash=f"{job_id}-request-hash",
+            niche_id="curiosidades",
+            seed_theme=seed_theme,
+            language="pt-BR",
+            target_duration_sec=35,
+        )
+    )
+    return topic_request_id
+
+
+def _write_job_artifact(job_id: str, relative_path: str, content: str = "artifact") -> Path:
+    artifact_path = Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id / relative_path
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(content, encoding="utf-8")
+    return artifact_path
 
 
 def test_full_pipeline_reaches_monetization_review() -> None:
@@ -120,8 +183,8 @@ def test_full_pipeline_reaches_monetization_review() -> None:
         assert any(step["step_name"] == "render" and step["duration_ms"] is not None for step in timeline["steps"])
     detail = client.get(f"/jobs/{job_id}")
     assert detail.status_code == 200
-    assert "Render" in detail.text
-    assert "Audio &amp; Subtitles" in detail.text
+    assert "Aprovar vídeo" in detail.text
+    assert "Agendar no YouTube" in detail.text
 
 
 def test_artifact_url_maps_file_uri_to_static_route() -> None:
@@ -1383,14 +1446,14 @@ def test_hub_jobs_table_supports_pagination_for_older_jobs() -> None:
     assert "pagehub-job-2" in first_page.text
     assert "pagehub-job-1" in first_page.text
     assert "pagehub-job-0" not in first_page.text
-    assert "Pagina 1 de 2" in first_page.text
+    assert "Página 1 de 2" in first_page.text
     assert "page=2&amp;per_page=2&amp;search=pagehub" in first_page.text
 
     second_page = client.get("/jobs?search=pagehub&per_page=2&page=2")
     assert second_page.status_code == 200
     assert "pagehub-job-0" in second_page.text
     assert "pagehub-job-2" not in second_page.text
-    assert "Pagina 2 de 2" in second_page.text
+    assert "Página 2 de 2" in second_page.text
 
 
 def test_job_detail_accepts_unique_short_job_prefix() -> None:
@@ -1572,8 +1635,8 @@ def test_review_action_rejects_non_reviewable_status() -> None:
         follow_redirects=False,
     )
 
-    assert approve.status_code == 409
-    assert "cannot be approved" in approve.text
+    assert approve.status_code == 303
+    assert "review_error=job+status+queued+cannot+be+approved" in approve.headers["location"]
 
 
 def test_manual_publish_requires_youtube_reference() -> None:
@@ -1610,8 +1673,1089 @@ def test_manual_publish_requires_youtube_reference() -> None:
 
     response = client.post(f"/jobs/{job_id}/publish", data={}, follow_redirects=False)
 
+    assert response.status_code == 303
+    assert "publish_error=manual+publish+requires+youtube_video_id+or+youtube_url" in response.headers["location"]
+
+
+def test_schedule_publication_persists_row_and_appears_in_calendar() -> None:
+    client = TestClient(app)
+    job_id = "scheduled-calendar-job"
+    topic_request_id = "scheduled-calendar-job-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="schedule",
+                status="approved_for_publish",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=45,
+                topic_request_id=topic_request_id,
+                artifact_index={},
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="schedule-request",
+                niche_id="curiosidades",
+                seed_theme="Lago Natron",
+                language="pt-BR",
+                target_duration_sec=45,
+            )
+        )
+        session.add(
+            Script(
+                script_id="scheduled-calendar-script",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="scheduled-calendar-script",
+                title="Lago Natron parece impossível",
+                hook="Parece pedra, mas era um animal.",
+                body_beats=["A química da água muda o aspecto dos corpos."],
+                ending="O choque é real, mas a explicação também é.",
+                cta=None,
+                full_narration="Parece pedra, mas era um animal. A química da água muda o aspecto dos corpos. O choque é real, mas a explicação também é.",
+                estimated_duration_sec=40,
+                key_facts=[],
+                token_count=24,
+                language="pt-BR",
+                qa_metrics={},
+                prompt_version="test",
+            )
+        )
+        session.commit()
+
+    response = client.post(
+        f"/jobs/{job_id}/schedule",
+        data={
+            "scheduled_for_local": "2099-06-10T14:30",
+            "timezone": "America/Sao_Paulo",
+            "youtube_visibility": "private",
+            "notes": "slot da tarde",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with SessionLocal() as session:
+        schedule = session.query(PublicationSchedule).filter_by(job_id=job_id).one()
+        job = session.get(Job, job_id)
+
+    assert schedule.status == "scheduled"
+    assert schedule.timezone == "America/Sao_Paulo"
+    assert schedule.youtube_visibility == "private"
+    assert job and job.artifact_index["publication_schedule"] == "publication_schedule.json"
+    artifact = json.loads((Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id / "publication_schedule.json").read_text(encoding="utf-8"))
+    assert artifact["local_date"] == "2099-06-10"
+
+    calendar_page = client.get("/calendar?month=2099-06")
+    assert calendar_page.status_code == 200
+    assert "Lago Natron parece impossível" in calendar_page.text
+    assert "14:30" in calendar_page.text
+
+
+def test_clear_publication_schedule_marks_entry_cancelled() -> None:
+    client = TestClient(app)
+    job_id = "scheduled-clear-job"
+    topic_request_id = "scheduled-clear-job-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="schedule-clear",
+                status="approved_for_publish",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=45,
+                topic_request_id=topic_request_id,
+                artifact_index={},
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="schedule-clear-request",
+                niche_id="curiosidades",
+                seed_theme="Polvos",
+                language="pt-BR",
+                target_duration_sec=45,
+            )
+        )
+        session.add(
+            PublicationSchedule(
+                schedule_id="schedule-clear-row",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="schedule-clear-row",
+                scheduled_for_utc=utcnow() + timedelta(days=30),
+                timezone="UTC",
+                youtube_visibility="unlisted",
+                status="scheduled",
+            )
+        )
+        session.commit()
+
+    response = client.post(f"/jobs/{job_id}/schedule", data={"action": "clear"}, follow_redirects=False)
+
+    assert response.status_code == 303
+    with SessionLocal() as session:
+        schedule = session.query(PublicationSchedule).filter_by(job_id=job_id).one()
+
+    assert schedule.status == "cancelled"
+
+
+def test_schedule_publication_requires_approved_job() -> None:
+    client = TestClient(app)
+    job_id = "scheduled-unapproved-job"
+    topic_request_id = "scheduled-unapproved-job-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="schedule-unapproved",
+                status="ready_for_upload",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=45,
+                topic_request_id=topic_request_id,
+                artifact_index={},
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="schedule-unapproved-request",
+                niche_id="curiosidades",
+                seed_theme="Polvos",
+                language="pt-BR",
+                target_duration_sec=45,
+            )
+        )
+        session.commit()
+
+    response = client.post(
+        f"/jobs/{job_id}/schedule",
+        data={
+            "scheduled_for_local": "2099-06-10T14:30",
+            "timezone": "UTC",
+            "youtube_visibility": "private",
+        },
+        follow_redirects=False,
+    )
+
     assert response.status_code == 409
-    assert "manual publish requires" in response.text
+    assert "approved_for_publish" in response.text
+
+
+def test_manual_publish_marks_publication_schedule_as_published() -> None:
+    client = TestClient(app)
+    job_id = "scheduled-publish-job"
+    topic_request_id = "scheduled-publish-job-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="schedule-publish",
+                status="approved_for_publish",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=45,
+                topic_request_id=topic_request_id,
+                artifact_index={},
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="schedule-publish-request",
+                niche_id="curiosidades",
+                seed_theme="Flamingos",
+                language="pt-BR",
+                target_duration_sec=45,
+            )
+        )
+        session.add(
+            PublicationSchedule(
+                schedule_id="schedule-publish-row",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="schedule-publish-row",
+                scheduled_for_utc=utcnow() + timedelta(days=2),
+                timezone="UTC",
+                youtube_visibility="private",
+                status="scheduled",
+            )
+        )
+        session.commit()
+
+    response = client.post(
+        f"/jobs/{job_id}/publish",
+        data={"youtube_url": "https://youtube.com/shorts/abc123"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with SessionLocal() as session:
+        schedule = session.query(PublicationSchedule).filter_by(job_id=job_id).one()
+        job = session.get(Job, job_id)
+
+    assert schedule.status == "published"
+    assert schedule.youtube_url == "https://youtube.com/shorts/abc123"
+    assert schedule.published_at is not None
+    assert job and job.status == "published"
+
+
+def test_job_detail_hides_immediate_publish_when_schedule_is_active() -> None:
+    client = TestClient(app)
+    job_id = "scheduled-detail-job"
+    topic_request_id = "scheduled-detail-job-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="scheduled-detail",
+                status="approved_for_publish",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=45,
+                topic_request_id=topic_request_id,
+                artifact_index={},
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="scheduled-detail-request",
+                niche_id="curiosidades",
+                seed_theme="Flamingos",
+                language="pt-BR",
+                target_duration_sec=45,
+            )
+        )
+        session.add(
+            PublicationSchedule(
+                schedule_id="scheduled-detail-row",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="scheduled-detail-row",
+                scheduled_for_utc=datetime(2099, 6, 11, 17, 0, tzinfo=UTC),
+                timezone="America/Sao_Paulo",
+                youtube_visibility="public",
+                status="scheduled",
+            )
+        )
+        session.commit()
+
+    response = client.get(f"/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert "Publicação automática ativada" in response.text
+    assert "2099-06-11" in response.text
+    assert "14:00" in response.text
+    assert "Não precisa clicar em mais nada" in response.text
+    assert "Reagendar publicação" in response.text
+    assert "Publicar imediatamente e ignorar agenda" not in response.text
+
+
+def test_retention_sweep_cleans_expired_hard_failure_artifacts() -> None:
+    job_id = "retention-hard-failure-job"
+    expired_at = utcnow() - timedelta(days=2)
+    with SessionLocal() as session:
+        _create_basic_job(
+            session,
+            job_id=job_id,
+            status="render_quality_failed",
+            seed_theme="Falha dura",
+            updated_at=expired_at,
+            artifact_index={"render": "render/final.mp4"},
+        )
+        session.commit()
+
+    artifact_path = _write_job_artifact(job_id, "render/final.mp4", "video")
+    cleaned = orchestrator._run_retention_sweep()
+
+    assert cleaned >= 1
+    assert not artifact_path.exists()
+    cleanup_path = Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id / "retention_cleanup.json"
+    assert cleanup_path.exists()
+    cleanup = json.loads(cleanup_path.read_text(encoding="utf-8"))
+    assert cleanup["classification"] == "hard_failure"
+    assert cleanup["cleanup_reason"] == "ttl_expired"
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.status == "render_quality_failed"
+    assert job.artifact_index == {"retention_cleanup": "retention_cleanup.json"}
+    assert job.quality_summary["retention"]["cleaned"] is True
+    assert job.quality_summary["retention"]["classification"] == "hard_failure"
+
+
+def test_retention_sweep_cleans_recoverable_jobs_after_medium_ttl() -> None:
+    job_id = "retention-recoverable-job"
+    expired_at = utcnow() - timedelta(days=8)
+    with SessionLocal() as session:
+        _create_basic_job(
+            session,
+            job_id=job_id,
+            status="rejected",
+            seed_theme="Pode corrigir",
+            updated_at=expired_at,
+            artifact_index={"render": "render/final.mp4"},
+        )
+        session.commit()
+
+    artifact_path = _write_job_artifact(job_id, "render/final.mp4", "video")
+    cleaned = orchestrator._run_retention_sweep()
+
+    assert cleaned >= 1
+    assert not artifact_path.exists()
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert job.status == "rejected"
+    assert job.quality_summary["retention"]["cleaned"] is True
+    assert job.quality_summary["retention"]["classification"] == "recoverable"
+
+
+def test_retention_sweep_keeps_publishable_jobs_longer_and_job_detail_handles_cleanup() -> None:
+    client = TestClient(app)
+    job_id = "retention-publishable-job"
+    expired_job_id = "retention-publishable-expired-job"
+    medium_age = utcnow() - timedelta(days=8)
+    long_age = utcnow() - timedelta(days=30)
+    video_path = _write_job_artifact(job_id, "render/final.mp4", "video")
+    poster_path = _write_job_artifact(job_id, "render/poster.jpg", "poster")
+    log_path = _write_job_artifact(job_id, "render/ffmpeg.log", "log")
+    with SessionLocal() as session:
+        _create_basic_job(
+            session,
+            job_id=job_id,
+            status="approved_for_publish",
+            seed_theme="Danakil",
+            updated_at=medium_age,
+            artifact_index={"render": "render/final.mp4", "publish_package": "publish_package.json"},
+            review_state="approved",
+        )
+        session.add(
+            RenderOutput(
+                render_id=f"{job_id}-render",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash=f"{job_id}-render-hash",
+                video_uri=video_path.as_uri(),
+                poster_uri=poster_path.as_uri(),
+                waveform_uri=None,
+                duration_ms=36_000,
+                resolution="1080x1920",
+                video_codec="h264",
+                audio_codec="aac",
+                filesize_bytes=1024,
+                ffmpeg_log_uri=log_path.as_uri(),
+            )
+        )
+        session.add(
+            PublicationSchedule(
+                schedule_id=f"{job_id}-schedule",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash=f"{job_id}-schedule-hash",
+                created_at=medium_age,
+                updated_at=medium_age,
+                scheduled_for_utc=utcnow() + timedelta(days=10),
+                timezone="America/Sao_Paulo",
+                youtube_visibility="private",
+                status="scheduled",
+            )
+        )
+        session.commit()
+        _create_basic_job(
+            session,
+            job_id=expired_job_id,
+            status="approved_for_publish",
+            seed_theme="Danakil expirado",
+            updated_at=long_age,
+            artifact_index={"render": "render/final.mp4", "publish_package": "publish_package.json"},
+            review_state="approved",
+        )
+        session.add(
+            RenderOutput(
+                render_id=f"{expired_job_id}-render",
+                job_id=expired_job_id,
+                schema_version="1.0.0",
+                content_hash=f"{expired_job_id}-render-hash",
+                video_uri=_write_job_artifact(expired_job_id, "render/final.mp4", "video").as_uri(),
+                poster_uri=_write_job_artifact(expired_job_id, "render/poster.jpg", "poster").as_uri(),
+                waveform_uri=None,
+                duration_ms=36_000,
+                resolution="1080x1920",
+                video_codec="h264",
+                audio_codec="aac",
+                filesize_bytes=1024,
+                ffmpeg_log_uri=_write_job_artifact(expired_job_id, "render/ffmpeg.log", "log").as_uri(),
+            )
+        )
+        session.add(
+            PublicationSchedule(
+                schedule_id=f"{expired_job_id}-schedule",
+                job_id=expired_job_id,
+                schema_version="1.0.0",
+                content_hash=f"{expired_job_id}-schedule-hash",
+                created_at=long_age,
+                updated_at=long_age,
+                scheduled_for_utc=utcnow() + timedelta(days=10),
+                timezone="America/Sao_Paulo",
+                youtube_visibility="private",
+                status="scheduled",
+            )
+        )
+        session.commit()
+
+    orchestrator.storage.persist_json(
+        job_id,
+        "publish_package.json",
+        {
+            "schema_version": "1.0.0",
+            "job_id": job_id,
+            "title": "Meta Danakil",
+            "description": "Descrição de teste",
+            "hashtags": ["#shorts", "#danakil"],
+            "video_uri": video_path.as_uri(),
+        },
+    )
+    orchestrator.storage.persist_json(
+        expired_job_id,
+        "publish_package.json",
+        {
+            "schema_version": "1.0.0",
+            "job_id": expired_job_id,
+            "title": "Meta Danakil",
+            "description": "Descrição de teste",
+            "hashtags": ["#shorts", "#danakil"],
+            "video_uri": f"file://{expired_job_id}/render/final.mp4",
+        },
+    )
+
+    cleaned = orchestrator._run_retention_sweep()
+
+    assert cleaned >= 1
+    assert video_path.exists()
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        assert job.quality_summary["retention"]["cleaned"] is False
+        assert job.quality_summary["retention"]["classification"] == "publishable"
+    response = client.get(f"/jobs/{expired_job_id}")
+    assert response.status_code == 200
+    assert "Artefatos expirados e removidos automaticamente." in response.text
+    assert "Os arquivos de mídia deste job já foram removidos." in response.text
+    assert "Meta Danakil" in response.text
+
+    cleanup_path = Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / expired_job_id / "retention_cleanup.json"
+    assert cleanup_path.exists()
+    with SessionLocal() as session:
+        job = session.get(Job, expired_job_id)
+
+    assert job is not None
+    assert job.artifact_index == {"retention_cleanup": "retention_cleanup.json"}
+    assert job.quality_summary["retention"]["cleaned"] is True
+    assert job.quality_summary["retention"]["classification"] == "publishable"
+
+
+def test_retention_sweep_skips_published_jobs() -> None:
+    job_id = "retention-published-job"
+    old_timestamp = utcnow() - timedelta(days=60)
+    with SessionLocal() as session:
+        _create_basic_job(
+            session,
+            job_id=job_id,
+            status="published",
+            seed_theme="Publicado",
+            updated_at=old_timestamp,
+            artifact_index={"render": "render/final.mp4"},
+            review_state="published",
+        )
+        session.commit()
+
+    artifact_path = _write_job_artifact(job_id, "render/final.mp4", "video")
+    cleaned = orchestrator._run_retention_sweep()
+
+    assert cleaned == 0
+    assert artifact_path.exists()
+    assert not (Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id / "retention_cleanup.json").exists()
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+
+    assert job is not None
+    assert (job.quality_summary or {}).get("retention") is None
+
+
+def test_manual_publish_syncs_stale_monetization_report_when_quality_summary_passed() -> None:
+    client = TestClient(app)
+    job_id = "stale-monetization-publish-job"
+    topic_request_id = "stale-monetization-publish-job-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="stale-publish",
+                status="approved_for_publish",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=45,
+                topic_request_id=topic_request_id,
+                artifact_index={},
+                quality_summary={
+                    "monetization": {
+                        "passed": True,
+                        "final_status": "ready_for_upload",
+                        "hard_blockers": [],
+                        "manual_required": [],
+                        "warnings": [],
+                    }
+                },
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="stale-publish-request",
+                niche_id="curiosidades",
+                seed_theme="Flamingos",
+                language="pt-BR",
+                target_duration_sec=45,
+            )
+        )
+        session.commit()
+
+    orchestrator.storage.persist_json(
+        job_id,
+        "monetization_report.json",
+        {
+            "schema_version": "1.0.0",
+            "job_id": job_id,
+            "created_at": utcnow().isoformat(),
+            "passed": False,
+            "final_status": "blocked_for_monetization",
+            "hard_blockers": ["old_blocker"],
+            "manual_required": [],
+            "warnings": [],
+        },
+    )
+
+    response = client.post(
+        f"/jobs/{job_id}/publish",
+        data={"youtube_url": "https://youtube.com/shorts/abc123"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    report = orchestrator._read_job_json(job_id, "monetization_report.json")
+    assert report["passed"] is True
+    assert report["final_status"] == "ready_for_upload"
+
+
+def test_reopen_publication_moves_published_job_back_to_approved_for_republish() -> None:
+    client = TestClient(app)
+    job_id = "reopen-published-job"
+    topic_request_id = "reopen-published-job-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="reopen-publish",
+                status="published",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=45,
+                topic_request_id=topic_request_id,
+                review_state="published",
+                artifact_index={},
+                quality_summary={"youtube_publish": {"status": "published"}},
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="reopen-publish-request",
+                niche_id="curiosidades",
+                seed_theme="Flamingos",
+                language="pt-BR",
+                target_duration_sec=45,
+            )
+        )
+        session.add(
+            PublicationSchedule(
+                schedule_id="reopen-publish-row",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="reopen-publish-row",
+                scheduled_for_utc=utcnow() + timedelta(days=2),
+                timezone="UTC",
+                youtube_visibility="private",
+                status="published",
+                youtube_video_id="yt123",
+                youtube_url="https://youtube.com/watch?v=yt123",
+                published_at=utcnow(),
+            )
+        )
+        session.commit()
+
+    response = client.post(f"/jobs/{job_id}/reopen-publication", follow_redirects=False)
+
+    assert response.status_code == 303
+    with SessionLocal() as session:
+        schedule = session.query(PublicationSchedule).filter_by(job_id=job_id).one()
+        job = session.get(Job, job_id)
+
+    assert schedule.status == "cancelled"
+    assert schedule.youtube_video_id is None
+    assert schedule.youtube_url is None
+    assert schedule.published_at is None
+    assert job and job.status == "approved_for_publish"
+    assert job.review_state == "approved"
+    assert job.quality_summary["youtube_publish"]["status"] == "reopened_for_republish"
+
+
+def test_reopen_publication_rejects_job_that_was_not_published() -> None:
+    client = TestClient(app)
+    job_id = "reopen-not-published-job"
+    topic_request_id = "reopen-not-published-job-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="reopen-not-published",
+                status="approved_for_publish",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=45,
+                topic_request_id=topic_request_id,
+                artifact_index={},
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="reopen-not-published-request",
+                niche_id="curiosidades",
+                seed_theme="Flamingos",
+                language="pt-BR",
+                target_duration_sec=45,
+            )
+        )
+        session.commit()
+
+    response = client.post(f"/jobs/{job_id}/reopen-publication", follow_redirects=False)
+
+    assert response.status_code == 409
+    assert "only published jobs can be reopened for republication" in response.text
+
+
+def test_publish_metadata_form_persists_overrides_into_publish_package() -> None:
+    client = TestClient(app)
+    job_id = "publish-metadata-job"
+    topic_request_id = "publish-metadata-job-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="publish-metadata",
+                status="ready_for_upload",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=45,
+                topic_request_id=topic_request_id,
+                artifact_index={},
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="publish-metadata-request",
+                niche_id="curiosidades",
+                seed_theme="Danakil",
+                language="pt-BR",
+                target_duration_sec=45,
+            )
+        )
+        session.add(
+            Script(
+                script_id="publish-metadata-script",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="publish-metadata-script",
+                title="Danakil parece outro planeta",
+                hook="Danakil parece outro planeta.",
+                body_beats=["O povo Afar vive ali há gerações."],
+                ending="É um lugar real, não ficção.",
+                cta=None,
+                full_narration="Danakil parece outro planeta. O povo Afar vive ali há gerações. É um lugar real, não ficção.",
+                estimated_duration_sec=38,
+                key_facts=[],
+                token_count=18,
+                language="pt-BR",
+                qa_metrics={},
+                prompt_version="test",
+            )
+        )
+        session.commit()
+
+    response = client.post(
+        f"/jobs/{job_id}/publish-metadata",
+        data={
+            "title": "Danakil: o lugar mais extremo da Terra onde pessoas ainda vivem",
+            "description": "Na Depressão de Danakil, na Etiópia, calor extremo e salinas criam uma das paisagens mais hostis do planeta.",
+            "hashtags": "#shorts #curiosidades #danakil #etiopia #geografia",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    overrides = json.loads((Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id / "publish_metadata_overrides.json").read_text(encoding="utf-8"))
+    package = json.loads((Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id / "publish_package.json").read_text(encoding="utf-8"))
+
+    assert overrides["title"] == "Danakil: o lugar mais extremo da Terra onde pessoas ainda vivem"
+    assert package["title"] == overrides["title"]
+    assert package["description"].startswith("Na Depressão de Danakil")
+    assert package["hashtags"] == ["#shorts", "#curiosidades", "#danakil", "#etiopia", "#geografia"]
+
+
+def test_schedule_publication_requires_connected_youtube_in_api_mode(monkeypatch) -> None:
+    client = TestClient(app)
+    job_id = "scheduled-api-needs-oauth"
+    topic_request_id = "scheduled-api-needs-oauth-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="scheduled-api-needs-oauth",
+                status="approved_for_publish",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=45,
+                topic_request_id=topic_request_id,
+                artifact_index={},
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="scheduled-api-needs-oauth-request",
+                niche_id="curiosidades",
+                seed_theme="Axolotes",
+                language="pt-BR",
+                target_duration_sec=45,
+            )
+        )
+        session.commit()
+
+    monkeypatch.setattr(orchestrator.settings, "youtube_api_enabled", True)
+    monkeypatch.setattr(orchestrator.settings, "youtube_publish_mode", "api")
+    monkeypatch.setattr(
+        orchestrator.youtube,
+        "connection_status",
+        lambda redirect_uri=None: YouTubeConnectionStatus(
+            connected=False,
+            client_configured=True,
+            dependencies_available=True,
+            missing_items=["Canal ainda não conectado por OAuth"],
+            redirect_uri=redirect_uri,
+            token_expires_at=None,
+            granted_scopes=[],
+            connected_at=None,
+        ),
+    )
+
+    response = client.post(
+        f"/jobs/{job_id}/schedule",
+        data={
+            "scheduled_for_local": "2099-06-10T14:30",
+            "timezone": "UTC",
+            "youtube_visibility": "private",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 409
+    assert "OAuth" in response.text
+
+
+def test_api_publish_uploads_video_without_manual_url(monkeypatch) -> None:
+    client = TestClient(app)
+    job_id = "api-publish-job"
+    topic_request_id = "api-publish-job-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="api-publish-job",
+                status="approved_for_publish",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=45,
+                topic_request_id=topic_request_id,
+                artifact_index={},
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="api-publish-job-request",
+                niche_id="curiosidades",
+                seed_theme="Aves migratórias",
+                language="pt-BR",
+                target_duration_sec=45,
+            )
+        )
+        session.commit()
+
+    monkeypatch.setattr(orchestrator.settings, "youtube_api_enabled", True)
+    monkeypatch.setattr(orchestrator.settings, "youtube_publish_mode", "api")
+    monkeypatch.setattr(orchestrator, "_ensure_youtube_api_ready", lambda: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "_upload_publish_package",
+        lambda package, visibility: {
+            "mode": "api",
+            "api_enabled": True,
+            "video_id": "yt123",
+            "url": "https://www.youtube.com/watch?v=yt123",
+            "published_at": "2099-06-10T14:30:00+00:00",
+            "target_visibility": visibility,
+            "actual_visibility": visibility,
+            "response": {"id": "yt123", "status": {"privacyStatus": visibility}},
+        },
+    )
+
+    response = client.post(f"/jobs/{job_id}/publish", data={}, follow_redirects=False)
+
+    assert response.status_code == 303
+    with SessionLocal() as session:
+        schedule = session.query(PublicationSchedule).filter_by(job_id=job_id).one()
+        job = session.get(Job, job_id)
+
+    assert schedule.status == "published"
+    assert schedule.youtube_video_id == "yt123"
+    assert schedule.youtube_url == "https://www.youtube.com/watch?v=yt123"
+    assert job and job.status == "published"
+
+
+def test_youtube_connect_redirects_to_google(monkeypatch) -> None:
+    client = TestClient(app)
+    monkeypatch.setattr(orchestrator.youtube, "authorization_url", lambda redirect_uri: "https://accounts.google.com/o/oauth2/auth?state=test")
+
+    response = client.get("/youtube/connect", follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("https://accounts.google.com/o/oauth2/auth")
+
+
+def test_youtube_load_credentials_normalizes_aware_expiry_for_google_auth(monkeypatch, tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path,
+        youtube_api_enabled=True,
+        youtube_publish_mode="api",
+        youtube_client_id="client-id",
+        youtube_client_secret="client-secret",
+    )
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    settings.youtube_token_path.write_text(
+        json.dumps(
+            {
+                "token": "token-123",
+                "refresh_token": "refresh-123",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "scopes": ["https://www.googleapis.com/auth/youtube.upload"],
+                "expiry": "2026-05-12T14:50:58+00:00",
+                "connected_at": "2026-05-12T14:50:59+00:00",
+                "redirect_uri": "https://example.test/youtube/oauth/callback",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    refresh_calls: list[str] = []
+
+    class FakeCredentials:
+        def __init__(self, **kwargs):
+            self.token = kwargs["token"]
+            self.refresh_token = kwargs["refresh_token"]
+            self.token_uri = kwargs["token_uri"]
+            self.client_id = kwargs["client_id"]
+            self.client_secret = kwargs["client_secret"]
+            self.scopes = kwargs["scopes"]
+            self.expiry = None
+
+        @property
+        def expired(self) -> bool:
+            # Mimic google-auth behavior, which compares against naive UTC now.
+            return datetime.now(UTC).replace(tzinfo=None) >= self.expiry
+
+        def refresh(self, _request) -> None:
+            refresh_calls.append("called")
+            self.token = "token-refreshed"
+            self.expiry = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+
+    monkeypatch.setattr(
+        YouTubePublisher,
+        "_google_auth_dependencies",
+        lambda self: (SimpleNamespace(Credentials=FakeCredentials), SimpleNamespace(Request=lambda: object())),
+    )
+
+    publisher = YouTubePublisher(settings)
+    credentials = publisher._load_credentials(refresh=True)
+
+    assert refresh_calls == ["called"]
+    assert credentials.token == "token-refreshed"
+    assert credentials.expiry.tzinfo is None
+
+
+def test_publication_dashboard_fragment_shows_ready_and_scheduled_items() -> None:
+    client = TestClient(app)
+    approved_job_id = "publication-dashboard-approved"
+    scheduled_job_id = "publication-dashboard-scheduled"
+    with SessionLocal() as session:
+        session.add_all(
+            [
+                Job(
+                    job_id=approved_job_id,
+                    schema_version="1.0.0",
+                    content_hash="dashboard-approved",
+                    status="approved_for_publish",
+                    niche_id="curiosidades",
+                    language="pt-BR",
+                    target_duration_sec=45,
+                    topic_request_id="publication-dashboard-approved-request",
+                    artifact_index={},
+                ),
+                TopicRequest(
+                    topic_request_id="publication-dashboard-approved-request",
+                    job_id=approved_job_id,
+                    schema_version="1.0.0",
+                    content_hash="dashboard-approved-request",
+                    niche_id="curiosidades",
+                    seed_theme="Lulas gigantes",
+                    language="pt-BR",
+                    target_duration_sec=45,
+                ),
+                Script(
+                    script_id="publication-dashboard-approved-script",
+                    job_id=approved_job_id,
+                    schema_version="1.0.0",
+                    content_hash="dashboard-approved-script",
+                    title="Lulas gigantes somem por um motivo",
+                    hook="Elas aparecem e desaparecem do nada.",
+                    body_beats=["O habitat profundo limita encontros humanos."],
+                    ending="Por isso cada imagem delas parece impossível.",
+                    cta=None,
+                    full_narration="Elas aparecem e desaparecem do nada. O habitat profundo limita encontros humanos. Por isso cada imagem delas parece impossível.",
+                    estimated_duration_sec=39,
+                    key_facts=[],
+                    token_count=20,
+                    language="pt-BR",
+                    qa_metrics={},
+                    prompt_version="test",
+                ),
+                Job(
+                    job_id=scheduled_job_id,
+                    schema_version="1.0.0",
+                    content_hash="dashboard-scheduled",
+                    status="approved_for_publish",
+                    niche_id="curiosidades",
+                    language="pt-BR",
+                    target_duration_sec=45,
+                    topic_request_id="publication-dashboard-scheduled-request",
+                    artifact_index={},
+                ),
+                TopicRequest(
+                    topic_request_id="publication-dashboard-scheduled-request",
+                    job_id=scheduled_job_id,
+                    schema_version="1.0.0",
+                    content_hash="dashboard-scheduled-request",
+                    niche_id="curiosidades",
+                    seed_theme="Morcegos",
+                    language="pt-BR",
+                    target_duration_sec=45,
+                ),
+                Script(
+                    script_id="publication-dashboard-scheduled-script",
+                    job_id=scheduled_job_id,
+                    schema_version="1.0.0",
+                    content_hash="dashboard-scheduled-script",
+                    title="Morcegos enxergam com o som",
+                    hook="Eles mapeiam o ar no escuro.",
+                    body_beats=["O eco vira distância e forma."],
+                    ending="É quase uma visão construída em tempo real.",
+                    cta=None,
+                    full_narration="Eles mapeiam o ar no escuro. O eco vira distância e forma. É quase uma visão construída em tempo real.",
+                    estimated_duration_sec=37,
+                    key_facts=[],
+                    token_count=18,
+                    language="pt-BR",
+                    qa_metrics={},
+                    prompt_version="test",
+                ),
+                PublicationSchedule(
+                    schedule_id="publication-dashboard-scheduled-row",
+                    job_id=scheduled_job_id,
+                    schema_version="1.0.0",
+                    content_hash="dashboard-scheduled-row",
+                    scheduled_for_utc=datetime(2099, 6, 11, 17, 0, tzinfo=UTC),
+                    timezone="America/Sao_Paulo",
+                    youtube_visibility="private",
+                    status="scheduled",
+                ),
+            ]
+        )
+        session.commit()
+
+    response = client.get("/publication-hub")
+
+    assert response.status_code == 200
+    assert "Centro de publicação" in response.text
+    assert "Lulas gigantes somem por um motivo" in response.text
+    assert "Morcegos enxergam com o som" in response.text
+    assert "14:00" in response.text
+    assert "Canal" in response.text
 
 
 def test_review_page_renders_dynamic_checklist_and_structured_reason_codes() -> None:
@@ -2593,6 +3737,7 @@ def test_human_review_checklist_marks_required_completed_and_pending_items() -> 
         fact_claims_report={"requires_fact_review": False},
         metadata_review={"requires_metadata_review": True},
         channel_repetition_report={"repetition_risk": "medium"},
+        publish_audit_required=False,
         confirmations={"rights_confirmed", "originality_confirmed"},
     )
 
@@ -2611,6 +3756,7 @@ def test_human_review_checklist_auto_completes_channel_ai_disclosure() -> None:
         fact_claims_report={"requires_fact_review": False},
         metadata_review={"requires_metadata_review": False},
         channel_repetition_report={"repetition_risk": "low"},
+        publish_audit_required=False,
         confirmations=set(),
     )
 
@@ -2618,6 +3764,22 @@ def test_human_review_checklist_auto_completes_channel_ai_disclosure() -> None:
     assert "youtube_ai_disclosure_toggle_required" not in checklist["pending_codes"]
     disclosure_item = next(item for item in checklist["items"] if item["code"] == "youtube_ai_disclosure_toggle_required")
     assert disclosure_item["auto_completed"] is True
+
+
+def test_human_review_checklist_includes_publish_audit_confirmation() -> None:
+    checklist = build_human_review_checklist(
+        rights_registry={"all_commercial_rights_confirmed": True},
+        ai_disclosure={"youtube_disclosure_required": False},
+        fact_claims_report={"requires_fact_review": False},
+        metadata_review={"requires_metadata_review": False},
+        channel_repetition_report={"repetition_risk": "low"},
+        publish_audit_required=True,
+        confirmations=set(),
+    )
+
+    assert "publish_audit_required" in checklist["pending_codes"]
+    item = next(item for item in checklist["items"] if item["code"] == "publish_audit_required")
+    assert item["confirmation_code"] == "publish_audit_confirmed"
 
 
 def test_conservative_ai_disclosure_requires_toggle_for_any_synthetic_asset(monkeypatch) -> None:
@@ -3321,6 +4483,124 @@ def test_build_monetization_report_keeps_fact_review_in_simple_mode_with_verifie
     assert report["final_status"] == "monetization_review"
     assert report["passed"] is False
     assert "fact_review_required" in report["manual_required"]
+    assert "publish_audit_required" not in report["manual_required"]
+
+
+def test_build_monetization_report_allows_manual_publish_audit_confirmation(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.monetization_pipeline.settings, "simple_shorts_mode", True)
+    job_id = orchestrator.create_job(
+        {
+            "seed_theme": "paisagens extremas",
+            "niche_id": "curiosidades",
+            "language": "pt-BR",
+            "target_duration_sec": 35,
+            "tone": "intrigante_direto",
+            "cta_style": "none",
+            "notes": "teste",
+            "requested_angle": None,
+        }
+    )
+    with SessionLocal() as session:
+        session.add(
+            TopicPlan(
+                topic_id=f"topic-{job_id}",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="topic",
+                canonical_topic="Paisagens extremas",
+                angle="geografia",
+                hook_promise="lugares reais parecem outro planeta",
+                entities=["paisagens"],
+                search_terms=["paisagens extremas"],
+                title_candidates=["Paisagens extremas parecem irreais"],
+                quality_metrics={},
+            )
+        )
+        session.add(
+            Script(
+                script_id=f"script-{job_id}",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="script",
+                title="Paisagens extremas parecem irreais",
+                hook="Paisagens extremas parecem irreais.",
+                body_beats=[],
+                ending="No fim, parece outro planeta.",
+                cta=None,
+                full_narration="Paisagens extremas parecem irreais.",
+                estimated_duration_sec=35,
+                key_facts=[],
+                token_count=5,
+                language="pt-BR",
+                qa_metrics={"script_quality_gate_pass": True},
+            )
+        )
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.quality_summary = {
+            "script": {"script_quality_gate_pass": True},
+            "scene_plan": {"scene_plan_gate_pass": True},
+            "assets": {"semantic_threshold_pass": True},
+            "subtitles": {"subtitle_gate_pass": True},
+            "render": {"render_gate_pass": True},
+        }
+        session.commit()
+
+    monkeypatch.setattr(
+        orchestrator.monetization_pipeline,
+        "publish_readiness_report",
+        lambda *args, **kwargs: {
+            "passed": False,
+            "reasons": ["text_publish_audit_skipped"],
+            "fact_pack_status": "skipped",
+            "hashtag_count": 3,
+            "weak_hashtags": [],
+            "fact_risk": {"blocked": False, "claim_count": 0, "simple_shorts_mode": True},
+            "minimax_audit": {"passed": True, "skipped": True},
+            "simple_shorts_mode": True,
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator.monetization_pipeline,
+        "build_rights_registry",
+        lambda *args, **kwargs: {"all_commercial_rights_confirmed": True, "entries": []},
+    )
+    monkeypatch.setattr(
+        orchestrator.monetization_pipeline,
+        "build_ai_disclosure_report",
+        lambda *args, **kwargs: {
+            "youtube_disclosure_required": False,
+            "auto_confirmed": False,
+            "contains_synthetic_visuals": False,
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator.monetization_pipeline,
+        "build_fact_claims_report",
+        lambda *args, **kwargs: {
+            "requires_fact_review": False,
+            "claim_trace": [],
+            "claim_sources": [],
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator.monetization_pipeline,
+        "build_channel_repetition_report",
+        lambda *args, **kwargs: {"repetition_risk": "low", "matches": [], "signals": {}},
+    )
+    monkeypatch.setattr(
+        orchestrator.monetization_pipeline,
+        "build_metadata_review",
+        lambda *args, **kwargs: {"requires_metadata_review": False, "title": "", "suggested_hashtags": [], "reasons": []},
+    )
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        report = orchestrator.monetization_pipeline.build_monetization_report(session, job, {"publish_audit_confirmed"})
+
+    assert report["passed"] is True
+    assert report["final_status"] == "ready_for_upload"
     assert "publish_audit_required" not in report["manual_required"]
 
 
@@ -4733,6 +6013,48 @@ def test_publish_hashtags_use_history_tags_for_templarios() -> None:
     assert "#medieval" in tags
     assert "#protetores" not in tags
     assert "#peregrinos" not in tags
+
+
+def test_publish_hashtags_use_specific_geography_tags_for_danakil() -> None:
+    topic_plan = SimpleNamespace(
+        canonical_topic="Depressão de Danakil",
+        angle="geografia extrema da Etiópia",
+    )
+    script = SimpleNamespace(
+        title="Danakil: o lugar mais extremo da Terra onde pessoas ainda vivem",
+        key_facts=["O povo Afar vive na região há gerações."],
+    )
+
+    tags = orchestrator._build_publish_hashtags(topic_plan, script)
+
+    assert "#danakil" in tags
+    assert "#etiopia" in tags
+    assert "#geografia" in tags
+    assert "#terra" not in tags
+    assert "#lugar" not in tags
+
+
+def test_build_publish_description_prefers_concise_summary_over_full_narration() -> None:
+    description = orchestrator.monetization_pipeline.build_publish_description(
+        SimpleNamespace(canonical_topic="Depressão de Danakil", angle="geografia extrema"),
+        SimpleNamespace(
+            hook="Na Depressão de Danakil, calor e sal parecem cenário de outro planeta.",
+            body_beats=[
+                "Mesmo assim, o povo Afar vive e trabalha ali há gerações.",
+                "A paisagem mistura salinas, calor extremo e atividade geotérmica.",
+            ],
+            ending="É um dos ambientes habitados mais extremos do planeta.",
+            full_narration="Texto mais longo que não deve virar a descrição inteira.",
+        ),
+        "Danakil: o lugar mais extremo da Terra onde pessoas ainda vivem",
+        ["#shorts", "#curiosidades", "#danakil", "#etiopia", "#geografia"],
+        "Imagens ilustrativas geradas por IA.",
+    )
+
+    assert "Texto mais longo que não deve virar a descrição inteira." not in description
+    assert "Na Depressão de Danakil" in description
+    assert "Imagens ilustrativas geradas por IA." in description
+    assert "#shorts #curiosidades #danakil #etiopia #geografia" in description
 
 
 def test_publish_readiness_blocks_limited_fact_pack_with_invented_source_ids(monkeypatch) -> None:

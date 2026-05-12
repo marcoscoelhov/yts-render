@@ -14,38 +14,110 @@
 {% set review_checklist = monetization.human_review_checklist or publish_package.human_review_checklist or {} %}
 {% set checklist_items = review_checklist.get("items", []) %}
 {% set repair = details.repair_telemetry or {} %}
+{% set publication_attempts = details.publication_attempts or [] %}
+{% set publish_result = details.publish_result or {} %}
+{% set retention = (job.quality_summary or {}).get("retention", {}) %}
+{% set retention_cleanup = details.retention_cleanup or {} %}
+{% set artifacts_cleaned = details.artifacts_cleaned %}
 {% set can_approve = job.status in ["monetization_review", "ready_for_upload"] and not monetization.get("hard_blockers") %}
 {% set can_reject = job.status in ["monetization_review", "blocked_for_monetization", "ready_for_upload", "rejected", "failed", "script_quality_failed", "scene_plan_quality_failed", "asset_quality_failed", "subtitle_quality_failed", "render_quality_failed"] %}
 {% set can_retry = job.status in ["monetization_review", "blocked_for_monetization", "rejected", "failed", "script_quality_failed", "scene_plan_quality_failed", "asset_quality_failed", "subtitle_quality_failed", "render_quality_failed"] %}
-<section class="detail-grid" {% if job.status in ["queued", "running"] %}hx-get="/jobs/{{ job.job_id }}" hx-trigger="every 2s" hx-select=".detail-grid" hx-swap="outerHTML"{% endif %}>
+{% set schedule_status = publication_schedule_display.status if publication_schedule_display else None %}
+{% set is_approved = job.status in ["approved_for_publish", "published"] %}
+{% set schedule_ready = publication_schedule_display and publication_schedule_display.status == "scheduled" %}
+<section class="detail-grid minimalist-detail" {% if job.status in ["queued", "running"] or (publication_schedule_display and publication_schedule_display.status == "publishing") %}hx-get="/jobs/{{ job.job_id }}" hx-trigger="every 2s" hx-select=".detail-grid" hx-swap="outerHTML"{% endif %}>
   <div class="main-column">
-    <section class="panel">
+    {% if review_error %}
+    <section class="panel status-banner error-banner">
+      <strong>Não foi possível aprovar ainda.</strong>
+      <p>{{ review_error }}</p>
+    </section>
+    {% endif %}
+    {% if publish_error %}
+    <section class="panel status-banner error-banner">
+      <strong>Não foi possível publicar agora.</strong>
+      <p>{{ publish_error }}</p>
+    </section>
+    {% endif %}
+    {% if artifacts_cleaned %}
+    <section class="panel status-banner retention-banner">
+      <strong>Artefatos expirados e removidos automaticamente.</strong>
+      <p>
+        {% if retention.classification == "hard_failure" %}
+        Job com falha crítica, removido mais cedo para liberar disco.
+        {% elif retention.classification == "recoverable" %}
+        Job mantido por mais tempo para correção ou reaproveitamento, depois limpo.
+        {% else %}
+        Job mantido por mais tempo para revisão ou publicação, depois limpo.
+        {% endif %}
+      </p>
+      <small>
+        {% if retention.cleaned_at or retention_cleanup.cleaned_at %}
+        Limpo em {{ retention.cleaned_at or retention_cleanup.cleaned_at }}
+        {% else %}
+        Limpeza automática concluída.
+        {% endif %}
+      </small>
+    </section>
+    {% endif %}
+
+    <section class="panel detail-header-panel">
       <div class="detail-header">
         <div>
-          <p class="eyebrow">Job {{ job.job_id }}</p>
+          <p class="eyebrow">Job {{ job.job_id[:8] }}</p>
           <h2>{{ request_data.seed_theme }}</h2>
+          <p class="detail-subtitle">{{ job_flow_stage(job.status, schedule_status) }}</p>
         </div>
-        <span class="badge {{ job.status }}">{{ job.status }}</span>
+        <span class="badge {{ job.status }}">{{ job_status_label(job.status) }}</span>
       </div>
-      <div class="tab-strip">
-        <a href="#overview">Overview</a>
-        <a href="#script">Script</a>
-        <a href="#scenes">Scenes</a>
-        <a href="#assets">Assets</a>
-        <a href="#audio">Audio &amp; Subtitles</a>
-        <a href="#render">Render</a>
-        <a href="#monetization">Monetization</a>
-        <a href="#performance">Performance</a>
-        <a href="#self-healing">Self-Healing</a>
-        <a href="#logs">Logs</a>
+      <div class="focus-strip">
+        <div class="focus-pill">
+          <strong>Próxima ação</strong>
+          <span>{{ job_next_action(job.status, schedule_status) }}</span>
+        </div>
+        {% if publication_schedule_display %}
+        <div class="focus-pill">
+          <strong>Agenda</strong>
+          <span>{{ schedule_status_label(publication_schedule_display.status) }}</span>
+        </div>
+        {% endif %}
+        {% if render %}
+        <div class="focus-pill">
+          <strong>Duração</strong>
+          <span>{{ (render.duration_ms / 1000)|round(1) }} s</span>
+        </div>
+        {% endif %}
       </div>
     </section>
 
-    <section id="featured-render" class="panel featured-render">
+    <section class="panel featured-render minimal-featured-render">
+      <div class="featured-player-shell">
+        {% if render %}
+        <video class="featured-player" controls preload="metadata" poster="{{ artifact_url(render.poster_uri) }}" src="{{ artifact_url(render.video_uri) }}"></video>
+        {% elif artifacts_cleaned %}
+        <div class="empty-state-card">
+          <strong>Os arquivos de mídia deste job já foram removidos.</strong>
+          <p>O registro do job continua aqui, mas vídeo, áudio e assets expiraram pela política de retenção.</p>
+        </div>
+        {% else %}
+        <div class="empty-state-card">
+          <strong>Vídeo ainda não disponível.</strong>
+          <p>Aguarde o render terminar para revisar aqui.</p>
+        </div>
+        {% endif %}
+      </div>
       <div class="featured-copy">
-        <p class="eyebrow">Video Final</p>
-        <h3>Pronto para revisão humana</h3>
-        <p>O render final fica destacado aqui para reduzir navegação e acelerar a validação editorial.</p>
+        <p class="eyebrow">Revisão</p>
+        <h3>Assista e decida</h3>
+        <div class="compact-checklist">
+          <span>1. Veja o vídeo final</span>
+          <span>2. Ajuste o título se quiser</span>
+          <span>3. Aprove</span>
+          <span>4. Escolha data e hora</span>
+        </div>
+        {% if artifacts_cleaned %}
+        <p class="publication-note">Os artefatos pesados já expiraram. Os metadados e o histórico do job continuam disponíveis abaixo.</p>
+        {% endif %}
         {% if render %}
         <div class="featured-meta">
           <span>{{ render.resolution }}</span>
@@ -54,338 +126,362 @@
         </div>
         <div class="featured-actions">
           <a class="button-link" href="{{ artifact_url(render.video_uri) }}" target="_blank" rel="noopener">Abrir vídeo</a>
-          <a class="button-link ghost-link" href="{{ artifact_url(render.poster_uri) }}" target="_blank" rel="noopener">Abrir poster</a>
-          <a class="button-link ghost-link" href="{{ artifact_url(render.ffmpeg_log_uri) }}" target="_blank" rel="noopener">Ver log FFmpeg</a>
+          <a class="button-link ghost-link" href="{{ artifact_url(render.poster_uri) }}" target="_blank" rel="noopener">Poster</a>
         </div>
-        {% else %}
-        <p>Aguardando render.</p>
-        {% endif %}
-      </div>
-      <div class="featured-player-shell">
-        {% if render %}
-        <video class="featured-player" controls preload="metadata" poster="{{ artifact_url(render.poster_uri) }}" src="{{ artifact_url(render.video_uri) }}"></video>
         {% endif %}
       </div>
     </section>
 
-    <section id="overview" class="panel">
-      <h3>Overview</h3>
-      <div class="stats-grid">
-        <div><strong>Nicho</strong><span>{{ job.niche_id }}</span></div>
-        <div><strong>Idioma</strong><span>{{ job.language }}</span></div>
-        <div><strong>Duracao alvo</strong><span>{{ job.target_duration_sec }} s</span></div>
-        <div><strong>Resumo</strong><span>{{ job.topic_summary or "-" }}</span></div>
-      </div>
-      <pre>{{ job.quality_summary or {} }}</pre>
-    </section>
-
-    <section id="monetization" class="panel">
-      <h3>Monetization</h3>
-      {% if monetization %}
-      <div class="stats-grid">
-        <div><strong>Status</strong><span>{{ monetization.final_status }}</span></div>
-        <div><strong>Passou</strong><span>{{ monetization.passed }}</span></div>
-        <div><strong>Bloqueios</strong><span>{{ monetization.hard_blockers|length }}</span></div>
-        <div><strong>Revisão manual</strong><span>{{ monetization.manual_required|length }}</span></div>
-      </div>
-      <h4>Publish Verdict</h4>
-      {% if monetization.hard_blockers %}
-      <p><span class="badge blocked_for_monetization">bloqueado por qualidade</span></p>
-      <pre>{{ monetization.hard_blockers }}</pre>
-      {% elif monetization.manual_required %}
-      <p><span class="badge monetization_review">pendente humano</span></p>
-      {% elif monetization.passed %}
-      <p><span class="badge ready_for_upload">pronto para publicar</span></p>
-      {% else %}
-      <p><span class="badge queued">aguardando avaliação</span></p>
-      {% endif %}
-      {% if monetization.publish_readiness %}
-      <p><strong>Publish audit:</strong> {{ monetization.publish_readiness.passed }}</p>
-      <pre>{{ monetization.publish_readiness.reasons or [] }}</pre>
-      {% endif %}
-      <h4>Bloqueios</h4>
-      <pre>{{ monetization.hard_blockers }}</pre>
-      <h4>Confirmações pendentes</h4>
-      <pre>{{ monetization.manual_required }}</pre>
-      {% if checklist_items %}
-      <h4>Checklist humano</h4>
-      <div class="review-checklist-status">
-        {% for item in checklist_items %}
-        <div class="review-status-row">
-          <span><strong>{{ item.label }}</strong><br><small>{{ item.code }}</small></span>
-          {% if item.required %}
-          <span class="badge {% if item.completed %}approved{% else %}monetization_review{% endif %}">
-            {% if item.completed %}confirmado{% else %}pendente{% endif %}
-          </span>
+    <details class="panel collapse-panel" {% if monetization.get("hard_blockers") %}open{% endif %}>
+      <summary>
+        <span>Qualidade e monetização</span>
+        <small>
+          {% if monetization.hard_blockers %}
+          há bloqueios para corrigir
+          {% elif monetization.manual_required %}
+          faltam confirmações humanas
+          {% elif monetization.passed %}
+          pronto para aprovação
           {% else %}
-          <span class="badge queued">não exigido</span>
+          aguardando avaliação
           {% endif %}
+        </small>
+      </summary>
+      <div class="collapse-body">
+        {% if monetization %}
+        <div class="stats-grid compact">
+          <div><strong>Status</strong><span>{{ monetization.final_status }}</span></div>
+          <div><strong>Bloqueios</strong><span>{{ monetization.hard_blockers|length }}</span></div>
+          <div><strong>Confirmações</strong><span>{{ monetization.manual_required|length }}</span></div>
+          <div><strong>Pronto</strong><span>{{ monetization.passed }}</span></div>
         </div>
-        {% endfor %}
-      </div>
-      {% endif %}
-      <h4>Disclosure IA</h4>
-      <pre>{{ monetization.ai_disclosure }}</pre>
-      <h4>Direitos</h4>
-      <table class="evidence-table">
-        <thead>
-          <tr><th>Tipo</th><th>Provider</th><th>Status</th><th>Evidência</th></tr>
-        </thead>
-        <tbody>
-          {% for item in monetization.rights_registry.entries or [] %}
-          <tr>
-            <td>{{ item.asset_type }}{% if item.scene_id %} · {{ item.scene_id }}{% endif %}</td>
-            <td>{{ item.provider }}</td>
-            <td>
-              {% if item.commercial_use_allowed and not item.evidence_required %}
-              <span class="badge approved">ok</span>
-              {% elif item.evidence_required %}
-              <span class="badge monetization_review">evidência pendente</span>
-              {% else %}
-              <span class="badge blocked_for_monetization">pendente</span>
-              {% endif %}
-            </td>
-            <td>{{ item.rights_evidence_url or item.license_source or item.license_note or "-" }}</td>
-          </tr>
-          {% else %}
-          <tr><td colspan="4">Nenhuma evidência de direitos encontrada.</td></tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      <h4>Factualidade</h4>
-      <table class="evidence-table">
-        <thead>
-          <tr><th>Claim</th><th>Grounding</th><th>Fonte</th></tr>
-        </thead>
-        <tbody>
-          {% for item in monetization.fact_claims_report.claim_trace or [] %}
-          <tr>
-            <td>{{ item.text }}</td>
-            <td>{{ item.grounding or "-" }}</td>
-            <td>{{ item.source_fact_ids or [] }}</td>
-          </tr>
-          {% else %}
-          <tr><td colspan="3">Nenhum claim trace registrado.</td></tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% if monetization.fact_claims_report.claim_sources %}
-      <details>
-        <summary>Fontes verificadas</summary>
-        <pre>{{ monetization.fact_claims_report.claim_sources }}</pre>
-      </details>
-      {% endif %}
-      <h4>Metadata</h4>
-      <div class="stats-grid">
-        <div><strong>Título</strong><span>{{ monetization.metadata_review.title or "-" }}</span></div>
-        <div><strong>Hashtags</strong><span>{{ monetization.metadata_review.suggested_hashtags or [] }}</span></div>
-        <div><strong>Pendências</strong><span>{{ monetization.metadata_review.reasons or [] }}</span></div>
-      </div>
-      <h4>Repetição de canal</h4>
-      <pre>{{ monetization.channel_repetition_report }}</pre>
-      {% else %}
-      <p>Aguardando gate de monetização.</p>
-      {% endif %}
-    </section>
-
-    <section id="performance" class="panel">
-      <h3>Performance</h3>
-      {% if details.performance_metrics %}
-      <pre>{{ details.performance_metrics }}</pre>
-      {% else %}
-      <p>Nenhuma métrica real do YouTube Studio registrada ainda.</p>
-      {% endif %}
-    </section>
-
-    <section id="script" class="panel">
-      <h3>Script</h3>
-      {% if topic_plan %}
-      <p><strong>Topico:</strong> {{ topic_plan.canonical_topic }}</p>
-      <p><strong>Angulo:</strong> {{ topic_plan.angle }}</p>
-      {% endif %}
-      {% if script %}
-      <p><strong>Titulo:</strong> {{ script.title }}</p>
-      <p><strong>Hook:</strong> {{ script.hook }}</p>
-      <pre>{{ script.full_narration }}</pre>
-      <pre>{{ script.qa_metrics }}</pre>
-      {% else %}
-      <p>Aguardando script.</p>
-      {% endif %}
-    </section>
-
-    <section id="scenes" class="panel">
-      <h3>Scenes</h3>
-      {% if scene_plan %}
-      <div class="scene-list">
-        {% for scene in scene_plan.scenes %}
-        <article class="scene-card">
-          <header>
-            <strong>Cena {{ scene.order }}</strong>
-            <span>{{ scene.visual_intent }}</span>
-          </header>
-          <p>{{ scene.narration_text }}</p>
-          <p><strong>Tokens:</strong> {{ scene.token_start }}-{{ scene.token_end }}</p>
-          <p><strong>Prompt:</strong> {{ scene.image_prompt }}</p>
-        </article>
-        {% endfor %}
-      </div>
-      {% else %}
-      <p>Aguardando scene plan.</p>
-      {% endif %}
-    </section>
-
-    <section id="assets" class="panel">
-      <h3>Assets</h3>
-      <div class="asset-grid">
-        {% for asset in details.assets %}
-        <article class="asset-card {% if asset.selected %}selected{% endif %}">
-          <img src="{{ artifact_url(asset.uri) }}" alt="asset {{ asset.scene_id }}">
-          <div>
-            <p><strong>{{ asset.scene_id }}</strong> · {{ asset.provider }}</p>
-            <p>semantic={{ asset.scores.semantic_match }} total={{ asset.scores.total_score }}</p>
-            {% if asset.fallback_used %}<span class="badge fallback">fallback</span>{% endif %}
-            {% if asset.attribution %}<p>{{ asset.attribution }}</p>{% endif %}
+        {% if monetization.hard_blockers %}
+        <pre>{{ monetization.hard_blockers }}</pre>
+        {% endif %}
+        {% if monetization.manual_required %}
+        <pre>{{ monetization.manual_required }}</pre>
+        {% endif %}
+        {% if checklist_items %}
+        <div class="review-checklist-status">
+          {% for item in checklist_items %}
+          <div class="review-status-row">
+            <span><strong>{{ item.label }}</strong><br><small>{{ item.code }}</small></span>
+            {% if item.required %}
+            <span class="badge {% if item.completed %}approved{% else %}monetization_review{% endif %}">
+              {% if item.completed %}confirmado{% else %}pendente{% endif %}
+            </span>
+            {% else %}
+            <span class="badge queued">não exigido</span>
+            {% endif %}
           </div>
-        </article>
+          {% endfor %}
+        </div>
+        {% endif %}
         {% else %}
-        <p>Nenhum asset ainda.</p>
-        {% endfor %}
+        <p>Aguardando gate de monetização.</p>
+        {% endif %}
       </div>
-    </section>
+    </details>
 
-    <section id="audio" class="panel">
-      <h3>Audio &amp; Subtitles</h3>
-      {% if narration %}
-      <audio controls src="{{ artifact_url(narration.audio_uri) }}"></audio>
-      <p><strong>Voice:</strong> {{ narration.voice }} · {{ (narration.duration_ms / 1000)|round(1) }} s</p>
-      {% endif %}
-      {% if background_music %}
-      <audio controls src="{{ artifact_url(background_music.audio_uri) }}"></audio>
-      <p><strong>Music:</strong> {{ background_music.provider }} · mood {{ background_music.mood }} · {{ background_music.gain_db }} dB</p>
-      {% if background_music.mixed_audio_uri %}
-      <audio controls src="{{ artifact_url(background_music.mixed_audio_uri) }}"></audio>
-      <p><strong>Mixed master:</strong> narração + trilha pronta para render.</p>
-      {% endif %}
-      {% endif %}
-      {% if subtitles %}
-      <pre>{{ subtitles.items }}</pre>
-      <a href="{{ artifact_url(subtitles.ass_uri) }}">Download ASS</a>
-      {% endif %}
-    </section>
+    <details class="panel collapse-panel">
+      <summary>
+        <span>Roteiro e cenas</span>
+        <small>abra só se quiser revisar conteúdo</small>
+      </summary>
+      <div class="collapse-body">
+        {% if topic_plan %}
+        <div class="stats-grid compact">
+          <div><strong>Tópico</strong><span>{{ topic_plan.canonical_topic }}</span></div>
+          <div><strong>Ângulo</strong><span>{{ topic_plan.angle }}</span></div>
+        </div>
+        {% endif %}
+        {% if script %}
+        <p><strong>Título:</strong> {{ script.title }}</p>
+        <p><strong>Hook:</strong> {{ script.hook }}</p>
+        <pre>{{ script.full_narration }}</pre>
+        {% endif %}
+        {% if scene_plan %}
+        <div class="scene-list">
+          {% for scene in scene_plan.scenes %}
+          <article class="scene-card">
+            <header>
+              <strong>Cena {{ scene.order }}</strong>
+              <span>{{ scene.visual_intent }}</span>
+            </header>
+            <p>{{ scene.narration_text }}</p>
+            <p><strong>Prompt:</strong> {{ scene.image_prompt }}</p>
+          </article>
+          {% endfor %}
+        </div>
+        {% endif %}
+      </div>
+    </details>
 
-    <section id="render" class="panel">
-      <h3>Render</h3>
-      {% if render %}
-      <video controls preload="metadata" poster="{{ artifact_url(render.poster_uri) }}" src="{{ artifact_url(render.video_uri) }}"></video>
-      <p>{{ render.resolution }} · {{ render.video_codec }} + {{ render.audio_codec }} · {{ (render.duration_ms / 1000)|round(1) }} s</p>
-      <a href="{{ artifact_url(render.ffmpeg_log_uri) }}">FFmpeg log</a>
-      {% else %}
-      <p>Aguardando render.</p>
-      {% endif %}
-    </section>
+    <details class="panel collapse-panel">
+      <summary>
+        <span>Mídia e áudio</span>
+        <small>assets, narração, música e legendas</small>
+      </summary>
+      <div class="collapse-body">
+        {% if artifacts_cleaned %}
+        <div class="empty-state-card">
+          <strong>Mídia removida por retenção.</strong>
+          <p>Este job ficou salvo no hub, mas os arquivos temporários já foram apagados para liberar disco.</p>
+        </div>
+        {% else %}
+        <div class="asset-grid">
+          {% for asset in details.assets %}
+          <article class="asset-card {% if asset.selected %}selected{% endif %}">
+            <img src="{{ artifact_url(asset.uri) }}" alt="asset {{ asset.scene_id }}">
+            <div>
+              <p><strong>{{ asset.scene_id }}</strong> · {{ asset.provider }}</p>
+              <p>semantic={{ asset.scores.semantic_match }} total={{ asset.scores.total_score }}</p>
+              {% if asset.fallback_used %}<span class="badge fallback">fallback</span>{% endif %}
+              {% if asset.attribution %}<p>{{ asset.attribution }}</p>{% endif %}
+            </div>
+          </article>
+          {% else %}
+          <p>Nenhum asset ainda.</p>
+          {% endfor %}
+        </div>
+        {% if narration %}
+        <div class="media-block">
+          <strong>Narração</strong>
+          <audio controls src="{{ artifact_url(narration.audio_uri) }}"></audio>
+        </div>
+        {% endif %}
+        {% if background_music %}
+        <div class="media-block">
+          <strong>Trilha</strong>
+          <audio controls src="{{ artifact_url(background_music.audio_uri) }}"></audio>
+        </div>
+        {% if background_music.mixed_audio_uri %}
+        <div class="media-block">
+          <strong>Mix final</strong>
+          <audio controls src="{{ artifact_url(background_music.mixed_audio_uri) }}"></audio>
+        </div>
+        {% endif %}
+        {% endif %}
+        {% if subtitles %}
+        <div class="media-block">
+          <strong>Legendas</strong>
+          <a href="{{ artifact_url(subtitles.ass_uri) }}">Baixar ASS</a>
+          <pre>{{ subtitles.items }}</pre>
+        </div>
+        {% endif %}
+        {% endif %}
+      </div>
+    </details>
 
-    <section id="self-healing" class="panel">
-      <h3>Self-Healing</h3>
-      {% if repair.topic_plan or repair.script or repair.background_music or repair.render %}
-      <h4>Topic Plan</h4>
-      <pre>{{ repair.topic_plan or {} }}</pre>
-      <h4>Script</h4>
-      <pre>{{ repair.script or {} }}</pre>
-      <h4>Background Music</h4>
-      <pre>{{ repair.background_music or {} }}</pre>
-      <h4>Render</h4>
-      <pre>{{ repair.render or {} }}</pre>
-      {% else %}
-      <p>Nenhuma telemetria de repair persistida ainda.</p>
-      {% endif %}
-    </section>
-
-    <section id="logs" class="panel">
-      <h3>Logs</h3>
-      <h4>Fallbacks</h4>
-      <pre>{% for event in details.fallbacks %}{{ event.created_at }} {{ event.scene_id }} {{ event.reason_code }}
+    <details class="panel collapse-panel">
+      <summary>
+        <span>Dados técnicos</span>
+        <small>logs, repair, artefatos e métricas</small>
+      </summary>
+      <div class="collapse-body">
+        {% if details.performance_metrics %}
+        <h4>Métricas</h4>
+        <pre>{{ details.performance_metrics }}</pre>
+        {% endif %}
+        {% if repair.topic_plan or repair.script or repair.background_music or repair.render %}
+        <h4>Self-healing</h4>
+        <pre>{{ repair }}</pre>
+        {% endif %}
+        {% if publish_result %}
+        <h4>Resultado da publicação</h4>
+        <pre>{{ publish_result }}</pre>
+        {% endif %}
+        {% if publication_attempts %}
+        <h4>Tentativas de publicação</h4>
+        <pre>{{ publication_attempts }}</pre>
+        {% endif %}
+        <h4>Erros</h4>
+        <pre>{% for error in details.errors %}{{ error.created_at }} {{ error.step }} {{ error.message }}
 {% endfor %}</pre>
-      <h4>Erros</h4>
-      <pre>{% for error in details.errors %}{{ error.created_at }} {{ error.step }} {{ error.message }}
-{% endfor %}</pre>
-      <h4>Eventos</h4>
-      <pre>{{ details.events }}</pre>
-    </section>
+        <h4>Eventos</h4>
+        <pre>{{ details.events }}</pre>
+        <h4>Artefatos</h4>
+        <pre>{{ job.artifact_index or {} }}</pre>
+      </div>
+    </details>
   </div>
 
   <aside class="side-column">
-    <section class="panel sticky">
-      <h3>Review</h3>
-      <form method="post" action="/jobs/{{ job.job_id }}/review" class="review-form">
-        <input type="hidden" name="reviewer_identity" value="tailscale:local-reviewer">
-        {% if checklist_items %}
-        <h4>Confirmações exigidas</h4>
-        <div class="review-checklist">
-          {% for item in checklist_items %}
-            {% if item.required and item.auto_completed %}
-            <label><input type="checkbox" checked disabled> {{ item.label }} <small>automático</small></label>
-            {% elif item.required and item.completed %}
-            <label><input type="checkbox" checked disabled> {{ item.label }} <small>já confirmado</small></label>
-            {% elif item.required %}
-            <label><input type="checkbox" name="confirmation_codes" value="{{ item.confirmation_code }}"> {{ item.label }}</label>
+    <section class="panel sticky workflow-focus">
+      <div class="focus-step">
+        <p class="eyebrow">Passo 1</p>
+        <h3>Aprovar vídeo</h3>
+        <p class="publication-note">Se o vídeo estiver bom, aprove aqui. A agenda libera em seguida.</p>
+        <form method="post" action="/jobs/{{ job.job_id }}/review" class="review-form">
+          <input type="hidden" name="reviewer_identity" value="tailscale:local-reviewer">
+          {% if checklist_items %}
+          <div class="review-checklist compact-checklist-form">
+            {% for item in checklist_items %}
+              {% if item.required and item.auto_completed %}
+              <label><input type="checkbox" checked disabled> {{ item.label }} <small>automático</small></label>
+              {% elif item.required and item.completed %}
+              <label><input type="checkbox" checked disabled> {{ item.label }} <small>já confirmado</small></label>
+              {% elif item.required %}
+              <label><input type="checkbox" name="confirmation_codes" value="{{ item.confirmation_code }}"> {{ item.label }}</label>
+              {% endif %}
+            {% endfor %}
+          </div>
+          {% endif %}
+          <details class="inline-disclosure">
+            <summary>Motivos para rejeitar ou refazer</summary>
+            <div class="review-checklist">
+              <label><input type="checkbox" name="reason_codes" value="weak_hook"> Hook fraco</label>
+              <label><input type="checkbox" name="reason_codes" value="visual_incoherence"> Visual incoerente</label>
+              <label><input type="checkbox" name="reason_codes" value="unsupported_claim"> Claim sem suporte</label>
+              <label><input type="checkbox" name="reason_codes" value="rights_missing"> Direitos pendentes</label>
+              <label><input type="checkbox" name="reason_codes" value="metadata_weak"> Metadados fracos</label>
+            </div>
+            <label for="notes">Observações</label>
+            <textarea id="notes" name="notes" rows="3"></textarea>
+          </details>
+          <div class="button-row action-stack">
+            {% if can_approve %}
+            <button type="submit" name="action" value="approve">Aprovar</button>
             {% endif %}
-          {% endfor %}
-        </div>
-        {% endif %}
-        <label>Reason codes para rejeição ou retry</label>
-        <div class="review-checklist">
-          <label><input type="checkbox" name="reason_codes" value="weak_hook"> Hook fraco</label>
-          <label><input type="checkbox" name="reason_codes" value="visual_incoherence"> Visual incoerente</label>
-          <label><input type="checkbox" name="reason_codes" value="unsupported_claim"> Claim sem suporte</label>
-          <label><input type="checkbox" name="reason_codes" value="rights_missing"> Direitos/evidência pendente</label>
-          <label><input type="checkbox" name="reason_codes" value="metadata_weak"> Título/descrição/hashtags fracos</label>
-        </div>
-        <label for="notes">Notes</label>
-        <textarea id="notes" name="notes" rows="4"></textarea>
-        <div class="button-row">
-          {% if can_approve %}
-          <button type="submit" name="action" value="approve">Approve</button>
+            {% if can_reject %}
+            <button type="submit" name="action" value="reject" class="secondary">Rejeitar</button>
+            {% endif %}
+            {% if can_retry %}
+            <button type="submit" name="action" value="retry" class="ghost">Refazer job</button>
+            {% endif %}
+          </div>
+          {% if not can_approve and not can_reject and not can_retry %}
+          <p>Nenhuma ação de review disponível para o status atual.</p>
           {% endif %}
-          {% if can_reject %}
-          <button type="submit" name="action" value="reject" class="secondary">Reject</button>
-          {% endif %}
+        </form>
+      </div>
+
+      <div class="focus-step">
+        <p class="eyebrow">Passo 2</p>
+        <h3>Agendar no YouTube</h3>
+        {% if is_approved %}
+        <p class="publication-note">Escolha a data, a hora e a visibilidade. O worker publica quando o horário chegar.</p>
+        {% if schedule_ready %}
+        <div class="schedule-highlight">
+          <strong>Publicação automática ativada</strong>
+          <p>{{ publication_schedule_display.local_date }} às {{ publication_schedule_display.local_time }} · {{ publication_schedule_display.timezone }}</p>
+          <small>Não precisa clicar em mais nada. O worker publica automaticamente no horário salvo.</small>
         </div>
-        {% if can_retry %}
-        <button type="submit" name="action" value="retry" class="ghost">Criar novo job completo</button>
         {% endif %}
-        {% if not can_approve and not can_reject and not can_retry %}
-        <p>Nenhuma ação de review disponível para o status atual.</p>
+        {% if publication_schedule_display and publication_schedule_display.youtube_url %}
+        <p class="inline-hint">URL atual: {{ publication_schedule_display.youtube_url }}</p>
         {% endif %}
-      </form>
-      {% if job.status == "approved_for_publish" %}
-      <form method="post" action="/jobs/{{ job.job_id }}/publish" class="review-form">
-        <label for="youtube_video_id">YouTube video id</label>
-        <input id="youtube_video_id" name="youtube_video_id" placeholder="obrigatório se URL não for informada">
-        <label for="youtube_url">YouTube URL</label>
-        <input id="youtube_url" name="youtube_url" placeholder="https://youtube.com/shorts/...">
-        <button type="submit">Marcar como publicado</button>
-      </form>
+        {% if job.status != "published" %}
+        <form method="post" action="/jobs/{{ job.job_id }}/schedule" class="review-form">
+          <label for="scheduled_for_local">Data e hora</label>
+          <input id="scheduled_for_local" name="scheduled_for_local" type="datetime-local" value="{{ publication_schedule_display.scheduled_for_local_form if publication_schedule_display else '' }}" required>
+          <label for="publication_timezone">Timezone</label>
+          <input id="publication_timezone" name="timezone" value="{{ publication_schedule_display.timezone if publication_schedule_display else 'UTC' }}" data-has-existing="{{ 'true' if publication_schedule_display else 'false' }}" list="timezones" placeholder="UTC ou America/Sao_Paulo">
+          <datalist id="timezones">
+            {% for timezone_name in common_schedule_timezones %}
+            <option value="{{ timezone_name }}"></option>
+            {% endfor %}
+          </datalist>
+          <label for="youtube_visibility">Visibilidade</label>
+          <select id="youtube_visibility" name="youtube_visibility">
+            {% for visibility in ["private", "unlisted", "public"] %}
+            <option value="{{ visibility }}" {% if publication_schedule_display and publication_schedule_display.youtube_visibility == visibility %}selected{% endif %}>{{ visibility }}</option>
+            {% endfor %}
+          </select>
+          <div class="button-row action-stack">
+            <button type="submit" name="action" value="schedule">{% if schedule_ready %}Reagendar publicação{% else %}Ativar publicação automática{% endif %}</button>
+            {% if schedule_ready %}
+            <button type="submit" name="action" value="clear" class="ghost">Limpar agenda</button>
+            {% endif %}
+          </div>
+        </form>
+        {% else %}
+        <p class="publication-note">Publicado em {{ publication_schedule_display.published_local_label or publication_schedule_display.published_at }}.</p>
+        <p class="publication-note">Se publicou no dia errado, apague o vídeo no YouTube Studio e depois reabra aqui para republicar com nova agenda.</p>
+        <form method="post" action="/jobs/{{ job.job_id }}/reopen-publication" class="review-form">
+          <button type="submit" class="ghost">Reabrir para republicação</button>
+        </form>
+        {% endif %}
+        {% else %}
+        <div class="empty-state-card">
+          <strong>Agendamento bloqueado até a aprovação.</strong>
+          <p>Primeiro aprove o vídeo no passo anterior.</p>
+        </div>
+        {% endif %}
+      </div>
+
+      <details class="inline-disclosure" {% if publish_package %}open{% endif %}>
+        <summary>Metadados do upload</summary>
+        {% if publish_package %}
+        <form method="post" action="/jobs/{{ job.job_id }}/publish-metadata" class="review-form">
+          <label for="publish_title">Título</label>
+          <input id="publish_title" name="title" value="{{ publish_package.title or '' }}" maxlength="100">
+          <label for="publish_description">Descrição</label>
+          <textarea id="publish_description" name="description" rows="5">{{ publish_package.description or '' }}</textarea>
+          <label for="publish_hashtags">Hashtags</label>
+          <input id="publish_hashtags" name="hashtags" value="{{ (publish_package.hashtags or [])|join(' ') }}" placeholder="#shorts #curiosidades #tema">
+          <button type="submit" class="ghost">Salvar metadados</button>
+        </form>
+        {% else %}
+        <p>Nenhum metadado disponível ainda.</p>
+        {% endif %}
+      </details>
+
+      {% if job.status == "approved_for_publish" and not schedule_ready %}
+      <details class="inline-disclosure">
+        <summary>Publicar imediatamente</summary>
+        <p class="publication-note">Use isso só quando você quer subir o vídeo agora, sem esperar a agenda.</p>
+        <form method="post" action="/jobs/{{ job.job_id }}/publish" class="review-form" onsubmit="return confirm('Isso publica imediatamente e ignora qualquer agenda futura. Deseja continuar?');">
+          <label for="youtube_video_id">YouTube video id</label>
+          <input id="youtube_video_id" name="youtube_video_id" placeholder="{% if youtube_integration.publish_mode == 'api' %}opcional no modo API{% else %}obrigatório se URL não for informada{% endif %}">
+          <label for="youtube_url">YouTube URL</label>
+          <input id="youtube_url" name="youtube_url" placeholder="{% if youtube_integration.publish_mode == 'api' %}opcional no modo API{% else %}https://youtube.com/shorts/...{% endif %}">
+          <button type="submit">{% if youtube_integration.publish_mode == "api" %}Publicar imediatamente e ignorar agenda{% else %}Marcar como publicado agora{% endif %}</button>
+        </form>
+      </details>
       {% endif %}
-      <h3>Artefatos</h3>
-      <pre>{{ job.artifact_index or {} }}</pre>
-      <h3>Performance</h3>
-      <form method="post" action="/jobs/{{ job.job_id }}/performance" class="review-form">
-        <input type="hidden" name="source" value="youtube_studio_manual">
-        <label for="retention_percent">Retenção média (%)</label>
-        <input id="retention_percent" name="retention_percent" type="number" min="0" max="100" step="0.1">
-        <label for="viewed_vs_swiped_away_percent">Viewed vs swiped away (%)</label>
-        <input id="viewed_vs_swiped_away_percent" name="viewed_vs_swiped_away_percent" type="number" min="0" max="100" step="0.1">
-        <label for="rewatch_rate">Rewatch rate</label>
-        <input id="rewatch_rate" name="rewatch_rate" type="number" min="0" step="0.01">
-        <label for="rpm_usd">RPM USD</label>
-        <input id="rpm_usd" name="rpm_usd" type="number" min="0" step="0.01">
-        <label for="monetization_status">Status monetização</label>
-        <input id="monetization_status" name="monetization_status" placeholder="monetized, limited, ineligible">
-        <label for="performance_notes">Notas</label>
-        <textarea id="performance_notes" name="notes" rows="3"></textarea>
-        <button type="submit">Registrar métricas</button>
-      </form>
+
+      <details class="inline-disclosure">
+        <summary>Integração e métricas</summary>
+        <div class="stats-grid compact">
+          <div><strong>Modo</strong><span>{{ youtube_integration.publish_mode }}</span></div>
+          <div><strong>Canal</strong><span>{{ youtube_integration.channel_id or "-" }}</span></div>
+          {% if publication_schedule_display %}
+          <div><strong>Status da agenda</strong><span>{{ schedule_status_label(publication_schedule_display.status) }}</span></div>
+          <div><strong>Visibilidade</strong><span>{{ publication_schedule_display.youtube_visibility }}</span></div>
+          {% endif %}
+        </div>
+        {% if youtube_integration.missing_items %}
+        <pre>{{ youtube_integration.missing_items }}</pre>
+        {% endif %}
+        <form method="post" action="/jobs/{{ job.job_id }}/performance" class="review-form">
+          <input type="hidden" name="source" value="youtube_studio_manual">
+          <label for="retention_percent">Retenção média (%)</label>
+          <input id="retention_percent" name="retention_percent" type="number" min="0" max="100" step="0.1">
+          <label for="viewed_vs_swiped_away_percent">Viewed vs swiped away (%)</label>
+          <input id="viewed_vs_swiped_away_percent" name="viewed_vs_swiped_away_percent" type="number" min="0" max="100" step="0.1">
+          <label for="rewatch_rate">Rewatch rate</label>
+          <input id="rewatch_rate" name="rewatch_rate" type="number" min="0" step="0.01">
+          <label for="rpm_usd">RPM USD</label>
+          <input id="rpm_usd" name="rpm_usd" type="number" min="0" step="0.01">
+          <label for="monetization_status">Status monetização</label>
+          <input id="monetization_status" name="monetization_status" placeholder="monetized, limited, ineligible">
+          <label for="performance_notes">Notas</label>
+          <textarea id="performance_notes" name="notes" rows="3"></textarea>
+          <button type="submit" class="ghost">Registrar métricas</button>
+        </form>
+      </details>
     </section>
   </aside>
 </section>
+
+<script>
+  (function() {
+    const timezoneInput = document.getElementById("publication_timezone");
+    if (!timezoneInput) return;
+    if (timezoneInput.dataset.hasExisting === "true" && timezoneInput.value) return;
+    const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (browserTz) timezoneInput.value = browserTz;
+  })();
+</script>
 {% endblock %}

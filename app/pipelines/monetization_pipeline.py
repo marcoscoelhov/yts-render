@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.editorial.repetition import build_channel_repetition_report
 from app.compliance.review import build_human_review_checklist
 from app.editorial.topic_mode import resolve_editorial_mode
-from app.models import BackgroundMusicAsset, Job, NarrationAsset, PerformanceMetric, RenderOutput, ReviewRecord, SceneAsset, Script, SubtitleTrack, TopicPlan, TopicRequest
+from app.models import BackgroundMusicAsset, Job, NarrationAsset, PerformanceMetric, PublicationSchedule, RenderOutput, ReviewRecord, SceneAsset, Script, SubtitleTrack, TopicPlan, TopicRequest
 from app.pipelines.base import BasePipeline
 from app.utils import iso_now, stable_hash, word_tokens
 
@@ -133,10 +133,13 @@ class MonetizationPipeline(BasePipeline):
             manual_required.append("metadata_review_required")
         if channel_repetition_report["repetition_risk"] != "low" and "originality_confirmed" not in confirmations:
             manual_required.append("originality_review_required")
-        if "text_publish_audit_skipped" in publish_readiness["reasons"]:
+        publish_audit_required = "text_publish_audit_skipped" in publish_readiness["reasons"]
+        if publish_audit_required:
             manual_required.append("publish_audit_required")
         if "rights_confirmed" in confirmations:
             manual_required = [item for item in manual_required if item != "rights_confirmation_required"]
+        if "publish_audit_confirmed" in confirmations:
+            manual_required = [item for item in manual_required if item != "publish_audit_required"]
         warnings.extend(publish_readiness["reasons"])
         if not self.settings.allow_synthetic_visuals_for_monetization and ai_disclosure["contains_synthetic_visuals"]:
             hard_blockers.append("synthetic_visuals_disabled_by_policy")
@@ -155,6 +158,7 @@ class MonetizationPipeline(BasePipeline):
             fact_claims_report=fact_claims_report,
             metadata_review=metadata_review,
             channel_repetition_report=channel_repetition_report,
+            publish_audit_required=publish_audit_required,
             confirmations=confirmations,
         )
         passed = not hard_blockers and not manual_required
@@ -204,6 +208,7 @@ class MonetizationPipeline(BasePipeline):
         fact_claims_report: dict[str, Any],
         metadata_review: dict[str, Any],
         channel_repetition_report: dict[str, Any],
+        publish_audit_required: bool,
         confirmations: set[str],
     ) -> dict[str, Any]:
         return build_human_review_checklist(
@@ -212,6 +217,7 @@ class MonetizationPipeline(BasePipeline):
             fact_claims_report=fact_claims_report,
             metadata_review=metadata_review,
             channel_repetition_report=channel_repetition_report,
+            publish_audit_required=publish_audit_required,
             confirmations=confirmations,
         )
 
@@ -589,8 +595,9 @@ class MonetizationPipeline(BasePipeline):
         render = session.scalar(select(RenderOutput).where(RenderOutput.job_id == job.job_id))
         subtitles = session.scalar(select(SubtitleTrack).where(SubtitleTrack.job_id == job.job_id))
         background_music = session.scalar(select(BackgroundMusicAsset).where(BackgroundMusicAsset.job_id == job.job_id))
+        publication_schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job.job_id))
         topic_plan = session.scalar(select(TopicPlan).where(TopicPlan.job_id == job.job_id))
-        title = script.title if script else (request.seed_theme if request else job.topic_summary or job.job_id)
+        title = self.build_publish_title(job, request, script)
         fact_pack = self.read_job_json(job.job_id, "fact_pack.json")
         script_artifact = self.read_job_json(job.job_id, "script.json")
         monetization_report = self.read_job_json(job.job_id, "monetization_report.json")
@@ -598,9 +605,14 @@ class MonetizationPipeline(BasePipeline):
         if monetization_report.get("metadata_review", {}).get("suggested_hashtags"):
             tags = list(monetization_report["metadata_review"]["suggested_hashtags"])
         ai_notice = monetization_report.get("ai_disclosure", {}).get("description_notice")
-        description = "\n".join(
-            [part for part in [script.full_narration if script else title, ai_notice, "", " ".join(dict.fromkeys(tags))] if part is not None]
-        )
+        description = self.build_publish_description(topic_plan, script, title, tags, ai_notice)
+        overrides = self.read_publish_metadata_overrides(job.job_id)
+        if overrides.get("title"):
+            title = str(overrides["title"])
+        if overrides.get("description"):
+            description = str(overrides["description"])
+        if overrides.get("hashtags"):
+            tags = list(overrides["hashtags"])
         checklist = {
             "script_gate_pass": bool((job.quality_summary or {}).get("script", {}).get("script_quality_gate_pass")),
             "scene_plan_gate_pass": bool((job.quality_summary or {}).get("scene_plan", {}).get("scene_plan_gate_pass")),
@@ -636,6 +648,16 @@ class MonetizationPipeline(BasePipeline):
             "background_music_uri": background_music.audio_uri if background_music else None,
             "mixed_audio_uri": background_music.mixed_audio_uri if background_music else None,
             "sound_design_uri": dict(background_music.provider_metadata or {}).get("sound_design", {}).get("audio_uri") if background_music else None,
+            "publication_schedule": {
+                "status": publication_schedule.status,
+                "scheduled_for_utc": publication_schedule.scheduled_for_utc.isoformat(),
+                "timezone": publication_schedule.timezone,
+                "youtube_visibility": publication_schedule.youtube_visibility,
+                "notes": publication_schedule.notes,
+                "published_at": publication_schedule.published_at.isoformat() if publication_schedule.published_at else None,
+                "youtube_video_id": publication_schedule.youtube_video_id,
+                "youtube_url": publication_schedule.youtube_url,
+            } if publication_schedule else None,
             "checklist": checklist,
             "publish_readiness": readiness,
             "monetization_report": monetization_report,
@@ -693,7 +715,7 @@ class MonetizationPipeline(BasePipeline):
         return audit
 
     def read_job_json(self, job_id: str, relative_path: str) -> dict[str, Any]:
-        path = self.storage.job_dir(job_id) / relative_path
+        path = self.storage.job_dir(job_id, create=False) / relative_path
         if not path.exists():
             return {}
         try:
@@ -701,9 +723,97 @@ class MonetizationPipeline(BasePipeline):
         except Exception:  # noqa: BLE001
             return {}
 
+    def build_publish_title(self, job: Job, request: TopicRequest | None, script: Script | None) -> str:
+        raw_title = script.title if script else (request.seed_theme if request else job.topic_summary or job.job_id)
+        normalized = re.sub(r"\s+", " ", str(raw_title or "").strip())
+        return normalized[:100] or job.job_id
+
+    def build_publish_description(
+        self,
+        topic_plan: TopicPlan | None,
+        script: Script | None,
+        title: str,
+        tags: list[str],
+        ai_notice: str | None,
+    ) -> str:
+        summary_parts: list[str] = []
+        seen_parts: set[str] = set()
+        raw_parts: list[str] = []
+        if script:
+            raw_parts.extend([script.hook, *(script.body_beats or [])[:2], script.ending])
+        if not any(str(part or "").strip() for part in raw_parts) and topic_plan:
+            raw_parts.extend([topic_plan.hook_promise, topic_plan.angle, topic_plan.canonical_topic])
+        if not any(str(part or "").strip() for part in raw_parts):
+            raw_parts.append(title)
+        for raw_part in raw_parts:
+            cleaned = self._clean_publish_text(raw_part)
+            if not cleaned:
+                continue
+            normalized_key = self.normalize_hashtag_text(cleaned)
+            if not normalized_key or normalized_key in seen_parts:
+                continue
+            seen_parts.add(normalized_key)
+            summary_parts.append(cleaned)
+            if len(summary_parts) >= 3:
+                break
+        summary = " ".join(summary_parts).strip()[:420]
+        lines = [summary] if summary else [title]
+        if ai_notice:
+            lines.append(str(ai_notice).strip())
+        if tags:
+            lines.append(" ".join(dict.fromkeys(tags)))
+        return "\n\n".join(line for line in lines if line).strip()[:4900]
+
+    def _clean_publish_text(self, value: Any) -> str:
+        text = re.sub(r"\s+", " ", str(value or "").strip())
+        text = re.sub(r"\s+([,.;!?])", r"\1", text)
+        if not text:
+            return ""
+        if re.search(r"\b(comenta|comentarios|comentário|compartilha|segue|curte|inscreva)\b", text.lower()):
+            return ""
+        if text[-1] not in ".!?":
+            text = f"{text}."
+        return text
+
+    def normalize_publish_metadata_overrides(self, title: Any, description: Any, hashtags: Any) -> dict[str, Any]:
+        normalized_title = re.sub(r"\s+", " ", str(title or "").strip())[:100]
+        normalized_description = re.sub(r"\s+", " ", str(description or "").strip())[:4900]
+        normalized_tags = self.normalize_publish_hashtag_list(hashtags)
+        return {
+            "title": normalized_title or None,
+            "description": normalized_description or None,
+            "hashtags": normalized_tags,
+        }
+
+    def read_publish_metadata_overrides(self, job_id: str) -> dict[str, Any]:
+        raw = self.read_job_json(job_id, "publish_metadata_overrides.json")
+        return self.normalize_publish_metadata_overrides(
+            raw.get("title"),
+            raw.get("description"),
+            raw.get("hashtags"),
+        )
+
+    def normalize_publish_hashtag_list(self, hashtags: Any) -> list[str]:
+        if isinstance(hashtags, str):
+            raw_tags = re.split(r"[\s,]+", hashtags)
+        elif isinstance(hashtags, list):
+            raw_tags = [str(item or "") for item in hashtags]
+        else:
+            raw_tags = []
+        normalized_tags: list[str] = []
+        for raw_tag in raw_tags:
+            normalized = self.normalize_hashtag_text(raw_tag)
+            if len(normalized) < 3 or normalized.isdigit():
+                continue
+            normalized_tags.append(f"#{normalized}")
+        if "#shorts" not in normalized_tags:
+            normalized_tags.insert(0, "#shorts")
+        return list(dict.fromkeys(normalized_tags))[:5]
+
     def build_publish_hashtags(self, topic_plan: TopicPlan | None, script: Script | None) -> list[str]:
-        tags = ["#shorts", "#ciencia"]
+        tags = ["#shorts", "#curiosidades"]
         weak = self.weak_hashtag_terms()
+        blocked_terms = weak | {"lugar", "lugares", "mais", "mundo", "terra", "aqui", "ainda", "vive", "vivem", "segredo", "extremo", "extrema"}
         text = " ".join(
             str(part or "")
             for part in [
@@ -725,6 +835,12 @@ class MonetizationPipeline(BasePipeline):
             "polvos": ["#polvo", "#biologia", "#animais"],
             "templario": ["#templarios", "#historia", "#medieval", "#portugal"],
             "templarios": ["#templarios", "#historia", "#medieval", "#portugal"],
+            "danakil": ["#danakil", "#etiopia", "#geografia"],
+            "afar": ["#afar", "#etiopia", "#geografia"],
+            "atacama": ["#atacama", "#deserto", "#geografia"],
+            "etiopia": ["#etiopia", "#geografia"],
+            "ethiopia": ["#etiopia", "#geografia"],
+            "youtube": ["#youtube", "#plataforma", "#internet"],
         }
         normalized_text = self.normalize_hashtag_text(text)
         for key, mapped_tags in niche_map.items():
@@ -732,7 +848,7 @@ class MonetizationPipeline(BasePipeline):
                 tags.extend(mapped_tags)
         for token in word_tokens(text):
             normalized = self.normalize_hashtag_text(token)
-            if len(normalized) < 4 or normalized in weak or normalized.isdigit():
+            if len(normalized) < 4 or normalized in blocked_terms or normalized.isdigit():
                 continue
             tags.append(f"#{normalized}")
             if len(dict.fromkeys(tags)) >= 5:

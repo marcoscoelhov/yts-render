@@ -10,12 +10,16 @@
   <body>
     <header class="topbar">
       <div>
-        <p class="eyebrow">Harness Engineering</p>
+        <p class="eyebrow">Hub de operação</p>
         <h1><a href="/">{{ settings.app_name }}</a></h1>
+        <nav class="topnav">
+          <a href="/">Fila de jobs</a>
+          <a href="/calendar">Agenda</a>
+        </nav>
       </div>
       <div class="tailnet-box">
-        <span>Loopback: {{ settings.app_host }}:{{ settings.app_port }}</span>
-        <span>Tailnet alvo: https://{{ settings.tailscale_hostname }}.{{ settings.tailnet_domain }}</span>
+        <span>App local: {{ settings.app_host }}:{{ settings.app_port }}</span>
+        <span>Tailnet: https://{{ settings.tailscale_hostname }}.{{ settings.tailnet_domain }}</span>
       </div>
     </header>
     <main class="page-shell">

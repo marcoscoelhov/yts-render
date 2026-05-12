@@ -1,0 +1,109 @@
+<section id="publication-hub" class="publication-shell" hx-get="/publication-hub" hx-trigger="every 15s" hx-swap="outerHTML">
+  <section class="panel publication-hero">
+    <div>
+      <p class="eyebrow">YouTube</p>
+      <h2>Centro de publicação</h2>
+    </div>
+    <div class="publication-metrics">
+      <span><strong>{{ metrics.awaiting_approval_count }}</strong> aguardando aprovação</span>
+      <span><strong>{{ metrics.unscheduled_approved_count }}</strong> aprovados sem agenda</span>
+      <span><strong>{{ metrics.scheduled_count }}</strong> programados</span>
+      <span><strong>{{ metrics.published_count }}</strong> publicados</span>
+    </div>
+  </section>
+
+  <section class="publication-grid">
+    <article class="panel publication-panel">
+      <p class="eyebrow">Estado da integração</p>
+      <h3>Canal</h3>
+      <div class="stats-grid compact">
+        <div><strong>Modo</strong><span>{{ integration.publish_mode }}</span></div>
+        <div><strong>API habilitada</strong><span>{{ integration.api_enabled }}</span></div>
+        <div><strong>OAuth</strong><span>{{ integration.connected }}</span></div>
+        <div><strong>Canal</strong><span>{{ integration.channel_id or "-" }}</span></div>
+      </div>
+      <div class="button-row">
+        {% if integration.publish_mode == "api" and integration.api_enabled and integration.client_configured %}
+        {% if integration.connected %}
+        <form method="post" action="/youtube/disconnect">
+          <button type="submit" class="ghost">Desconectar canal</button>
+        </form>
+        {% else %}
+        <a class="button-link" href="/youtube/connect">Conectar canal</a>
+        {% endif %}
+        {% endif %}
+        <a class="button-link ghost-link" href="/calendar">Abrir calendário</a>
+      </div>
+      {% if integration.missing_items %}
+      <h4>O que falta</h4>
+      <div class="publication-list">
+        {% for item in integration.missing_items %}
+        <div class="publication-item">
+          <strong>Pendente</strong>
+          <p>{{ item }}</p>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </article>
+
+    <article class="panel publication-panel">
+      <p class="eyebrow">Aprovados sem agenda</p>
+      <h3>Para agendar</h3>
+      <div class="publication-list">
+        {% for entry in ready_to_schedule %}
+        <a class="publication-item publication-link" href="/jobs/{{ entry.job_id }}">
+          <strong>{{ entry.title }}</strong>
+          <small>{{ entry.job_id[:8] }}</small>
+        </a>
+        {% else %}
+        <div class="publication-item empty">
+          <strong>Nenhum vídeo aguardando agenda.</strong>
+        </div>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="panel publication-panel">
+      <p class="eyebrow">Agenda ativa</p>
+      <h3>Próximos</h3>
+      <div class="publication-list">
+        {% for entry in upcoming_schedule %}
+        <a class="publication-item publication-link" href="/jobs/{{ entry.job_id }}">
+          <strong>{{ entry.title }}</strong>
+          <p>{{ entry.schedule.local_date }} às {{ entry.schedule.local_time }} · {{ entry.schedule.timezone }}</p>
+          <small>{{ schedule_status_label(entry.schedule.status) }} · {{ entry.schedule.youtube_visibility }}</small>
+          <div class="calendar-badges">
+            <span class="badge {{ entry.schedule.status }}">{{ schedule_status_label(entry.schedule.status) }}</span>
+          </div>
+        </a>
+        {% else %}
+        <div class="publication-item empty">
+          <strong>Nenhum upload futuro programado.</strong>
+        </div>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="panel publication-panel">
+      <p class="eyebrow">Histórico</p>
+      <h3>Publicados</h3>
+      <div class="publication-list">
+        {% for entry in recent_publications %}
+        <a class="publication-item publication-link" href="/jobs/{{ entry.job_id }}">
+          <strong>{{ entry.title }}</strong>
+          <p>{{ entry.schedule.published_local_label or entry.schedule.local_date }}</p>
+          <small>{{ entry.schedule.youtube_url or "publicado e registrado no hub" }}</small>
+          <div class="calendar-badges">
+            <span class="badge {{ entry.schedule.status }}">{{ schedule_status_label(entry.schedule.status) }}</span>
+          </div>
+        </a>
+        {% else %}
+        <div class="publication-item empty">
+          <strong>Nenhuma publicação registrada.</strong>
+        </div>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+</section>

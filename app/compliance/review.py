@@ -9,6 +9,7 @@ def build_human_review_checklist(
     fact_claims_report: dict[str, Any],
     metadata_review: dict[str, Any],
     channel_repetition_report: dict[str, Any],
+    publish_audit_required: bool,
     confirmations: set[str],
 ) -> dict[str, Any]:
     items = [
@@ -52,6 +53,14 @@ def build_human_review_checklist(
             "required": channel_repetition_report.get("repetition_risk") in {"medium", "high"},
             "completed": "originality_confirmed" in confirmations,
             "source": "channel_repetition_report",
+        },
+        {
+            "code": "publish_audit_required",
+            "confirmation_code": "publish_audit_confirmed",
+            "label": "Texto e promessa revisados manualmente",
+            "required": publish_audit_required,
+            "completed": "publish_audit_confirmed" in confirmations,
+            "source": "publish_readiness",
         },
     ]
     required_codes = [item["code"] for item in items if item["required"]]

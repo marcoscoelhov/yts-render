@@ -1,210 +1,261 @@
 # Documentacao do App
 
-YTS Render e um app FastAPI para gerar YouTube Shorts verticais em pt-BR, renderizar um MP4 com audio e legenda queimada, e deixar o resultado em um hub web de revisao humana.
+YTS Render e um app FastAPI para gerar Shorts verticais em pt-BR, revisar o resultado em um hub web e publicar no YouTube em fluxo manual ou via API.
 
 ## Visao geral
 
-O app tem quatro blocos principais:
+Blocos principais:
 
-- `app/main.py`: rotas FastAPI, paginas SSR com Jinja2, formularios do hub e endpoints de revisao.
-- `app/orchestrator.py`: worker em thread, maquina de estados do job, retries, gates de qualidade e render com FFmpeg.
-- `app/providers.py`: providers de pauta/roteiro/cenas, imagem, TTS, stock fallback e verificacao semantica.
-- `app/models.py`: modelos SQLAlchemy que persistem jobs, requests, roteiro, cenas, assets, audio, legendas, render, reviews e logs.
+- `app/main.py`: rotas FastAPI, SSR com Jinja2, formularios do hub, dashboard de publicacao, calendario e OAuth do YouTube.
+- `app/orchestrator.py`: worker, maquina de estados do job, retries, publicacao, agenda e sweep de retencao de artefatos.
+- `app/pipelines/`: etapas especializadas do pipeline.
+- `app/providers.py`: providers de texto, imagem, TTS, musica e fallback.
+- `app/youtube_api.py`: integracao OAuth e upload real via YouTube Data API.
+- `app/models.py`: persistencia SQLAlchemy de jobs, agenda, review, erros, retries, telemetria e artefatos logicos.
 
-O banco padrao e SQLite em `data/yts_render.db`. Os artefatos ficam em `data/artifacts/<job_id>/`.
+Persistencia local padrao:
 
-## Ciclo de vida
+- banco: `data/yts_render.db`
+- artefatos: `data/artifacts/<job_id>/`
+- token OAuth do YouTube: `data/youtube_oauth_token.json`
+- state temporario do OAuth: `data/youtube_oauth_state.json`
 
-1. O usuario cria um job pelo formulario da pagina inicial ou por `POST /jobs`.
-2. `main.py` valida o formulario com `TopicRequestCreate` e chama `orchestrator.create_job`.
-3. O job entra no banco com status `queued`.
-4. O worker iniciado no lifespan do FastAPI reivindica jobs `queued` ou `running` com lease vencido.
-5. O orquestrador executa as etapas do pipeline, grava artefatos e persiste registros no banco.
-6. Ao terminar, o job vai para `monetization_review`, `blocked_for_monetization` ou `ready_for_upload`, conforme o gate final.
-7. O usuario aprova, rejeita ou pede retry pela tela `/jobs/{job_id}`.
-8. Job aprovado vira `approved_for_publish`; publicacao manual/API marca como `published`.
+## Ciclo de vida do job
 
-## Estados de job
+1. O usuario cria um job pela home ou por `POST /jobs`.
+2. `main.py` valida o payload com `TopicRequestCreate` e chama `orchestrator.create_job`.
+3. O job entra como `queued`.
+4. O worker reivindica jobs pendentes e executa o pipeline.
+5. Ao fim, o status do job vira `monetization_review`, `blocked_for_monetization` ou `ready_for_upload`.
+6. O revisor abre `/jobs/{job_id}`, assiste ao video, revisa checklist e aprova ou rejeita.
+7. Ao aprovar, o job vira `approved_for_publish`.
+8. A partir disso, o operador pode salvar metadados de upload, agendar, publicar imediatamente ou reabrir para republicacao.
+9. Em `YTS_YOUTUBE_PUBLISH_MODE=api` com OAuth conectado, o worker processa slots vencidos e sobe o video no YouTube automaticamente.
+10. Em `manual`, o hub continua servindo para aprovacao, agenda local e registro de publish manual.
 
-Estados comuns:
+## Estados
+
+### Job
 
 - `queued`: criado e aguardando worker.
-- `running`: worker esta executando uma etapa.
-- `monetization_review`: video e pacote prontos, mas ainda pendentes de checklist humano.
-- `blocked_for_monetization`: houve bloqueio hard de compliance, factualidade, direitos ou qualidade final.
-- `ready_for_upload`: passou pelo gate final sem pendencias humanas.
-- `approved_for_publish`: aprovado na revisao e liberado para publicacao.
-- `published`: marcado como publicado.
+- `running`: worker executando o pipeline.
+- `monetization_review`: falta revisao humana antes da aprovacao.
+- `blocked_for_monetization`: houve bloqueio hard de compliance, factualidade, direitos ou qualidade.
+- `ready_for_upload`: passou no gate final e esta pronto para aprovacao humana.
+- `approved_for_publish`: aprovado e liberado para agenda/publicacao.
+- `published`: publicado e registrado.
 - `rejected`: rejeitado na revisao.
-- `failed`: falha durante o pipeline.
+- `failed`: falha geral no pipeline.
 
-Tambem existem estados de falha especificos por gate, como `script_quality_failed`, `scene_plan_quality_failed`, `asset_quality_failed`, `subtitle_quality_failed` e `render_quality_failed`.
+Falhas especificas por etapa tambem sao estados finais validos:
+
+- `script_quality_failed`
+- `scene_plan_quality_failed`
+- `asset_quality_failed`
+- `subtitle_quality_failed`
+- `render_quality_failed`
+
+### Agenda de publicacao
+
+- `scheduled`: slot salvo.
+- `publishing`: upload em andamento.
+- `publish_failed`: tentativa de upload falhou.
+- `published`: upload concluido.
+- `cancelled`: agenda limpa ou reaberta para republicacao.
 
 ## Pipeline
 
-As etapas ficam em `JobOrchestrator._steps()`:
+Etapas atuais de `JobOrchestrator._steps()`:
 
 | Etapa | Retry | Responsabilidade |
 | --- | ---: | --- |
-| `input_gate` | 0 | Valida parametros basicos do job. |
-| `topic_plan` | 2 | Gera pauta canonica, angulo, promessa, entidades e candidatos de titulo. |
-| `script` | 2 | Gera roteiro e passa pelo `ScriptQualityGate`; pode tentar reparo. |
+| `input_gate` | 0 | Valida entrada basica do job. |
+| `topic_plan` | 2 | Gera pauta, angulo, entidades, promessa e candidatos de titulo. |
+| `script` | 2 | Gera roteiro e passa pelo `ScriptQualityGate`, com repair quando cabivel. |
 | `scene_plan` | 1 | Divide o roteiro em cenas e valida estrutura visual. |
-| `asset_generation` | 2 | Gera/seleciona imagens por cena e aplica score semantico. |
-| `tts` | 2 | Gera narracao WAV, normaliza audio e cria SRT bruto. |
-| `subtitle_alignment` | 1 | Normaliza chunks de legenda e gera ASS/SRT para render. |
-| `background_music` | 1 | Gera trilha, faz mix com ducking, valida audio final e persiste telemetria. |
-| `render` | 1 | Usa FFmpeg para gerar `render/final.mp4` vertical. |
+| `asset_generation` | 2 | Gera ou seleciona imagens e aplica score semantico. |
+| `tts` | 2 | Gera narracao e metadados basicos de audio. |
+| `subtitle_alignment` | 1 | Normaliza legenda e arquivos de render. |
+| `background_music` | 1 | Gera trilha, faz mix e valida audio final. |
+| `render` | 1 | Gera `render/final.mp4` vertical via FFmpeg. |
 | `monetization_readiness_gate` | 0 | Consolida direitos, disclosure, factualidade, repeticao e publish readiness. |
-| `publish_to_review_hub` | 0 | Monta pacote de publicacao e deixa o job em revisao. |
+| `publish_to_review_hub` | 0 | Persiste o pacote de publicacao e leva o job ao hub. |
 
-Cada execucao de etapa cria um `StepExecution` com `input_hash`. Se uma etapa ja teve sucesso com o mesmo input, o orquestrador pode reutilizar o resultado.
+Cada etapa grava `StepExecution`, eventos em `events.jsonl` e artefatos JSON ou midia no diretorio do job.
 
-O app tambem grava `performance_timeline.json` no diretorio do job com duracao por etapa, tentativa e refs geradas. Use esse artefato para comparar mudancas de performance em runs reais antes/depois.
+## Publicacao e YouTube
 
-## Rotas
+Comportamento atual:
+
+- `manual`: o formulario de publish exige `youtube_video_id` ou `youtube_url` e apenas registra a publicacao no hub.
+- `api`: o hub pode subir o video direto pela YouTube Data API.
+- agenda automatica: so e consumida pelo worker quando o modo efetivo e `api`.
+
+Fluxo OAuth:
+
+- `GET /youtube/connect` cria a URL de autorizacao e persiste `youtube_oauth_state.json`.
+- `GET /youtube/oauth/callback` troca `code` por token e salva `youtube_oauth_token.json`.
+- `POST /youtube/disconnect` remove token e state locais.
+
+O contexto de integracao exposto no hub usa:
+
+- `publish_mode`
+- `api_enabled`
+- `connected`
+- `channel_id`
+- `missing_items`
+- `connected_at`
+- `token_expires_at`
+
+## Rotas principais
 
 | Metodo | Rota | Uso |
 | --- | --- | --- |
-| `GET` | `/` | Pagina principal do hub com filtros e formulario de criacao. |
-| `GET` | `/jobs` | Fragmento HTML da tabela de jobs. |
-| `POST` | `/jobs` | Cria um novo job e redireciona para o detalhe. |
-| `GET` | `/jobs/{job_id}` | Tela de detalhe/revisao do job. |
-| `GET` | `/api/jobs/{job_id}` | JSON compacto com status, request e render. |
-| `POST` | `/jobs/{job_id}/review` | Aprova, rejeita ou cria retry por clonagem completa do job. |
-| `POST` | `/jobs/{job_id}/publish` | Marca job aprovado como publicado. |
-| `POST` | `/hub/prompt` | Salva ou reseta o prompt viral usado pelo hub. |
+| `GET` | `/` | Home do hub com formulario, jobs e resumo operacional. |
+| `POST` | `/hub/prompt` | Salva ou reseta o template viral do hub. |
+| `GET` | `/jobs` | Fragmento HTML da tabela paginada de jobs. |
+| `GET` | `/publication-hub` | Dashboard de publicacao, integracao YouTube e fila. |
+| `GET` | `/youtube/connect` | Inicia OAuth do YouTube. |
+| `GET` | `/youtube/oauth/callback` | Conclui OAuth do YouTube. |
+| `POST` | `/youtube/disconnect` | Remove token OAuth local. |
+| `GET` | `/calendar` | Calendario mensal de programados e publicados. |
+| `POST` | `/jobs` | Cria novo job. |
+| `GET` | `/api/jobs/{job_id}` | JSON compacto com status e render. |
+| `GET` | `/jobs/{job_id}` | Detalhe do job com revisao, agenda e metadados. |
+| `POST` | `/jobs/{job_id}/review` | Aprova, rejeita ou cria retry integral. |
+| `POST` | `/jobs/{job_id}/publish-metadata` | Salva titulo, descricao e hashtags de upload. |
+| `POST` | `/jobs/{job_id}/publish` | Publica agora ou registra publicacao manual. |
+| `POST` | `/jobs/{job_id}/schedule` | Salva ou limpa agenda local. |
+| `POST` | `/jobs/{job_id}/reopen-publication` | Reabre um publish para republicacao. |
+| `POST` | `/jobs/{job_id}/performance` | Registra metricas manuais do YouTube Studio. |
 | `GET` | `/healthz` | Healthcheck do app. |
 
-Arquivos em `data/artifacts/` sao servidos por `/artifacts/...`.
+Arquivos sob `data/artifacts/` sao servidos por `/artifacts/...` quando ainda existem.
 
-## Providers
+## Configuracao
 
-`ProviderRegistry` monta os providers conforme `.env`:
+`app/config.py` e a fonte de verdade para `Settings`.
 
-- `creative`: `ResilientCreativeProvider`, com primary/fallback/draft/repair/scene configurados por `YTS_LLM_*`.
-- `image`: `MockImageProvider` quando `YTS_USE_MOCK_PROVIDERS=true`; caso contrario `MinimaxImageProvider`.
-- `stock`: `ResilientStockProvider`, com fallback Pexels/Pixabay/local quando aplicavel.
-- `tts`: `LocalSpeechFallbackProvider` em mock; caso contrario `EdgeTTSProvider`.
-- `semantic`: `SemanticVerifier`, com heuristica local e verificacao por MiniMax/mmx quando disponivel.
-- `local_image`: `LocalSemanticImageProvider`, usado como fallback visual local.
+Defaults importantes:
 
-Variaveis principais:
+- `app_url=http://127.0.0.1:8080`
+- `niche_id=curiosidades`
+- `language=pt-BR`
+- `target_duration_sec=45`
+- `simple_shorts_mode=true`
+- `llm_primary_provider=minimax`
+- `llm_fallback_provider=deepseek`
+- `youtube_publish_mode=manual`
+- `youtube_api_enabled=false`
+- `artifact_retention_enabled=true`
 
-- `YTS_USE_MOCK_PROVIDERS`: liga fluxo local sem API paga.
-- `YTS_LLM_PRIMARY_PROVIDER`: provider primario de texto, normalmente `minimax`.
-- `YTS_LLM_FALLBACK_PROVIDER`: fallback barato de texto, normalmente `deepseek`.
-- `YTS_LLM_SCRIPT_DRAFT_PROVIDER`: provider rapido para o primeiro draft de roteiro, normalmente `deepseek`.
-- `YTS_LLM_REPAIR_PROVIDER`: provider de repair de roteiro, normalmente `deepseek`.
-- `YTS_LLM_SCENE_PROVIDER`: provider de fallback para `scene_plan`, normalmente `deepseek`.
-- `YTS_REAL_RUN_ALLOW_MOCK_FALLBACK`: deve ficar `false` em runs reais; impede que falha de provider caia em mock silencioso.
-- `YTS_LLM_TOPIC_TIMEOUT_SEC`, `YTS_LLM_SCRIPT_DRAFT_TIMEOUT_SEC`, `YTS_LLM_SCENE_PLAN_TIMEOUT_SEC` e `YTS_LLM_PUBLISH_AUDIT_TIMEOUT_SEC`: limites por papel antes de cair para fallback real, preservando `YTS_STRICT_MINIMAX_VALIDATION`.
-- `YTS_ASSET_GENERATION_PARALLELISM`: quantidade de cenas geradas em paralelo; a persistencia no banco continua serializada no worker.
-- `YTS_MINIMAX_TEXT_API_KEY`: chave para pauta, roteiro, cenas e auditoria.
-- `YTS_DEEPSEEK_API_KEY`: chave do fallback barato OpenAI-compatible.
-- `YTS_MINIMAX_IMAGE_API_KEY`: chave para geracao de imagens.
-- `YTS_PEXELS_API_KEY` e `YTS_PIXABAY_API_KEY`: fallback de stock.
-- `YTS_CHANNEL_AI_GENERATED_CONTENT`: quando `true`, o disclosure de IA e inferido automaticamente no review.
+Blocos relevantes de configuracao:
 
-## Pipelines
+- hub e auth: `YTS_APP_URL`, `YTS_HUB_AUTH_TOKEN`
+- banco: `YTS_DATABASE_URL`, `YTS_SQLITE_*`
+- editorial: `YTS_NICHE_ID`, `YTS_LANGUAGE`, `YTS_SIMPLE_SHORTS_MODE`
+- providers e timeouts: `YTS_LLM_*`, `YTS_MINIMAX_*`, `YTS_OPENAI_*`, `YTS_DEEPSEEK_*`, `YTS_QWEN_*`
+- audio: `YTS_BACKGROUND_MUSIC_*`, `YTS_SOUND_DESIGN_*`
+- YouTube: `YTS_YOUTUBE_*`
+- direitos: `YTS_*COMMERCIAL_RIGHTS*`, `YTS_CONSERVATIVE_SYNTHETIC_DISCLOSURE`, `YTS_ALLOW_SYNTHETIC_VISUALS_FOR_MONETIZATION`
+- worker e retencao: `YTS_WORKER_POLL_SECONDS`, `YTS_JOB_LEASE_SECONDS`, `YTS_ARTIFACT_RETENTION_*`
 
-`JobOrchestrator` coordena jobs, retries, leases, worker e eventos. A execucao de steps pesados fica em `app/pipelines/`:
-
-- `ScriptPipeline`: etapa `script`.
-- `ScenePipeline`: etapa `scene_plan`.
-- `AssetPipeline`: etapas `asset_generation`, `tts`, `subtitle_alignment` e `background_music`.
-- `RenderPipeline`: etapa `render`.
-- `MonetizationPipeline`: etapa `monetization_readiness_gate`.
-
-O plano de modularizacao e proximos cortes esta em `docs/modularization-plan.md`.
-
-## Qualidade
-
-Os gates ficam em `app/quality/`:
-
-- `ScriptQualityGate`: duracao, idioma, abertura generica, repeticao, densidade e markup estranho.
-- `ScenePlanGate`: contagem e estrutura das cenas.
-- `AssetGate`: quantidade e score dos assets selecionados.
-- `SubtitleGate`: cobertura e drift das legendas.
-- `RenderGate`: arquivo decodificavel, duracao, resolucao, bitrate e codecs.
-
-Falhas recuperaveis geram retry quando a etapa permite. Falhas finais registram `ErrorLog`, eventos em `events.jsonl` e `failure_reason` no job.
-
-## Banco de dados
+## Persistencia e artefatos
 
 Modelos principais:
 
-- `Job`: estado central, lease do worker, resumo de qualidade e indice de artefatos.
-- `TopicRequest`: entrada original do usuario.
-- `TopicPlan`: pauta canonica e metadados editoriais.
-- `Script`: roteiro, narracao completa e metricas.
-- `ScenePlan`: lista JSON das cenas.
-- `SceneAsset`: imagens candidatas/selecionadas por cena e scores.
-- `NarrationAsset`: audio, SRT bruto, loudness e metadados de voz.
-- `SubtitleTrack`: legendas alinhadas e arquivos ASS/SRT.
-- `RenderOutput`: MP4 final, poster, duracao, codecs e log FFmpeg.
-- `ReviewRecord`: acoes humanas de revisao.
-- `FallbackEvent`: trocas de provider/fallbacks.
-- `ErrorLog`: falhas estruturadas.
-- `StepExecution`: historico de execucao por etapa.
-- `TopicRegistry`: topicos aprovados para evitar repeticao.
+- `Job`
+- `TopicRequest`
+- `TopicPlan`
+- `Script`
+- `ScenePlan`
+- `SceneAsset`
+- `NarrationAsset`
+- `SubtitleTrack`
+- `BackgroundMusicAsset`
+- `RenderOutput`
+- `PublicationSchedule`
+- `ReviewRecord`
+- `PerformanceMetric`
+- `FallbackEvent`
+- `ErrorLog`
+- `StepExecution`
+- `TopicRegistry`
 
-`app/db.py` usa `create_engine`, `SessionLocal` e `Base.metadata.create_all`. Nao ha sistema de migrations completo; existe apenas script auxiliar em `scripts/migrate_sqlite_to_postgres.py`.
-
-## Artefatos
-
-`StorageManager` grava JSON, texto e bytes no diretorio do job e retorna `file://...`.
-
-Estrutura comum:
+Artefatos comuns por job:
 
 ```text
-data/artifacts/<job_id>/
-  request.json
-  topic_plan.json
-  script.json
-  scene_plan.json
-  events.jsonl
-  assets/
-  narration/
-  subtitles/
-  render/
-    final.mp4
-    poster.jpg
-    ffmpeg.log
-  publish_package.json
+request.json
+topic_plan.json
+script.json
+scene_plan.json
+events.jsonl
+publish_package.json
+publish_metadata_overrides.json
+publication_schedule.json
+youtube_publish_attempts.json
+publish_result.json
+render/final.mp4
+render/poster.jpg
+render/ffmpeg.log
 ```
 
-O helper `artifact_url` em `main.py` converte `file://` dentro de `data/artifacts/` para `/artifacts/...`, permitindo abrir videos, imagens e logs pela interface.
+`artifact_url()` converte `file://...` dentro de `data/artifacts/` para `/artifacts/...`. Quando o arquivo ja foi removido, a UI nao renderiza link quebrado.
+
+## Retencao automatica
+
+O worker roda sweep periodico de retencao e classifica jobs em tres grupos:
+
+- `hard_failure`: `24h`
+- `recoverable`: `168h`
+- `publishable`: `504h`
+
+Regra atual:
+
+- falhas criticas de pipeline entram no grupo curto
+- `monetization_review`, `blocked_for_monetization`, `rejected` e `publish_failed` entram no grupo medio
+- `ready_for_upload`, `approved_for_publish` e agendas `scheduled` entram no grupo longo
+- `queued`, `running`, `publishing`, `published` e `cancelled` ficam fora do cleanup automatico
+
+Quando o TTL vence:
+
+1. o diretorio de artefatos do job e removido
+2. o app grava `retention_cleanup.json`
+3. o job preserva `quality_summary.retention`
+4. o hub continua mostrando metadados e historico leve, mas esconde midia pesada
 
 ## Interface
 
-Templates:
+Templates ativos:
 
-- `app/templates/base.html`: layout base e cabecalho.
-- `app/templates/jobs.html`: pagina principal com filtros, tabela e formulario.
-- `app/templates/jobs_table.html`: tabela parcial de jobs.
-- `app/templates/job_detail.html`: revisao detalhada de roteiro, cenas, assets, audio, legendas, render, fallbacks e erros.
+- `app/templates/base.html`
+- `app/templates/jobs.html`
+- `app/templates/jobs_table.html`
+- `app/templates/publication_dashboard.html`
+- `app/templates/calendar.html`
+- `app/templates/job_detail.html`
 
-CSS:
+A job page atual e deliberadamente centrada em decisao:
 
-- `app/static/styles.css`
+1. assistir o video
+2. aprovar
+3. agendar ou publicar
 
-O app usa SSR simples com Jinja2. Nao ha build frontend obrigatorio para rodar o hub.
+Conteudo tecnico, erros e artefatos ficam colapsados em paines secundarios.
 
 ## Testes
 
-Os testes ficam em `tests/test_e2e.py` e cobrem:
+O foco principal esta em `tests/test_e2e.py`. A suite cobre:
 
-- fluxo completo ate `monetization_review` ou `blocked_for_monetization`;
-- URL de artefatos;
-- tema vazio do hub caindo em pesquisa de tendencias reais;
-- criacao pelo hub com modo titulo, tom, angulo e prompt SEO;
-- prompt viral customizado;
-- gates de script, cena, asset, legenda, background music e render;
-- fallback/retry;
-- normalizacao de audio, publish audit e uso de FFmpeg.
+- pipeline ate review
+- tabela e detalhe de jobs
+- agenda e calendario
+- publish manual e via API
+- OAuth do YouTube
+- retencao de artefatos
+- gates de qualidade
 
-Rodar:
+Comando padrao:
 
 ```bash
 pytest -q
@@ -212,26 +263,20 @@ pytest -q
 
 ## Onde alterar
 
-Para adicionar um provider de imagem:
+Para mudar UX do hub:
 
-- `app/config.py`: novas variaveis `YTS_*`.
-- `app/providers.py`: nova classe e registro no `ProviderRegistry`.
-- `app/orchestrator.py`: politica de fallback, metadados e eventos.
-- `tests/test_e2e.py`: cobertura do contrato com provider mock.
+- `app/main.py`
+- `app/templates/*.html`
+- `app/static/styles.css`
 
-Para mudar copywriting/prompt do hub:
+Para mudar publicacao e YouTube:
 
-- `app/main.py`: `DEFAULT_VIRAL_PROMPT_TEMPLATE`, composicao de notas e defaults do hub.
-- `data/hub_settings.json`: prompt customizado salvo em runtime.
+- `app/orchestrator.py`
+- `app/youtube_api.py`
+- `app/schemas.py`
 
-Para mudar render:
+Para mudar regras de retencao:
 
-- `app/orchestrator.py`: etapa `_step_render`.
-- `app/quality/render_gate.py`: validacoes do MP4.
-- `app/templates/job_detail.html`: exibicao do resultado.
-
-Para mudar banco/modelos:
-
-- `app/models.py`: schema SQLAlchemy.
-- `app/db.py`: engine/session.
-- `scripts/migrate_sqlite_to_postgres.py`: migracao auxiliar quando aplicavel.
+- `app/config.py`
+- `app/orchestrator.py`
+- `app/storage.py`

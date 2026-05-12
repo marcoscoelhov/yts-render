@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     youtube_publish_mode: str = "manual"
     youtube_api_enabled: bool = False
     youtube_channel_id: str | None = None
+    youtube_client_id: str | None = None
+    youtube_client_secret: str | None = None
+    youtube_oauth_redirect_uri: str | None = None
+    youtube_notify_subscribers: bool = False
     minimax_commercial_rights_confirmed: bool = False
     edge_tts_commercial_rights_confirmed: bool = False
     minimax_rights_evidence_url: str | None = None
@@ -96,6 +100,11 @@ class Settings(BaseSettings):
 
     worker_poll_seconds: float = 1.0
     job_lease_seconds: int = 60
+    artifact_retention_enabled: bool = True
+    artifact_retention_sweep_seconds: int = 60
+    artifact_ttl_hard_failure_hours: int = 24
+    artifact_ttl_recoverable_hours: int = 168
+    artifact_ttl_publishable_hours: int = 504
 
     @field_validator("target_duration_sec")
     @classmethod
@@ -156,6 +165,18 @@ class Settings(BaseSettings):
             raise ValueError("asset_generation_parallelism must be between 1 and 8")
         return value
 
+    @field_validator(
+        "artifact_retention_sweep_seconds",
+        "artifact_ttl_hard_failure_hours",
+        "artifact_ttl_recoverable_hours",
+        "artifact_ttl_publishable_hours",
+    )
+    @classmethod
+    def validate_positive_retention_values(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("retention values must be positive")
+        return value
+
     @property
     def templates_dir(self) -> Path:
         return Path(__file__).resolve().parent / "templates"
@@ -179,6 +200,14 @@ class Settings(BaseSettings):
     @property
     def artifacts_dir(self) -> Path:
         return self.data_dir / "artifacts"
+
+    @property
+    def youtube_token_path(self) -> Path:
+        return self.data_dir / "youtube_oauth_token.json"
+
+    @property
+    def youtube_oauth_state_path(self) -> Path:
+        return self.data_dir / "youtube_oauth_state.json"
 
 
 @lru_cache(maxsize=1)

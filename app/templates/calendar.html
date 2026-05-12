@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel calendar-summary">
+  <div>
+    <p class="eyebrow">Agenda</p>
+    <h2>Calendário de publicação</h2>
+    <p>Use esta tela só para ver os horários. Para mudar uma publicação, abra o job.</p>
+  </div>
+  <div class="calendar-metrics">
+    <span><strong>{{ scheduled_count }}</strong> programados</span>
+    <span><strong>{{ published_count }}</strong> publicados</span>
+  </div>
+</section>
+
+<section class="panel calendar-shell">
+  <div class="calendar-toolbar">
+    <a class="button-link ghost-link" href="/calendar?month={{ previous_month }}">Mês anterior</a>
+    <div>
+      <p class="eyebrow">Mês exibido</p>
+      <h3>{{ month_label }}</h3>
+    </div>
+    <a class="button-link ghost-link" href="/calendar?month={{ next_month }}">Próximo mês</a>
+  </div>
+
+  <div class="calendar-legend">
+    <span><span class="badge scheduled">Programado</span> slot salvo e aguardando horário</span>
+    <span><span class="badge publishing">Publicando</span> upload em andamento</span>
+    <span><span class="badge publish_failed">Falhou no upload</span> precisa revisão</span>
+    <span><span class="badge published">Publicado</span> concluído</span>
+  </div>
+
+  <div class="calendar-grid">
+    <div class="calendar-head">Seg</div>
+    <div class="calendar-head">Ter</div>
+    <div class="calendar-head">Qua</div>
+    <div class="calendar-head">Qui</div>
+    <div class="calendar-head">Sex</div>
+    <div class="calendar-head">Sáb</div>
+    <div class="calendar-head">Dom</div>
+    {% for week in weeks %}
+      {% for day in week %}
+      <article class="calendar-cell {% if not day.is_current_month %}muted{% endif %}">
+        <header>
+          <span>{{ day.day_number }}</span>
+          {% if day.entries %}
+          <small>{{ day.entries|length }} item(ns)</small>
+          {% endif %}
+        </header>
+        <div class="calendar-items">
+          {% for entry in day.entries %}
+          <a class="calendar-card" href="/jobs/{{ entry.job_id }}">
+            <strong>{{ entry.title }}</strong>
+            <span>{{ entry.local_time }} · {{ entry.youtube_visibility }}</span>
+            <small>{{ schedule_status_label(entry.schedule_status) }} · {{ job_status_label(entry.job_status) }}</small>
+            <div class="calendar-badges">
+              <span class="badge {{ entry.schedule_status }}">{{ schedule_status_label(entry.schedule_status) }}</span>
+            </div>
+          </a>
+          {% endfor %}
+        </div>
+      </article>
+      {% endfor %}
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

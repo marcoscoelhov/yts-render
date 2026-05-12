@@ -221,6 +221,25 @@ class ReviewRecord(Base):
     retry_step: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class PublicationSchedule(Base):
+    __tablename__ = "publication_schedules"
+
+    schedule_id: Mapped[str] = mapped_column(String, primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id"), unique=True, index=True)
+    schema_version: Mapped[str] = mapped_column(String, default="1.0.0")
+    content_hash: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    scheduled_for_utc: Mapped[datetime] = mapped_column(DateTime)
+    timezone: Mapped[str] = mapped_column(String, default="UTC")
+    youtube_visibility: Mapped[str] = mapped_column(String, default="private")
+    status: Mapped[str] = mapped_column(String, default="scheduled")
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    youtube_video_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    youtube_url: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
 class PerformanceMetric(Base):
     __tablename__ = "performance_metrics"
 

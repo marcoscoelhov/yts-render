@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -95,3 +97,34 @@ class PerformanceMetricPayload(BaseModel):
         if value is not None and value < 0:
             raise ValueError("metric must be non-negative")
         return value
+
+
+class PublicationSchedulePayload(BaseModel):
+    scheduled_for_local: str
+    timezone: str = "UTC"
+    youtube_visibility: Literal["private", "unlisted", "public"] = "private"
+    notes: str | None = None
+
+    @field_validator("scheduled_for_local")
+    @classmethod
+    def validate_scheduled_for_local(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("scheduled_for_local is required")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            raise ValueError("scheduled_for_local must be a valid datetime-local value") from exc
+        if parsed.tzinfo is not None:
+            raise ValueError("scheduled_for_local must not include timezone offset")
+        return normalized
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        normalized = str(value or "").strip() or "UTC"
+        try:
+            ZoneInfo(normalized)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError("timezone must be a valid IANA timezone") from exc
+        return normalized

@@ -1,48 +1,53 @@
 <div class="jobs-table-header">
   <span>{{ pagination.total }} jobs</span>
-  <span>Pagina {{ pagination.page }} de {{ pagination.total_pages }}</span>
+  <span>Página {{ pagination.page }} de {{ pagination.total_pages }}</span>
 </div>
-<div class="jobs-table-wrap">
-  <table class="jobs-table">
-    <thead>
-      <tr>
-        <th>Job</th>
-        <th>Tema</th>
-        <th>Status</th>
-        <th>Criado em</th>
-        <th>Duracao</th>
-        <th>Fallbacks</th>
-        <th>Review</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for job, seed_theme, duration_ms, fallback_count, asset_count in rows %}
-      <tr>
-        <td><a href="/jobs/{{ job.job_id }}" title="{{ job.job_id }}">{{ job.job_id[:8] }}</a></td>
-        <td>{{ seed_theme }}</td>
-        <td><span class="badge {{ job.status }}">{{ job.status }}</span></td>
-        <td>{{ job.created_at }}</td>
-        <td>{% if duration_ms %}{{ (duration_ms / 1000)|round(1) }} s{% else %}-{% endif %}</td>
-        <td>{{ fallback_count }}</td>
-        <td>{{ job.review_state or "-" }}</td>
-      </tr>
-      {% else %}
-      <tr>
-        <td colspan="7">Nenhum job encontrado.</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+<div class="job-list">
+  {% for job, seed_theme, duration_ms, fallback_count, asset_count in rows %}
+  <article class="job-row-card">
+    <div class="job-row-main">
+      <div class="job-row-head">
+        <div>
+          <p class="eyebrow">Job {{ job.job_id[:8] }}</p>
+          <h3><a href="/jobs/{{ job.job_id }}" title="{{ job.job_id }}">{{ seed_theme or job.topic_summary or job.job_id }}</a></h3>
+        </div>
+        <span class="badge {{ job.status }}">{{ job_status_label(job.status) }}</span>
+      </div>
+      <div class="job-row-meta">
+        <span><strong>Etapa:</strong> {{ job_flow_stage(job.status) }}</span>
+        <span><strong>Criado:</strong> {{ job.created_at }}</span>
+        <span><strong>Duração:</strong> {% if duration_ms %}{{ (duration_ms / 1000)|round(1) }} s{% else %}-{% endif %}</span>
+        <span><strong>Fallbacks:</strong> {{ fallback_count }}</span>
+      </div>
+      <p class="job-row-next"><strong>Próxima ação:</strong> {{ job_next_action(job.status) }}</p>
+    </div>
+    <div class="job-row-actions">
+      <a class="button-link" href="/jobs/{{ job.job_id }}">Abrir job</a>
+      {% if job.status in ["ready_for_upload", "monetization_review"] %}
+      <span class="inline-hint">Aprovação pendente</span>
+      {% elif job.status == "approved_for_publish" %}
+      <span class="inline-hint">Já pode programar</span>
+      {% elif job.status == "published" %}
+      <span class="inline-hint">Publicado</span>
+      {% endif %}
+    </div>
+  </article>
+  {% else %}
+  <article class="job-row-card empty">
+    <strong>Nenhum job encontrado.</strong>
+    <p>Altere os filtros ou crie um novo job.</p>
+  </article>
+  {% endfor %}
 </div>
-<nav class="pagination" aria-label="Paginacao de jobs">
+<nav class="pagination" aria-label="Paginação de jobs">
   {% if pagination.has_previous %}
   <a href="/?{{ pagination.previous_query }}" hx-get="/jobs?{{ pagination.previous_query }}" hx-target="#jobs-table">Anterior</a>
   {% else %}
   <span class="disabled">Anterior</span>
   {% endif %}
   {% if pagination.has_next %}
-  <a href="/?{{ pagination.next_query }}" hx-get="/jobs?{{ pagination.next_query }}" hx-target="#jobs-table">Proxima</a>
+  <a href="/?{{ pagination.next_query }}" hx-get="/jobs?{{ pagination.next_query }}" hx-target="#jobs-table">Próxima</a>
   {% else %}
-  <span class="disabled">Proxima</span>
+  <span class="disabled">Próxima</span>
   {% endif %}
 </nav>
