@@ -27,6 +27,7 @@ from app.pipelines.music_assets import MusicDomain
 from app.pipelines.subtitle_assets import SubtitleDomain
 from app.pipelines.timeline import normalize_scene_timings
 from app.pipelines.tts_assets import TTSDomain
+from app.quality.background_music_gate import BackgroundMusicGate
 from app.quality.subtitle_gate import BAD_ENDINGS
 from app.utils import file_uri, ms_to_srt, new_id, parse_srt, path_from_uri, split_caption_chunks, stable_hash, utcnow, word_tokens, wrap_caption
 
@@ -114,6 +115,7 @@ class AssetPipeline(BasePipeline):
         self.tts = TTSDomain(self)
         self.subtitles = SubtitleDomain(self)
         self.music = MusicDomain(self)
+        self.background_music_gate = BackgroundMusicGate()
         self._music_prefetch_lock = threading.Lock()
         self._music_prefetch_futures: dict[str, concurrent.futures.Future] = {}
 
@@ -422,6 +424,7 @@ class AssetPipeline(BasePipeline):
 
     def step_subtitles(self, session: Session, job: Job, attempt: int) -> list[str]:
         self._remove_stale_quality_report(job.job_id, "subtitle_quality_report.json")
+        self._remove_stale_quality_report(job.job_id, "subtitle_timing_report.json")
         script = session.scalar(select(Script).where(Script.job_id == job.job_id))
         narration = session.scalar(select(NarrationAsset).where(NarrationAsset.job_id == job.job_id))
         scene_plan = session.scalar(select(ScenePlan).where(ScenePlan.job_id == job.job_id))
@@ -441,7 +444,22 @@ class AssetPipeline(BasePipeline):
         coverage = round(min(cursor / max(len(script_words), 1), 1.0), 3)
         if coverage < 0.99:
             raise RecoverableStepError("subtitle coverage below threshold")
-        subtitle_gate = self.subtitle_gate.validate(items, coverage)
+        drift_report = self._estimate_subtitle_timing_drift(cues, items)
+        self.storage.persist_json(
+            job.job_id,
+            "subtitle_timing_report.json",
+            {
+                "job_id": job.job_id,
+                "coverage_ratio": coverage,
+                **self._serialize_for_json(drift_report),
+            },
+        )
+        subtitle_gate = self.subtitle_gate.validate(
+            items,
+            coverage,
+            p95_drift_ms=int(drift_report["p95_drift_ms"]),
+            max_drift_ms=int(drift_report["max_drift_ms"]),
+        )
         if not subtitle_gate.passed:
             self.storage.persist_json(job.job_id, "subtitle_quality_report.json", {"reasons": subtitle_gate.reasons, "metrics": subtitle_gate.metrics})
             raise RecoverableStepError(f"subtitle quality gate failed: {', '.join(subtitle_gate.reasons[:6])}")
@@ -475,8 +493,8 @@ class AssetPipeline(BasePipeline):
             "format": "internal",
             "items": items,
             "coverage_ratio": coverage,
-            "p95_drift_ms": 0,
-            "max_drift_ms": 0,
+            "p95_drift_ms": int(drift_report["p95_drift_ms"]),
+            "max_drift_ms": int(drift_report["max_drift_ms"]),
             "ass_uri": file_uri(ass_path),
             "raw_srt_uri": narration.raw_subtitles_uri,
         }
@@ -487,7 +505,7 @@ class AssetPipeline(BasePipeline):
         quality_summary["subtitles"] = {**subtitle_gate.metrics, "subtitle_gate_pass": True}
         job.quality_summary = quality_summary
         self._append_event(job.job_id, "subtitle.aligned", "succeeded", quality_summary["subtitles"])
-        return ["subtitle_track.json", "audio/subtitles.ass"]
+        return ["subtitle_track.json", "audio/subtitles.ass", "subtitle_timing_report.json"]
 
     def step_background_music(self, session: Session, job: Job, attempt: int) -> list[str]:
         script = session.scalar(select(Script).where(Script.job_id == job.job_id))
@@ -497,6 +515,7 @@ class AssetPipeline(BasePipeline):
         scene_plan = session.scalar(select(ScenePlan).where(ScenePlan.job_id == job.job_id))
         assert script and topic_plan and narration
         self._remove_stale_quality_report(job.job_id, "background_music_debug.json")
+        self._remove_stale_quality_report(job.job_id, "background_music_quality_report.json")
         if not self.settings.background_music_enabled:
             quality_summary = dict(job.quality_summary or {})
             quality_summary["background_music"] = {"enabled": False, "skipped": True, "sound_design_enabled": self.settings.sound_design_enabled}
@@ -588,6 +607,25 @@ class AssetPipeline(BasePipeline):
                 "enabled": True,
             }
             self.storage.persist_json(job.job_id, "sound_design.json", self._serialize_for_json(sound_design_metadata))
+        gate_result = self.background_music_gate.validate(
+            narration_path=path_from_uri(narration.audio_uri),
+            music_path=raw_music_path,
+            mixed_audio_path=mixed_audio_path,
+            expected_duration_ms=narration.duration_ms,
+            gain_db=self.settings.background_music_gain_db,
+        )
+        self.storage.persist_json(
+            job.job_id,
+            "background_music_quality_report.json",
+            {
+                "job_id": job.job_id,
+                "passed": gate_result.passed,
+                "reasons": gate_result.reasons,
+                "metrics": self._serialize_for_json(gate_result.metrics),
+            },
+        )
+        if not gate_result.passed:
+            raise RecoverableStepError(f"background music quality gate failed: {', '.join(gate_result.reasons[:6])}")
         created_at = utcnow()
         payload = {
             "schema_version": self.settings.schema_version,
@@ -626,12 +664,14 @@ class AssetPipeline(BasePipeline):
         )
         quality_summary = dict(job.quality_summary or {})
         quality_summary["background_music"] = {
+            **gate_result.metrics,
             "enabled": True,
             "provider": result["provider"],
             "query": result.get("query"),
             "mood": result.get("mood"),
             "gain_db": self.settings.background_music_gain_db,
             "mixed_audio": "audio/mixed.wav",
+            "background_music_gate_pass": True,
             "fallback_used": bool((result.get("provider_metadata") or {}).get("fallback_used")),
             "mix_repair_used": bool(mixed_result.get("mix_repair_used")),
             "sound_design_enabled": bool(sound_design_metadata),
@@ -639,7 +679,7 @@ class AssetPipeline(BasePipeline):
         }
         job.quality_summary = quality_summary
         self._append_event(job.job_id, "background_music.mixed", "succeeded", quality_summary["background_music"])
-        outputs = ["audio/background_source.wav", "audio/mixed.wav", "background_music.json", music_telemetry_file]
+        outputs = ["audio/background_source.wav", "audio/mixed.wav", "background_music.json", "background_music_quality_report.json", music_telemetry_file]
         if sound_design_metadata:
             outputs.extend(["audio/sound_design.wav", "sound_design.json"])
         return outputs
@@ -1216,6 +1256,69 @@ class AssetPipeline(BasePipeline):
             current["end_ms"] = boundary_ms
             following["start_ms"] = boundary_ms
         return [item for item in repaired if str(item.get("text") or "").strip()]
+
+    def _estimate_subtitle_timing_drift(self, cues: list[dict[str, Any]], items: list[dict[str, Any]]) -> dict[str, Any]:
+        cue_map = {int(cue["idx"]): cue for cue in cues if cue.get("idx") is not None}
+        grouped_items: dict[int, list[dict[str, Any]]] = {}
+        for item in items:
+            idx_surface = str(item.get("idx") or "")
+            parent_idx = idx_surface.split(".", 1)[0]
+            if not parent_idx.isdigit():
+                continue
+            grouped_items.setdefault(int(parent_idx), []).append(item)
+        drifts_ms: list[int] = []
+        drift_items: list[dict[str, Any]] = []
+        for parent_idx, grouped in grouped_items.items():
+            cue = cue_map.get(parent_idx)
+            if cue is None:
+                continue
+            total_words = max(sum(max(len(word_tokens(str(item.get("text") or ""))), 1) for item in grouped), 1)
+            cue_start_ms = int(cue["start_ms"])
+            cue_end_ms = int(cue["end_ms"])
+            cue_duration_ms = max(cue_end_ms - cue_start_ms, len(grouped))
+            elapsed_words = 0
+            for item_index, item in enumerate(grouped, start=1):
+                chunk_word_count = max(len(word_tokens(str(item.get("text") or ""))), 1)
+                expected_start_ms = cue_start_ms + round(elapsed_words / total_words * cue_duration_ms)
+                elapsed_words += chunk_word_count
+                expected_end_ms = (
+                    cue_end_ms
+                    if item_index == len(grouped)
+                    else cue_start_ms + round(elapsed_words / total_words * cue_duration_ms)
+                )
+                actual_start_ms = int(item["start_ms"])
+                actual_end_ms = int(item["end_ms"])
+                drift_ms = max(abs(actual_start_ms - expected_start_ms), abs(actual_end_ms - expected_end_ms))
+                drifts_ms.append(drift_ms)
+                drift_items.append(
+                    {
+                        "idx": item.get("idx"),
+                        "parent_cue_idx": parent_idx,
+                        "drift_ms": drift_ms,
+                        "expected_start_ms": expected_start_ms,
+                        "expected_end_ms": expected_end_ms,
+                        "actual_start_ms": actual_start_ms,
+                        "actual_end_ms": actual_end_ms,
+                    }
+                )
+        if not drifts_ms:
+            return {
+                "timing_basis": "raw_srt_proportional_split",
+                "drift_item_count": 0,
+                "p95_drift_ms": 0,
+                "max_drift_ms": 0,
+                "worst_items": [],
+            }
+        sorted_drifts = sorted(drifts_ms)
+        percentile_index = max(0, math.ceil(len(sorted_drifts) * 0.95) - 1)
+        worst_items = sorted(drift_items, key=lambda item: int(item["drift_ms"]), reverse=True)[:5]
+        return {
+            "timing_basis": "raw_srt_proportional_split",
+            "drift_item_count": len(drifts_ms),
+            "p95_drift_ms": int(sorted_drifts[percentile_index]),
+            "max_drift_ms": int(sorted_drifts[-1]),
+            "worst_items": worst_items,
+        }
 
     def _render_ass(self, items: list[dict[str, Any]]) -> str:
         header = """[Script Info]

@@ -20,7 +20,7 @@ O banco padrao e SQLite em `data/yts_render.db`. Os artefatos ficam em `data/art
 3. O job entra no banco com status `queued`.
 4. O worker iniciado no lifespan do FastAPI reivindica jobs `queued` ou `running` com lease vencido.
 5. O orquestrador executa as etapas do pipeline, grava artefatos e persiste registros no banco.
-6. Ao terminar, o job vai para `waiting_review`.
+6. Ao terminar, o job vai para `monetization_review`, `blocked_for_monetization` ou `ready_for_upload`, conforme o gate final.
 7. O usuario aprova, rejeita ou pede retry pela tela `/jobs/{job_id}`.
 8. Job aprovado vira `approved_for_publish`; publicacao manual/API marca como `published`.
 
@@ -30,7 +30,9 @@ Estados comuns:
 
 - `queued`: criado e aguardando worker.
 - `running`: worker esta executando uma etapa.
-- `waiting_review`: video final pronto para revisao.
+- `monetization_review`: video e pacote prontos, mas ainda pendentes de checklist humano.
+- `blocked_for_monetization`: houve bloqueio hard de compliance, factualidade, direitos ou qualidade final.
+- `ready_for_upload`: passou pelo gate final sem pendencias humanas.
 - `approved_for_publish`: aprovado na revisao e liberado para publicacao.
 - `published`: marcado como publicado.
 - `rejected`: rejeitado na revisao.
@@ -51,7 +53,9 @@ As etapas ficam em `JobOrchestrator._steps()`:
 | `asset_generation` | 2 | Gera/seleciona imagens por cena e aplica score semantico. |
 | `tts` | 2 | Gera narracao WAV, normaliza audio e cria SRT bruto. |
 | `subtitle_alignment` | 1 | Normaliza chunks de legenda e gera ASS/SRT para render. |
+| `background_music` | 1 | Gera trilha, faz mix com ducking, valida audio final e persiste telemetria. |
 | `render` | 1 | Usa FFmpeg para gerar `render/final.mp4` vertical. |
+| `monetization_readiness_gate` | 0 | Consolida direitos, disclosure, factualidade, repeticao e publish readiness. |
 | `publish_to_review_hub` | 0 | Monta pacote de publicacao e deixa o job em revisao. |
 
 Cada execucao de etapa cria um `StepExecution` com `input_hash`. Se uma etapa ja teve sucesso com o mesmo input, o orquestrador pode reutilizar o resultado.
@@ -67,7 +71,7 @@ O app tambem grava `performance_timeline.json` no diretorio do job com duracao p
 | `POST` | `/jobs` | Cria um novo job e redireciona para o detalhe. |
 | `GET` | `/jobs/{job_id}` | Tela de detalhe/revisao do job. |
 | `GET` | `/api/jobs/{job_id}` | JSON compacto com status, request e render. |
-| `POST` | `/jobs/{job_id}/review` | Aprova, rejeita ou cria retry a partir de uma etapa. |
+| `POST` | `/jobs/{job_id}/review` | Aprova, rejeita ou cria retry por clonagem completa do job. |
 | `POST` | `/jobs/{job_id}/publish` | Marca job aprovado como publicado. |
 | `POST` | `/hub/prompt` | Salva ou reseta o prompt viral usado pelo hub. |
 | `GET` | `/healthz` | Healthcheck do app. |
@@ -108,7 +112,7 @@ Variaveis principais:
 
 - `ScriptPipeline`: etapa `script`.
 - `ScenePipeline`: etapa `scene_plan`.
-- `AssetPipeline`: etapa `asset_generation`.
+- `AssetPipeline`: etapas `asset_generation`, `tts`, `subtitle_alignment` e `background_music`.
 - `RenderPipeline`: etapa `render`.
 - `MonetizationPipeline`: etapa `monetization_readiness_gate`.
 
@@ -191,13 +195,14 @@ O app usa SSR simples com Jinja2. Nao ha build frontend obrigatorio para rodar o
 
 Os testes ficam em `tests/test_e2e.py` e cobrem:
 
-- fluxo completo ate `waiting_review`;
+- fluxo completo ate `monetization_review` ou `blocked_for_monetization`;
 - URL de artefatos;
+- tema vazio do hub caindo em pesquisa de tendencias reais;
 - criacao pelo hub com modo titulo, tom, angulo e prompt SEO;
 - prompt viral customizado;
-- gates de script, cena, asset, legenda e render;
+- gates de script, cena, asset, legenda, background music e render;
 - fallback/retry;
-- normalizacao de audio e uso de FFmpeg.
+- normalizacao de audio, publish audit e uso de FFmpeg.
 
 Rodar:
 

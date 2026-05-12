@@ -13,10 +13,13 @@ import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from app.editorial.research_brief import audit_source_relevance, build_research_brief, research_tokens
 from app.editorial.retention import attach_retention_metadata, enrich_plan_for_script_generation
+from app.editorial.topic_mode import resolve_editorial_mode
 from app.models import Job, Script, TopicPlan, TopicRequest
 from app.pipelines.common import FatalStepError, RecoverableStepError, model_payload
 from app.pipelines.base import BasePipeline
+from app.quality.script_gate import REWATCH_LOOP_PATTERN
 from app.utils import new_id, sentence_split, stable_hash, tokenize, utcnow, word_tokens
 
 
@@ -30,12 +33,45 @@ def normalize_script_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "ending_strength_score",
     }
     for key in score_keys:
-        value = normalized.get(key)
+        value = _coerce_script_metric_value(normalized.get(key))
         if isinstance(value, int | float) and 1 < value <= 10:
             normalized[key] = round(value / 10, 3)
-    if normalized.get("repetition_score") == 1:
+            continue
+        normalized[key] = value
+    repetition_value = normalized.get("repetition_score")
+    if repetition_value == 1:
         normalized["repetition_score"] = 0.1
+        return normalized
+    if isinstance(repetition_value, int | float) and 0.88 < repetition_value <= 1:
+        normalized["repetition_score"] = round(max(0.0, 1 - repetition_value), 3)
     return normalized
+
+
+def _coerce_script_metric_value(value: Any) -> Any:
+    if isinstance(value, bool | int | float):
+        return value
+    if not isinstance(value, str):
+        return value
+    stripped = value.strip()
+    lowered = stripped.lower()
+    if lowered in {"true", "passed", "pass", "ok", "aprovado"}:
+        return True
+    if lowered in {"false", "failed", "fail", "reprovado"}:
+        return False
+    fraction_match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", stripped)
+    if fraction_match:
+        numerator = float(fraction_match.group(1))
+        denominator = float(fraction_match.group(2))
+        if denominator > 0:
+            return round(numerator / denominator, 3)
+    percentage_match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*%", stripped)
+    if percentage_match:
+        return round(float(percentage_match.group(1)) / 100, 3)
+    normalized_number = stripped.replace(",", ".")
+    try:
+        return float(normalized_number)
+    except ValueError:
+        return value
 
 
 class ScriptPipeline(BasePipeline):
@@ -47,7 +83,9 @@ class ScriptPipeline(BasePipeline):
         topic_plan = session.scalar(select(TopicPlan).where(TopicPlan.job_id == job.job_id))
         request = session.scalar(select(TopicRequest).where(TopicRequest.job_id == job.job_id))
         assert topic_plan and request
-        simple_mode_fact_skip = self.settings.simple_shorts_mode and not self._topic_requires_verified_fact_pack(topic_plan, request)
+        editorial_mode = self._editorial_mode(topic_plan, request)
+        simple_mode_fact_skip = self.settings.simple_shorts_mode and editorial_mode == "viral_curiosidades"
+        research_brief = self._build_research_brief(topic_plan, request)
         plan_dict = {
             "canonical_topic": topic_plan.canonical_topic,
             "angle": topic_plan.angle,
@@ -58,6 +96,8 @@ class ScriptPipeline(BasePipeline):
             "hub_notes": request.notes,
             "original_input": request.seed_theme,
             "simple_shorts_mode": simple_mode_fact_skip,
+            "editorial_mode": editorial_mode,
+            "research_brief": research_brief,
         }
         plan_dict = enrich_plan_for_script_generation(
             plan_dict,
@@ -66,7 +106,7 @@ class ScriptPipeline(BasePipeline):
         )
         plan_dict["channel_learning_brief"] = self._channel_learning_brief(session, request.niche_id)
         fact_started = time.monotonic()
-        fact_pack = self._simple_mode_fact_pack(request) if simple_mode_fact_skip else self._build_fact_pack(topic_plan, request)
+        fact_pack = self._simple_mode_fact_pack(request) if simple_mode_fact_skip else self._build_fact_pack(topic_plan, request, research_brief)
         stage_timings_ms["fact_pack_ms"] = round((time.monotonic() - fact_started) * 1000, 1)
         plan_dict["fact_pack"] = fact_pack
         self.storage.persist_json(job.job_id, "fact_pack.json", self._serialize_for_json(fact_pack))
@@ -200,15 +240,11 @@ class ScriptPipeline(BasePipeline):
             return False
         return self._topic_requires_verified_fact_pack(topic_plan, request)
 
+    def _editorial_mode(self, topic_plan: Any, request: Any) -> str:
+        return resolve_editorial_mode(topic_plan, request)
+
     def _topic_requires_verified_fact_pack(self, topic_plan: TopicPlan, request: TopicRequest) -> bool:
-        source_text = f"{request.seed_theme} {topic_plan.canonical_topic} {topic_plan.angle} {topic_plan.hook_promise}"
-        return bool(
-            re.search(
-                r"\b(?:por que|porque|como|ci[eê]ncia|biologia|engenharia|hist[oó]ria|sa[uú]de|animal|animais|flamingo|flamingos|polvo|polvos|youtube|tiktok|google|dados|n[uú]mero|estat[ií]stica|causa|mecanismo)\b",
-                source_text,
-                re.IGNORECASE,
-            )
-        )
+        return self._editorial_mode(topic_plan, request) == "factual_strict"
 
     def _simple_mode_fact_pack(self, request: TopicRequest) -> dict[str, Any]:
         return {
@@ -369,7 +405,10 @@ class ScriptPipeline(BasePipeline):
         }
         self.storage.persist_json(job_id, "script_generation_debug.json", self._serialize_for_json(payload))
 
-    def _build_fact_pack(self, topic_plan: TopicPlan, request: TopicRequest) -> dict[str, Any]:
+    def _build_research_brief(self, topic_plan: Any, request: Any) -> dict[str, Any]:
+        return build_research_brief(topic_plan, request)
+
+    def _build_fact_pack(self, topic_plan: TopicPlan, request: TopicRequest, research_brief: dict[str, Any] | None = None) -> dict[str, Any]:
         if self.settings.use_mock_providers:
             return {
                 "status": "limited",
@@ -378,6 +417,7 @@ class ScriptPipeline(BasePipeline):
                 "sources": [],
                 "editorial_rule": "Mock-provider test mode: no external fact retrieval.",
             }
+        research_brief = research_brief or self._build_research_brief(topic_plan, request)
         queries = self._fact_pack_queries(request, topic_plan)
         seen: set[str] = set()
         cleaned_queries = []
@@ -386,6 +426,12 @@ class ScriptPipeline(BasePipeline):
             if normalized and normalized.lower() not in seen and not self._is_weak_fact_query(normalized):
                 cleaned_queries.append(normalized)
                 seen.add(normalized.lower())
+        if research_brief.get("require_mechanism_match"):
+            cleaned_queries = [
+                query
+                for query in cleaned_queries
+                if self._query_supports_research_brief(query, research_brief)
+            ]
         topic_tokens = self._fact_topic_tokens(request, topic_plan)
         if topic_tokens:
             cleaned_queries = [query for query in cleaned_queries if self._query_matches_primary_fact_topic(query, topic_tokens)]
@@ -394,28 +440,62 @@ class ScriptPipeline(BasePipeline):
         if query_batch:
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(query_batch)))
             try:
-                future_to_query = {executor.submit(self._scientific_article_fact_pack, query): query for query in query_batch}
+                future_to_query = {
+                    executor.submit(self._scientific_article_fact_pack, query, research_brief): query
+                    for query in query_batch
+                }
                 for future in concurrent.futures.as_completed(future_to_query):
                     query = future_to_query[future]
                     try:
                         pack = future.result()
                     except Exception:  # noqa: BLE001
                         continue
-                    if pack.get("facts") and self._fact_pack_matches_topic(pack, request, topic_plan):
+                    if pack.get("facts") and self._fact_pack_matches_topic(pack, request, topic_plan, research_brief):
                         pack["query_used"] = query
                         pack["status"] = "verified"
                         pack["queries_attempted"] = query_batch
+                        pack["research_brief"] = research_brief
                         return pack
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
         return {
             "status": "limited",
             "query_used": cleaned_queries[0] if cleaned_queries else request.seed_theme,
+            "queries_attempted": query_batch,
             "facts": [],
             "sources": [],
             "editorial_rule": "No source facts were retrieved. Script must avoid precise numbers, dates, medical/scientific/engineering causality, and absolute claims unless already present in the user input.",
-            "topic_alignment": {"passed": False, "reason": "no_relevant_source_retrieved"},
+            "topic_alignment": {
+                "passed": False,
+                "reason": "no_relevant_source_retrieved",
+                "claim_scope": research_brief.get("claim_scope"),
+                "primary_terms": research_brief.get("primary_terms"),
+                "mechanism_terms": research_brief.get("mechanism_terms"),
+            },
+            "research_brief": research_brief,
         }
+
+    def _query_supports_research_brief(self, query: str, research_brief: dict[str, Any]) -> bool:
+        if not research_brief.get("require_mechanism_match"):
+            return True
+        query_token_set = set(research_tokens(query))
+        if len(query_token_set) < 3:
+            return False
+        primary_terms = set(research_brief.get("primary_terms") or [])
+        mechanism_terms = set(research_brief.get("mechanism_terms") or [])
+        if len(query_token_set & primary_terms) >= 1 and len(query_token_set & mechanism_terms) >= 1:
+            return True
+        for group in research_brief.get("search_term_groups") or []:
+            tokens = {str(token) for token in (group.get("tokens") or []) if str(token)}
+            if not tokens:
+                continue
+            overlap = query_token_set & tokens
+            if len(overlap) >= 3:
+                return True
+            non_primary_terms = {str(token) for token in (group.get("non_primary_terms") or []) if str(token)}
+            if len(overlap) >= 3 and overlap & non_primary_terms:
+                return True
+        return False
 
     def _fact_topic_tokens(self, request: TopicRequest, topic_plan: TopicPlan) -> set[str]:
         source_text = f"{request.seed_theme} {topic_plan.canonical_topic}".strip()
@@ -445,7 +525,14 @@ class ScriptPipeline(BasePipeline):
             "unico",
             "único",
         }
-        tokens = {token for token in word_tokens(normalized) if (len(token) >= 4 or token in {"mel"}) and token not in stopwords}
+        ordered_tokens: list[str] = []
+        seen_tokens: set[str] = set()
+        for token in word_tokens(normalized):
+            if (len(token) < 4 and token not in {"mel"}) or token in stopwords or token in seen_tokens:
+                continue
+            ordered_tokens.append(token)
+            seen_tokens.add(token)
+        tokens = set(ordered_tokens)
         protected_entities = {
             "youtube",
             "tiktok",
@@ -469,12 +556,20 @@ class ScriptPipeline(BasePipeline):
             "adenosina",
             "adenosine",
         }
-        protected = {token for token in tokens if token in protected_entities}
+        protected = {token for token in ordered_tokens if token in protected_entities}
         if "mel" in protected:
             protected.update({"honey", "honeys"})
         if "cafe" in protected or "cafeina" in protected:
             protected.update({"caffeine", "cafeina", "adenosine", "adenosina"})
-        return protected or set(list(tokens)[:3])
+        optical_illusion_terms = {"ilusao", "otica", "visual", "movimento", "percepcao", "retina", "cerebro", "periferica", "periferico"}
+        if tokens & optical_illusion_terms:
+            protected.update(tokens & optical_illusion_terms)
+            protected.update({"illusion", "illusory", "optical", "visual", "motion", "movement", "perception"})
+            if tokens & {"movimento", "periferica", "periferico", "retina"}:
+                protected.update({"peripheral", "drift", "static"})
+            if tokens & {"cerebro", "percepcao"}:
+                protected.update({"brain", "neural"})
+        return protected or set(ordered_tokens[:3])
 
     def _query_matches_primary_fact_topic(self, query: str, topic_tokens: set[str]) -> bool:
         query_tokens = {token for token in word_tokens(self._normalize_fact_text(query)) if len(token) >= 4}
@@ -487,11 +582,14 @@ class ScriptPipeline(BasePipeline):
             return False
         return len(query_tokens) > 2
 
-    def _fact_pack_matches_topic(self, fact_pack: dict[str, Any], request: TopicRequest, topic_plan: TopicPlan) -> bool:
-        topic_tokens = self._fact_topic_tokens(request, topic_plan)
-        if not topic_tokens:
-            fact_pack["topic_alignment"] = {"passed": True, "reason": "no_primary_topic_tokens"}
-            return True
+    def _fact_pack_matches_topic(
+        self,
+        fact_pack: dict[str, Any],
+        request: TopicRequest,
+        topic_plan: TopicPlan,
+        research_brief: dict[str, Any] | None = None,
+    ) -> bool:
+        research_brief = research_brief or self._build_research_brief(topic_plan, request)
         source_text = " ".join(
             str(part or "")
             for part in [
@@ -500,26 +598,25 @@ class ScriptPipeline(BasePipeline):
                 " ".join(str(fact.get("claim") or "") for fact in fact_pack.get("facts") or []),
             ]
         )
-        source_tokens = {token for token in word_tokens(self._normalize_fact_text(source_text)) if len(token) >= 4}
-        matched = sorted(topic_tokens & source_tokens)
-        coffee_topic_tokens = {"cafe", "cafeina", "caffeine"}
-        if topic_tokens & coffee_topic_tokens and not source_tokens & {"cafe", "cafeina", "caffeine", "coffee"}:
-            matched = []
-        passed = bool(matched)
-        fact_pack["topic_alignment"] = {
-            "passed": passed,
-            "primary_topic_tokens": sorted(topic_tokens),
-            "matched_tokens": matched,
-            "reason": "matched_primary_topic" if passed else "source_fact_mismatch",
-        }
-        return passed
+        alignment = audit_source_relevance(
+            research_brief,
+            str(fact_pack.get("topic_title") or ""),
+            source_text,
+        )
+        if not research_brief.get("primary_terms"):
+            alignment = {**alignment, "passed": True, "reason": "no_primary_topic_tokens"}
+        fact_pack["topic_alignment"] = alignment
+        fact_pack["research_brief"] = research_brief
+        return bool(alignment.get("passed"))
 
-    def _fact_query_priority(self, query: str) -> tuple[int, int, int, int]:
+    def _fact_query_priority(self, query: str) -> tuple[int, int, int, int, int]:
         normalized = query.lower()
         tokens = word_tokens(query)
         token_count = len(tokens)
         token_set = set(tokens)
         is_short_entity = token_count <= 3 and ":" not in query and "?" not in query
+        single_token_query = token_count == 1
+        two_token_query = token_count == 2
         is_exact_pisa_entity = {"torre", "pisa"} <= token_set and token_count <= 2
         has_specific_entity = any(
             term in normalized
@@ -580,9 +677,10 @@ class ScriptPipeline(BasePipeline):
                 "cafeína",
             ]
         )
-        ambiguous_short_entity = normalized in {"mel"}
+        ambiguous_short_entity = normalized in {"mel", "cafe", "café", "cafeina", "cafeína", "adenosina", "adenosine"}
         return (
-            0 if is_exact_pisa_entity or has_concept_suffix else 1,
+            0 if is_exact_pisa_entity else (1 if has_concept_suffix else 2),
+            2 if single_token_query else (1 if two_token_query and not has_concept_suffix else 0),
             0 if has_specific_entity and not ambiguous_short_entity else (1 if is_short_entity else 2),
             token_count,
             len(query),
@@ -631,6 +729,8 @@ class ScriptPipeline(BasePipeline):
             "cidades",
             "cafe",
             "café",
+            "cafeina",
+            "cafeína",
             "adenosina",
             "adenosine",
         }
@@ -673,29 +773,42 @@ class ScriptPipeline(BasePipeline):
         return all(token in weak_multi_terms for token in tokens)
 
     def _fact_pack_queries(self, request: TopicRequest, topic_plan: TopicPlan) -> list[str]:
-        raw_sources = [
-            request.seed_theme,
-            topic_plan.canonical_topic,
-            topic_plan.angle,
-            getattr(topic_plan, "hook_promise", None),
-            *(getattr(topic_plan, "search_terms", None) or []),
-            *(getattr(topic_plan, "entities", None) or []),
-            *(topic_plan.title_candidates or []),
+        raw_sources: list[tuple[Any, bool]] = [
+            (request.seed_theme, False),
+            (topic_plan.canonical_topic, False),
+            (topic_plan.angle, False),
+            (getattr(topic_plan, "hook_promise", None), False),
+            *((item, True) for item in (getattr(topic_plan, "search_terms", None) or [])),
+            *((item, False) for item in (getattr(topic_plan, "entities", None) or [])),
+            *((item, False) for item in (topic_plan.title_candidates or [])),
         ]
         queries: list[str] = []
-        for raw_query in raw_sources:
+        for raw_query, preserve_research_shape in raw_sources:
             for query in self._fact_query_source_texts(raw_query):
                 cleaned = self._clean_fact_query(str(query or ""))
                 if cleaned:
                     queries.append(cleaned)
+                    cleaned_token_count = len(word_tokens(self._normalize_fact_text(cleaned)))
+                    if preserve_research_shape and cleaned_token_count >= 4:
+                        continue
                     entity = self._extract_fact_entity(cleaned)
                     if entity and entity != cleaned and not self._is_weak_fact_query(entity):
                         queries.append(entity)
                         for concept in self._fact_query_concepts(cleaned):
                             queries.append(f"{entity} {concept}")
-                            if entity.lower() == "mel":
+                            if self._should_include_standalone_fact_concept(entity, concept, cleaned):
                                 queries.append(concept)
         return queries
+
+    def _should_include_standalone_fact_concept(self, entity: str, concept: str, query: str) -> bool:
+        if entity.lower() == "mel":
+            return True
+        query_tokens = set(word_tokens(self._normalize_fact_text(query)))
+        optical_illusion_terms = {"ilusao", "otica", "visual", "movimento", "periferica", "retina", "percepcao"}
+        if query_tokens & optical_illusion_terms and concept in {"peripheral drift illusion", "illusory motion visual perception", "static motion illusion"}:
+            return True
+        caffeine_terms = {"cafe", "cafeina", "caffeine", "sono", "adenosina", "adenosine"}
+        return bool(query_tokens & caffeine_terms and concept in {"caffeine adenosine receptor", "caffeine sleep adenosine"})
 
     def _fact_query_source_texts(self, value: Any) -> list[str]:
         if value is None:
@@ -778,6 +891,8 @@ class ScriptPipeline(BasePipeline):
             concepts.extend(["caffeine adenosine receptor", "caffeine sleep adenosine", "cafeina adenosina"])
         if any(term in normalized for term in ["templario", "templarios", "templário", "templários", "ordem do templo"]):
             concepts.extend(["Ordem dos Templários", "templários Portugal", "Tomar Templários"])
+        if normalized_tokens & {"ilusao", "otica", "visual", "movimento", "periferica", "retina", "percepcao"}:
+            concepts.extend(["peripheral drift illusion", "illusory motion visual perception", "static motion illusion"])
         return concepts[:3]
 
     def _normalize_fact_text(self, text: str) -> str:
@@ -785,7 +900,13 @@ class ScriptPipeline(BasePipeline):
         normalized = "".join(char for char in normalized if not unicodedata.combining(char))
         return re.sub(r"[^a-z0-9\s]", " ", normalized)
 
-    def _fact_result_is_relevant(self, query: str, title: str, extract: str) -> bool:
+    def _fact_result_is_relevant(
+        self,
+        query: str,
+        title: str,
+        extract: str,
+        research_brief: dict[str, Any] | None = None,
+    ) -> bool:
         query_tokens = {token for token in word_tokens(self._normalize_fact_text(query)) if len(token) >= 4}
         title_tokens = {token for token in word_tokens(self._normalize_fact_text(title)) if len(token) >= 4}
         text_tokens = {token for token in word_tokens(self._normalize_fact_text(f"{title} {extract[:500]}")) if len(token) >= 4}
@@ -825,6 +946,8 @@ class ScriptPipeline(BasePipeline):
                 return False
             if not (text_tokens & coffee_terms):
                 return False
+        if research_brief is not None:
+            return bool(audit_source_relevance(research_brief, title, extract).get("passed"))
         if not query_tokens:
             return True
         if query_tokens & title_tokens:
@@ -858,7 +981,7 @@ class ScriptPipeline(BasePipeline):
             return False
         return True
 
-    def _scientific_article_fact_pack(self, query: str) -> dict[str, Any]:
+    def _scientific_article_fact_pack(self, query: str, research_brief: dict[str, Any] | None = None) -> dict[str, Any]:
         try:
             with httpx.Client(timeout=httpx.Timeout(8.0, connect=3.0), headers={"User-Agent": "yts-render/1.0 fact-pack"}) as client:
                 response = client.get(
@@ -882,7 +1005,7 @@ class ScriptPipeline(BasePipeline):
             abstract = self._openalex_abstract_text(result.get("abstract_inverted_index")).strip()
             if re.search(r"\bdoes not have an abstract\b", abstract, re.IGNORECASE):
                 continue
-            if not title or not abstract or not self._fact_result_is_relevant(query, title, abstract):
+            if not title or not abstract or not self._fact_result_is_relevant(query, title, abstract, research_brief):
                 continue
             sentences = [
                 part.strip()
@@ -1037,6 +1160,7 @@ class ScriptPipeline(BasePipeline):
         gate_reasons: list[str],
     ) -> dict[str, Any]:
         processed = self._repair_common_script_text_issues(dict(script))
+        processed = self._restore_script_from_retention_map(processed)
         processed = self._normalize_script_visible_text(processed)
         processed = self._normalize_script_narration_fields(processed)
         processed = self._normalize_script_visible_text(processed)
@@ -1051,6 +1175,48 @@ class ScriptPipeline(BasePipeline):
         processed["estimated_duration_sec"] = round(max(35.0, min(55.0, len(word_tokens(str(processed.get("full_narration") or ""))) / 2.55)), 2)
         processed["token_count"] = len(tokenize(str(processed.get("full_narration") or "")))
         return processed
+
+    def _restore_script_from_retention_map(self, script: dict[str, Any]) -> dict[str, Any]:
+        retention_map = script.get("retention_map")
+        if not isinstance(retention_map, dict):
+            return script
+        raw_segments = retention_map.get("segments")
+        if not isinstance(raw_segments, list):
+            return script
+        segment_texts = [
+            str(item.get("mapped_text") or "").strip()
+            for item in raw_segments
+            if isinstance(item, dict) and str(item.get("mapped_text") or "").strip()
+        ]
+        if len(segment_texts) < 3:
+            return script
+        rebuilt_narration = " ".join(text.rstrip(".!?") + "." for text in segment_texts if text).strip()
+        current_narration = str(script.get("full_narration") or "").strip()
+        rebuilt_word_count = len(word_tokens(rebuilt_narration))
+        current_word_count = len(word_tokens(current_narration))
+        placeholder_markers = {
+            "detalhe verificável",
+            "explicação concreta",
+            "segura a surpresa",
+            "sem inflar o fato",
+            "era a pista",
+            "deixa de ser só aparência",
+        }
+        current_normalized = self._normalize_fact_text(current_narration)
+        looks_placeholder = any(marker in current_normalized for marker in {self._normalize_fact_text(marker) for marker in placeholder_markers})
+        if rebuilt_word_count < max(45, current_word_count + 12) and not looks_placeholder:
+            return script
+        if not looks_placeholder and current_word_count >= 50:
+            return script
+        rebuilt = dict(script)
+        rebuilt["hook"] = segment_texts[0].strip()
+        rebuilt["body_beats"] = [text.strip() for text in segment_texts[1:-1]]
+        rebuilt["ending"] = segment_texts[-1].strip()
+        rebuilt["full_narration"] = rebuilt_narration
+        current_key_facts = [str(item).strip() for item in (script.get("key_facts") or []) if str(item).strip()]
+        if not current_key_facts or looks_placeholder:
+            rebuilt["key_facts"] = [text.strip() for text in segment_texts[1:-1]][:3]
+        return rebuilt
 
     def _repair_common_script_text_issues(self, value: Any) -> Any:
         replacements = {
@@ -1178,6 +1344,9 @@ class ScriptPipeline(BasePipeline):
     def _should_repair_loop(self, script: dict[str, Any], gate_reasons: list[str]) -> bool:
         if any(reason in gate_reasons for reason in {"ending_not_connected_to_hook", "weak_loop_closure"}):
             return True
+        ending = str(script.get("ending") or "").strip()
+        if REWATCH_LOOP_PATTERN.search(ending):
+            return False
         return not self.script_gate._loop_report(script).get("connected_to_opening")  # noqa: SLF001
 
     def _rewrite_script_conservatively(

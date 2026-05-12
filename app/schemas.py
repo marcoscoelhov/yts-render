@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 SUPPORTED_NICHES = {"curiosidades"}
+SUPPORTED_LANGUAGES = {"pt-BR"}
 
 
 class TopicRequestCreate(BaseModel):
@@ -16,6 +17,14 @@ class TopicRequestCreate(BaseModel):
     cta_style: Literal["none", "soft"] = "none"
     notes: str | None = None
     requested_angle: str | None = None
+
+    @field_validator("seed_theme")
+    @classmethod
+    def validate_seed_theme(cls, value: str) -> str:
+        normalized = value.strip()
+        if len(normalized) < 3:
+            raise ValueError("seed_theme must have at least 3 non-space characters")
+        return normalized
 
     @field_validator("target_duration_sec")
     @classmethod
@@ -31,6 +40,20 @@ class TopicRequestCreate(BaseModel):
         if normalized not in SUPPORTED_NICHES:
             raise ValueError("unsupported niche_id: only 'curiosidades' is currently supported")
         return normalized
+
+    @field_validator("language")
+    @classmethod
+    def validate_language(cls, value: str) -> str:
+        normalized = value.strip().lower().replace("_", "-")
+        alias_map = {
+            "pt-br": "pt-BR",
+            "portuguese-br": "pt-BR",
+            "ptbr": "pt-BR",
+        }
+        resolved = alias_map.get(normalized)
+        if resolved not in SUPPORTED_LANGUAGES:
+            raise ValueError("unsupported language: only 'pt-BR' is currently supported")
+        return resolved
 
 
 class ReviewActionPayload(BaseModel):

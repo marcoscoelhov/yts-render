@@ -33,6 +33,7 @@ from app.models import BackgroundMusicAsset, Job, NarrationAsset, PerformanceMet
 from app.orchestrator import JobOrchestrator, RecoverableStepError, StepDefinition, normalize_script_metrics, orchestrator  # noqa: E402
 from app.providers import DeepSeekCreativeProvider, LLMProviderRegistry, LocalSpeechFallbackProvider, MiniMaxBackgroundMusicProvider, MinimaxCreativeProvider, MinimaxImageProvider, MockCreativeProvider, OpenAICreativeProvider, ProviderFailure, ResilientCreativeProvider, ResilientMusicProvider  # noqa: E402
 from app.quality.asset_gate import AssetGate  # noqa: E402
+from app.quality.background_music_gate import BackgroundMusicGate  # noqa: E402
 from app.quality.render_gate import RenderGate  # noqa: E402
 from app.quality.scene_gate import ScenePlanGate  # noqa: E402
 from app.quality.script_gate import ScriptQualityGate  # noqa: E402
@@ -96,18 +97,24 @@ def test_full_pipeline_reaches_monetization_review() -> None:
         assert render.resolution == "1080x1920"
         assert 25_000 <= render.duration_ms <= 45_000
         assert subtitles.coverage_ratio >= 0.99
+        assert subtitles.p95_drift_ms >= 0
+        assert subtitles.max_drift_ms >= subtitles.p95_drift_ms
         assert background_music.gain_db == -20.0
         assert Path(background_music.audio_uri.removeprefix("file://")).exists()
         assert Path(background_music.mixed_audio_uri.removeprefix("file://")).exists()
         assert len(selected_assets) >= 5
         assert job and job.quality_summary["render"]["render_gate_pass"] is True
         assert job.quality_summary["background_music"]["enabled"] is True
+        assert job.quality_summary["background_music"]["background_music_gate_pass"] is True
         assert job.quality_summary["monetization"]["final_status"] == "monetization_review"
+        assert job.artifact_index["input_gate"] == "input_gate.json"
         assert job.artifact_index["publish_package"] == "publish_package.json"
         assert job.artifact_index["monetization_report"] == "monetization_report.json"
         assert job.artifact_index["background_music"] == "audio/background_source.wav"
+        assert job.artifact_index["background_music_quality"] == "background_music_quality_report.json"
         assert job.artifact_index["mixed_audio"] == "audio/mixed.wav"
         assert job.artifact_index["performance_timeline"] == "performance_timeline.json"
+        assert job.artifact_index["subtitle_timing"] == "subtitle_timing_report.json"
         timeline_path = Path(os.environ["YTS_DATA_DIR"]).resolve() / "artifacts" / job_id / "performance_timeline.json"
         timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
         assert any(step["step_name"] == "render" and step["duration_ms"] is not None for step in timeline["steps"])
@@ -219,6 +226,40 @@ def test_create_job_rejects_unsupported_niche() -> None:
     assert response.status_code == 422
     detail = response.json()["detail"]
     assert any("unsupported niche_id" in item["msg"] for item in detail)
+
+
+def test_orchestrator_create_job_rejects_blank_seed_theme_after_normalization() -> None:
+    try:
+        orchestrator.create_job(
+            {
+                "seed_theme": "   ",
+                "niche_id": "curiosidades",
+                "language": "pt-BR",
+                "target_duration_sec": 35,
+                "tone": "intrigante_direto",
+                "cta_style": "none",
+                "notes": None,
+                "requested_angle": None,
+            }
+        )
+    except ValidationError as exc:
+        assert "seed_theme must have at least 3 non-space characters" in str(exc)
+    else:
+        raise AssertionError("expected ValidationError")
+
+
+def test_create_job_rejects_unsupported_language() -> None:
+    client = TestClient(app)
+
+    response = client.post(
+        "/jobs",
+        data={"seed_theme": "polvos", "language": "en-US", "target_duration_sec": 35},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert any("unsupported language" in item["msg"] for item in detail)
 
 
 def test_orchestrator_create_job_rejects_unsupported_niche() -> None:
@@ -571,7 +612,55 @@ def test_openai_provider_uses_responses_api_with_json_output(monkeypatch) -> Non
     assert captured["client_kwargs"]["api_key"] == "openai-key"
     assert captured["model"] == "gpt-5.4"
     assert captured["text"] == {"format": {"type": "json_object"}}
+    assert "meta editorial: retenção máxima, replay, compartilhamento orgânico e espanto genuíno" in str(captured["input"])
+    assert "body_beats equivale aos Beats em escalada" in str(captured["input"])
     assert result["qa_metrics"]["source_provider"] == "openai"
+
+
+def test_openai_provider_topic_prompt_uses_hub_viral_ruler(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeResponses:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                output_text=json.dumps(
+                    {
+                        "canonical_topic": "flamingos rosa",
+                        "angle": "pigmento que muda a cor",
+                        "hook_promise": "o prato muda a pena",
+                        "title_candidates": ["Flamingos rosa: a comida muda a cor deles"],
+                        "entities": ["flamingos", "pigmentos"],
+                        "search_terms": ["flamingo carotenoids plumage"],
+                        "quality_metrics": {},
+                    }
+                )
+            )
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+            self.responses = FakeResponses()
+
+    monkeypatch.setattr(
+        "app.providers.get_settings",
+        lambda: SimpleNamespace(
+            openai_api_key="openai-key",
+            openai_base_url="https://api.openai.com/v1",
+            openai_model="gpt-5.4",
+            openai_timeout_sec=120,
+        ),
+    )
+    monkeypatch.setattr("app.providers.OpenAI", FakeOpenAI)
+
+    provider = OpenAICreativeProvider()
+    result = provider.plan_topic("Por que os flamingos ficam rosa?", 1, [], None)
+
+    assert captured["client_kwargs"]["api_key"] == "openai-key"
+    assert captured["text"] == {"format": {"type": "json_object"}}
+    assert "Crie pautas de curiosidades globais para YouTube Shorts em pt-BR." in str(captured["input"])
+    assert "Loop: pergunta mental de tensão que só fecha no payoff" in str(captured["input"])
+    assert result["quality_metrics"]["source_provider"] == "openai"
 
 
 def test_llm_registry_uses_deepseek_for_repair_and_scene_defaults(monkeypatch) -> None:
@@ -675,6 +764,68 @@ def test_subtitle_gate_blocks_markup_leakage() -> None:
     )
     assert not result.passed
     assert "1:markup_or_ssml_leaked" in result.reasons
+
+
+def test_subtitle_gate_rejects_large_timing_drift() -> None:
+    result = SubtitleGate().validate(
+        [{"idx": 1, "start_ms": 0, "end_ms": 1000, "text": "Texto bom"}],
+        coverage_ratio=1.0,
+        p95_drift_ms=1200,
+        max_drift_ms=2200,
+    )
+    assert not result.passed
+    assert "p95_timing_drift_too_high" in result.reasons
+    assert "max_timing_drift_too_high" in result.reasons
+
+
+def test_estimate_subtitle_timing_drift_reports_boundary_changes() -> None:
+    cues = [{"idx": 1, "start_ms": 0, "end_ms": 1000, "text": "um dois tres quatro"}]
+    items = [
+        {"idx": "1.1", "start_ms": 0, "end_ms": 650, "text": "um dois tres", "token_start": 0, "token_end": 2},
+        {"idx": "1.2", "start_ms": 650, "end_ms": 1000, "text": "quatro", "token_start": 3, "token_end": 3},
+    ]
+
+    report = orchestrator.asset_pipeline._estimate_subtitle_timing_drift(cues, items)
+
+    assert report["timing_basis"] == "raw_srt_proportional_split"
+    assert report["drift_item_count"] == 2
+    assert report["p95_drift_ms"] > 0
+    assert report["max_drift_ms"] >= report["p95_drift_ms"]
+
+
+def test_background_music_gate_rejects_inaudible_bed(tmp_path: Path) -> None:
+    narration_path = tmp_path / "narration.wav"
+    music_path = tmp_path / "music.wav"
+    mixed_path = tmp_path / "mixed.wav"
+
+    def write_wave(path: Path, amplitude: int, freq_hz: float) -> None:
+        sample_rate = 24_000
+        frame_count = sample_rate
+        with wave.open(str(path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            frames = bytearray()
+            for idx in range(frame_count):
+                sample = int(amplitude * math.sin(2 * math.pi * freq_hz * (idx / sample_rate)))
+                frames.extend(sample.to_bytes(2, "little", signed=True))
+            wav_file.writeframes(frames)
+
+    write_wave(narration_path, amplitude=4000, freq_hz=220.0)
+    write_wave(music_path, amplitude=0, freq_hz=110.0)
+    shutil.copyfile(narration_path, mixed_path)
+
+    result = BackgroundMusicGate().validate(
+        narration_path=narration_path,
+        music_path=music_path,
+        mixed_audio_path=mixed_path,
+        expected_duration_ms=1000,
+        gain_db=-20.0,
+    )
+
+    assert not result.passed
+    assert "music_source_too_quiet" in result.reasons
+    assert "music_bed_inaudible" in result.reasons
 
 
 def test_render_gate_rejects_missing_file(tmp_path: Path) -> None:
@@ -1895,6 +2046,52 @@ def test_process_job_fails_explicitly_for_legacy_invalid_niche() -> None:
         assert job.failure_reason == "input_gate: unsupported niche_id: esportes"
 
 
+def test_process_job_fails_fast_for_invalid_language_in_persisted_request() -> None:
+    job_id = "job-invalid-language"
+    topic_request_id = "topic-invalid-language"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash=job_id,
+                created_at=utcnow(),
+                status="queued",
+                niche_id="curiosidades",
+                language="en-US",
+                target_duration_sec=35,
+                topic_request_id=topic_request_id,
+                artifact_index={},
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash=topic_request_id,
+                niche_id="curiosidades",
+                seed_theme="polvos",
+                language="en-US",
+                target_duration_sec=35,
+                tone="intrigante_direto",
+                cta_style="none",
+                notes=None,
+                requested_angle=None,
+            )
+        )
+        session.commit()
+
+    status = orchestrator.process_job(job_id)
+
+    assert status == "failed"
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        assert job.status == "failed"
+        assert job.failure_reason == "input_gate: unsupported language: en-US"
+
+
 def test_scene_timings_fall_back_to_token_boundaries() -> None:
     scenes = [
         {"scene_id": "scene-1", "token_start": 0, "token_end": 9},
@@ -1961,7 +2158,53 @@ def test_topic_plan_normalization_fills_missing_required_fields() -> None:
     assert normalized["hook_promise"] == "o limite que muda tudo"
     assert normalized["entities"] == ["Buracos Negros"]
     assert normalized["search_terms"]
+    assert normalized["research_brief"]["focus_topic"] == "Buracos Negros"
+    assert normalized["research_brief"]["primary_terms"]
+    assert normalized["quality_metrics"]["editorial_mode"] == "viral_curiosidades"
     assert normalized["quality_metrics"]["topic_repair_used"] is True
+
+
+def test_scene_plan_normalization_accepts_dict_wrapped_scene_list() -> None:
+    from app.providers import MinimaxCreativeProvider
+
+    provider = MinimaxCreativeProvider.__new__(MinimaxCreativeProvider)
+    normalized = provider._normalize_scene_plan_payload({"scenes": [{"scene_id": "scene-1"}]})
+
+    assert isinstance(normalized, list)
+    assert normalized[0]["scene_id"] == "scene-1"
+
+
+def test_scene_plan_normalization_accepts_nested_scene_list() -> None:
+    from app.providers import MinimaxCreativeProvider
+
+    provider = MinimaxCreativeProvider.__new__(MinimaxCreativeProvider)
+    normalized = provider._normalize_scene_plan_payload({"data": {"plan": [{"scene_id": "scene-1", "narration_text": "abc"}]}})
+
+    assert isinstance(normalized, list)
+    assert normalized[0]["scene_id"] == "scene-1"
+
+
+def test_plan_scenes_prefers_json_array_completion_when_available(monkeypatch) -> None:
+    from app.providers import MinimaxCreativeProvider
+
+    provider = MinimaxCreativeProvider.__new__(MinimaxCreativeProvider)
+    calls: list[str] = []
+
+    def fake_array_completion(_prompt: str):
+        calls.append("array")
+        return [{"scene_id": "scene-1", "narration_text": "abc"}]
+
+    def fake_object_completion(_prompt: str):
+        calls.append("object")
+        return {"scenes": [{"scene_id": "scene-1", "narration_text": "abc"}]}
+
+    provider._json_array_completion = fake_array_completion  # type: ignore[attr-defined]
+    provider._json_completion = fake_object_completion  # type: ignore[method-assign]
+
+    scenes = provider.plan_scenes({"full_narration": "abc", "estimated_duration_sec": 35}, 6)
+
+    assert scenes[0]["scene_id"] == "scene-1"
+    assert calls == ["array"]
 
 
 def test_extract_fact_entity_prefers_subject_before_colon() -> None:
@@ -2461,17 +2704,30 @@ def test_fact_pack_rejects_verified_source_for_wrong_primary_topic(monkeypatch) 
 
 def test_script_pipeline_requires_verified_fact_pack_for_factual_real_topics(monkeypatch) -> None:
     pipeline = orchestrator.script_pipeline
-    monkeypatch.setattr(pipeline.settings, "simple_shorts_mode", False)
     monkeypatch.setattr(pipeline.settings, "use_mock_providers", False)
     topic_plan = SimpleNamespace(
-        canonical_topic="Mecanismo de mudança de cor em polvos",
-        angle="como a pele do polvo muda de cor",
-        hook_promise="explicar o mecanismo biologico",
+        canonical_topic="Suplemento para ansiedade muda o cérebro?",
+        angle="como um suplemento pode afetar sintomas de ansiedade",
+        hook_promise="explicar o mecanismo biologico com fontes",
     )
-    request = SimpleNamespace(seed_theme="Como os polvos mudam de cor")
+    request = SimpleNamespace(seed_theme="Suplemento para ansiedade funciona mesmo?", notes="[factual_strict]", requested_angle=None)
 
     assert pipeline._requires_verified_fact_pack(topic_plan, request, {"status": "limited", "facts": []}) is True
     assert pipeline._requires_verified_fact_pack(topic_plan, request, {"status": "verified", "facts": [{"fact_id": "F1"}]}) is False
+
+
+def test_script_pipeline_defaults_curiosidades_to_viral_mode() -> None:
+    pipeline = orchestrator.script_pipeline
+    topic_plan = SimpleNamespace(
+        canonical_topic="Por que os polvos mudam de cor",
+        angle="o truque visual que parece impossível",
+        hook_promise="o detalhe que faz a pele do polvo sumir no cenário",
+        quality_metrics={},
+    )
+    request = SimpleNamespace(seed_theme="Como os polvos mudam de cor", notes=None, requested_angle=None)
+
+    assert pipeline._editorial_mode(topic_plan, request) == "viral_curiosidades"
+    assert pipeline._topic_requires_verified_fact_pack(topic_plan, request) is False
 
 
 def test_step_script_disables_simple_prompt_rules_when_fact_pack_is_required(monkeypatch) -> None:
@@ -2487,7 +2743,7 @@ def test_step_script_disables_simple_prompt_rules_when_fact_pack_is_required(mon
             "target_duration_sec": 45,
             "tone": "intrigante_direto",
             "cta_style": "none",
-            "notes": "teste",
+            "notes": "[factual_strict] teste",
             "requested_angle": None,
         }
     )
@@ -2504,7 +2760,7 @@ def test_step_script_disables_simple_prompt_rules_when_fact_pack_is_required(mon
                 entities=["cafeina", "adenosina"],
                 search_terms=["cafeina sono"],
                 title_candidates=["Cafe nao te da energia"],
-                quality_metrics={},
+                quality_metrics={"editorial_mode": "factual_strict"},
             )
         )
         session.commit()
@@ -2549,6 +2805,7 @@ def test_step_script_disables_simple_prompt_rules_when_fact_pack_is_required(mon
         pipeline.step_script(session, job, 1)
 
     assert captured["simple_shorts_mode"] is False
+    assert captured["editorial_mode"] == "factual_strict"
 
 
 def test_job_lease_delta_has_floor_for_real_provider_steps(monkeypatch) -> None:
@@ -2773,7 +3030,7 @@ def test_simple_shorts_mode_publish_readiness_blocks_factual_topic_without_groun
     monkeypatch.setattr(orchestrator.monetization_pipeline.settings, "simple_shorts_mode", True)
     readiness = orchestrator._publish_readiness_report(
         None,
-        SimpleNamespace(canonical_topic="Por que cafe tira o sono", angle="neurociencia"),
+        SimpleNamespace(canonical_topic="Suplemento para ansiedade funciona mesmo", angle="saude", quality_metrics={"editorial_mode": "factual_strict"}),
         {"status": "skipped", "facts": []},
         ["#shorts", "#ciencia", "#cerebro"],
         {
@@ -2801,6 +3058,32 @@ def test_simple_shorts_mode_publish_readiness_blocks_factual_topic_without_groun
     assert "text_publish_audit_skipped" in readiness["reasons"]
     assert "fact_pack_missing_for_factual_topic" in readiness["reasons"]
     assert "claim_trace_grounding_missing" in readiness["reasons"]
+
+
+def test_simple_shorts_mode_publish_readiness_keeps_viral_curiosidades_lightweight(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.monetization_pipeline.settings, "simple_shorts_mode", True)
+    readiness = orchestrator._publish_readiness_report(
+        None,
+        SimpleNamespace(canonical_topic="Por que os flamingos ficam rosa", angle="curiosidade visual", quality_metrics={"editorial_mode": "viral_curiosidades"}),
+        {"status": "skipped", "facts": []},
+        ["#shorts", "#curiosidades", "#flamingos"],
+        {
+            "script_gate_pass": True,
+            "scene_plan_gate_pass": True,
+            "asset_gate_pass": True,
+            "subtitle_gate_pass": True,
+            "render_gate_pass": True,
+        },
+        {
+            **_base_script("Flamingos parecem pintados, mas o segredo começa no prato."),
+            "source_fact_ids": [],
+            "claim_trace": [{"text": "Flamingos parecem pintados.", "source_fact_ids": [], "grounding": "conservative"}],
+        },
+        {"passed": True, "reasons": [], "provider": "simple_shorts_mode", "skipped": True},
+    )
+
+    assert readiness["passed"] is False
+    assert readiness["reasons"] == ["text_publish_audit_skipped"]
 
 
 def test_simple_shorts_mode_makes_script_gate_non_blocking(monkeypatch) -> None:
@@ -3300,6 +3583,41 @@ def test_postprocess_script_normalizes_visible_text_and_attaches_claim_trace() -
     assert processed["claim_trace"][0]["source_fact_ids"] == []
 
 
+def test_postprocess_script_restores_richer_retention_map_narration() -> None:
+    script = {
+        "title": "Ilusão de ótica do movimento parado",
+        "hook": "Ilusão ótica parece exagero, até a explicação concreta entrar.",
+        "body_beats": ["O detalhe verificável segura a surpresa."],
+        "ending": "Agora o começo muda de sentido: detalhe verificável era a pista.",
+        "cta": None,
+        "full_narration": "Ilusão ótica parece exagero, até a explicação concreta entrar. O detalhe verificável segura a surpresa. Agora o começo muda de sentido: detalhe verificável era a pista.",
+        "estimated_duration_sec": 35.0,
+        "key_facts": ["O detalhe verificável segura a surpresa."],
+        "source_fact_ids": ["F1"],
+        "claim_trace": [{"text": "O detalhe verificável segura a surpresa.", "source_fact_ids": ["F1"], "grounding": "fact_pack"}],
+        "token_count": 35,
+        "language": "pt-BR",
+        "retention_map": {
+            "segments": [
+                {"code": "visual_hook", "mapped_text": "Está tudo parado. Mesmo assim, parece que gira."},
+                {"code": "proof_or_tension", "mapped_text": "Quanto menos você fixa no centro, mais o efeito costuma crescer."},
+                {"code": "escalation", "mapped_text": "Não é animação escondida. Seu olhar percorre contraste, curvas e repetição."},
+                {"code": "turn_or_payoff", "mapped_text": "Pequenos movimentos dos olhos podem reforçar essa falsa sensação de deslocamento."},
+                {"code": "loop_close", "mapped_text": "Então o giro do começo não estava na imagem. Ele apareceu no encontro entre o padrão e o jeito que seu olhar varre a cena."},
+            ]
+        },
+        "visual_opening": {},
+        "qa_metrics": {},
+    }
+
+    processed = orchestrator._postprocess_script_for_quality(script, {"canonical_topic": "ilusão de ótica", "fact_pack": {"status": "limited", "facts": []}}, [])
+
+    assert processed["hook"] == "Está tudo parado. Mesmo assim, parece que gira."
+    assert "pequenos movimentos dos olhos" in processed["full_narration"].lower()
+    assert "pequenos movimentos olhos" in processed["ending"].lower() or processed["ending"].startswith("Então o giro do começo")
+    assert processed["key_facts"][0].startswith("Quanto menos você fixa")
+
+
 def test_postprocess_conservative_verified_fact_pack_keeps_narration_pt_br() -> None:
     script = _base_script(
         "Octopus skin can reflect broad-spectrum light because chromatophores control the surface. "
@@ -3323,6 +3641,50 @@ def test_postprocess_conservative_verified_fact_pack_keeps_narration_pt_br() -> 
     assert "octopus" not in processed["full_narration"].lower()
     assert "Células especializadas" in processed["full_narration"]
     assert processed["claim_trace"][0]["source_fact_ids"] == ["F1"]
+
+
+def test_validate_or_repair_script_accepts_fractional_string_scores(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.settings, "simple_shorts_mode", False)
+    monkeypatch.setattr(orchestrator.providers.creative, "repair_script", lambda script, reasons, plan: dict(script))
+    script = _base_script(
+        "A imagem está parada. Mesmo assim, parece girar. "
+        "O contraste engana o olhar nas bordas. "
+        "Pequenos movimentos dos olhos reforçam a sensação. "
+        "Por isso o primeiro frame muda quando você olha outra vez."
+    )
+    script["qa_metrics"] = {
+        "hook_score": "9/10",
+        "clarity_score": "9/10",
+        "information_density_score": "8/10",
+        "repetition_score": "1/10",
+        "ending_strength_score": "9/10",
+        "script_gate_pass": "aprovado",
+    }
+
+    repaired, metrics = orchestrator._validate_or_repair_script(
+        script,
+        {"canonical_topic": "ilusão de ótica", "fact_pack": {"status": "limited", "facts": []}},
+        35,
+        "none",
+    )
+
+    assert metrics["script_quality_gate_pass"] is True
+    assert repaired["qa_metrics"]["hook_score"] == 0.9
+    assert repaired["qa_metrics"]["repetition_score"] == 0.1
+
+
+def test_normalize_script_metrics_inverts_high_quality_repetition_score() -> None:
+    normalized = normalize_script_metrics(
+        {
+            "hook_score": 0.9,
+            "clarity_score": 0.9,
+            "information_density_score": 0.85,
+            "repetition_score": 0.94,
+            "ending_strength_score": 0.9,
+        }
+    )
+
+    assert normalized["repetition_score"] == 0.06
 
 
 def test_full_pipeline_with_sound_design_persists_rights_and_artifacts(monkeypatch) -> None:
@@ -4056,6 +4418,7 @@ def test_fact_pack_query_generation_uses_caffeine_concepts_for_cafe_topic() -> N
     ordered = sorted([query for query in cleaned if pipeline._query_matches_primary_fact_topic(query, topic_tokens)], key=pipeline._fact_query_priority)
 
     assert {"cafe", "cafeina", "caffeine", "adenosina", "adenosine"} <= topic_tokens
+    assert "caffeine adenosine receptor" in ordered
     assert any("adenosina" in query or "caffeine adenosine" in query for query in ordered[:5])
     assert pipeline._fact_result_is_relevant(
         "café",
@@ -4063,6 +4426,34 @@ def test_fact_pack_query_generation_uses_caffeine_concepts_for_cafe_topic() -> N
         "World Café is a participatory assessment tool used in community development.",
     ) is False
     assert pipeline._is_weak_fact_query("adenosina") is True
+
+
+def test_fact_pack_query_generation_uses_optical_illusion_concepts() -> None:
+    request = SimpleNamespace(seed_theme="Ilusão de ótica: por que imagem parada parece se mexer?")
+    topic_plan = SimpleNamespace(
+        canonical_topic="Ilusão de ótica de movimento parado",
+        angle="Explicar por que certas imagens estáticas parecem se mover na visão periférica.",
+        hook_promise="Seu cérebro inventa movimento onde nada está se movendo.",
+        search_terms=["movimento ilusório explicação", "visão periférica ilusão de ótica"],
+        entities=["percepção visual", "retina", "movimento ilusório"],
+        title_candidates=["Por que essa ilusão parada parece viva?"],
+    )
+
+    pipeline = orchestrator.script_pipeline
+    queries = pipeline._fact_pack_queries(request, topic_plan)
+    topic_tokens = pipeline._fact_topic_tokens(request, topic_plan)
+    cleaned = []
+    seen = set()
+    for query in queries:
+        normalized = " ".join(str(query or "").split())
+        if normalized and normalized.lower() not in seen and not pipeline._is_weak_fact_query(normalized):
+            cleaned.append(normalized)
+            seen.add(normalized.lower())
+    ordered = sorted([query for query in cleaned if pipeline._query_matches_primary_fact_topic(query, topic_tokens)], key=pipeline._fact_query_priority)
+
+    assert {"ilusao", "illusion", "motion"} <= topic_tokens
+    assert "peripheral drift illusion" in ordered
+    assert "illusory motion visual perception" in ordered
 
 
 def test_fact_pack_rejects_adenosine_source_without_caffeine_for_cafe_topic() -> None:
@@ -4076,6 +4467,132 @@ def test_fact_pack_rejects_adenosine_source_without_caffeine_for_cafe_topic() ->
     }
 
     assert pipeline._fact_pack_matches_topic(fact_pack, request, topic_plan) is False
+
+
+def test_research_brief_requires_promised_mechanism_not_just_entity_overlap() -> None:
+    pipeline = orchestrator.script_pipeline
+    request = SimpleNamespace(seed_theme="Por que o café tira o sono?", requested_angle=None)
+    topic_plan = SimpleNamespace(
+        canonical_topic="Por que o café tira o sono",
+        angle="cafeina bloqueia adenosina e atrasa o sono",
+        hook_promise="A cafeína engana o cérebro ao bloquear a adenosina.",
+        entities=["cafe", "cafeina"],
+        search_terms=[
+            "caffeine adenosine receptor antagonism sleep mechanism",
+            "adenosine receptors caffeine wakefulness review",
+        ],
+    )
+    research_brief = pipeline._build_research_brief(topic_plan, request)
+
+    audit = orchestrator._audit_source_relevance(
+        research_brief,
+        "Teor de cafeina em cafés brasileiros comercializados em diferentes formas",
+        "O estudo compara a variacao do teor de cafeina entre amostras de cafe e mede diferencas entre formas de preparo.",
+    )
+
+    assert audit["passed"] is False
+    assert audit["reason"] == "missing_promised_mechanism_terms"
+
+
+def test_fact_pack_accepts_source_when_research_brief_matches_primary_and_mechanism_terms() -> None:
+    pipeline = orchestrator.script_pipeline
+    request = SimpleNamespace(seed_theme="Por que o café tira o sono?", requested_angle=None)
+    topic_plan = SimpleNamespace(
+        canonical_topic="Por que o café tira o sono",
+        angle="cafeina bloqueia adenosina e atrasa o sono",
+        hook_promise="A cafeína engana o cérebro ao bloquear a adenosina.",
+        entities=["cafe", "cafeina"],
+        search_terms=[
+            "caffeine adenosine receptor antagonism sleep mechanism",
+            "adenosine receptors caffeine wakefulness review",
+        ],
+    )
+    fact_pack = {
+        "topic_title": "Caffeine, adenosine receptors and sleep onset",
+        "sources": [{"title": "Caffeine, adenosine receptors and sleep onset"}],
+        "facts": [{"claim": "Caffeine blocks adenosine receptors and delays sleep onset in many people."}],
+    }
+
+    assert pipeline._fact_pack_matches_topic(fact_pack, request, topic_plan) is True
+    assert fact_pack["topic_alignment"]["mechanism_overlap"]
+
+
+def test_query_supports_research_brief_rejects_thin_mechanism_queries() -> None:
+    pipeline = orchestrator.script_pipeline
+    request = SimpleNamespace(seed_theme="Por que o café tira o sono?", requested_angle=None)
+    topic_plan = SimpleNamespace(
+        canonical_topic="Como a cafeína do café bloqueia a adenosina no cérebro e atrasa o sono",
+        angle="Explicar de forma direta e intrigante por que o café tira o sono, focando no mecanismo real: a cafeína ocupa receptores de adenosina e pode atrasar o sono.",
+        hook_promise="O café engana o cérebro ao bloquear o sinal químico do sono.",
+        entities=["cafeína", "café", "adenosina", "receptores de adenosina"],
+        search_terms=[
+            "cafeína bloqueio dos receptores de adenosina efeito no sono",
+            "coffee caffeine adenosine receptor antagonism sleepiness",
+            "caffeine circadian phase melatonin onset study",
+        ],
+    )
+    research_brief = pipeline._build_research_brief(topic_plan, request)
+
+    assert pipeline._query_supports_research_brief("meia cafeína", research_brief) is False
+    assert pipeline._query_supports_research_brief("cafeína no cérebro", research_brief) is False
+    assert pipeline._query_supports_research_brief("caffeine adenosine receptor antagonism sleepiness", research_brief) is True
+
+
+def test_fact_pack_accepts_english_optical_illusion_source_for_pt_topic() -> None:
+    pipeline = orchestrator.script_pipeline
+    request = SimpleNamespace(seed_theme="Ilusão de ótica: por que imagem parada parece se mexer?")
+    topic_plan = SimpleNamespace(
+        canonical_topic="Ilusão de ótica de movimento parado",
+        angle="Explicar por que certas imagens estáticas parecem se mover na visão periférica.",
+        search_terms=["peripheral drift illusion", "illusory motion visual perception"],
+        entities=["ilusão de ótica", "movimento ilusório"],
+    )
+    fact_pack = {
+        "topic_title": "The Peripheral Drift Illusion: A Motion Illusion in the Visual Periphery",
+        "sources": [{"title": "The Peripheral Drift Illusion: A Motion Illusion in the Visual Periphery"}],
+        "facts": [{"claim": "Peripheral drift illusions create apparent motion in static images through visual processing biases."}],
+    }
+
+    assert pipeline._fact_pack_matches_topic(fact_pack, request, topic_plan) is True
+    assert fact_pack["topic_alignment"]["passed"] is True
+
+
+def test_fact_pack_rejects_generic_visual_source_for_optical_illusion_topic() -> None:
+    pipeline = orchestrator.script_pipeline
+    request = SimpleNamespace(seed_theme="Ilusão de ótica: por que imagem parada parece se mexer?")
+    topic_plan = SimpleNamespace(
+        canonical_topic="Ilusão de ótica de movimento parado",
+        angle="Explicar por que certas imagens estáticas parecem se mover na visão periférica.",
+        search_terms=["peripheral drift illusion", "illusory motion visual perception"],
+        entities=["ilusão de ótica", "movimento ilusório"],
+    )
+    fact_pack = {
+        "topic_title": "Função de Sensibilidade ao Contraste: Indicador da Percepção Visual da Forma e da Resolução Espacial",
+        "sources": [{"title": "Função de Sensibilidade ao Contraste: Indicador da Percepção Visual da Forma e da Resolução Espacial"}],
+        "facts": [{"claim": "A função de sensibilidade ao contraste é um indicador da percepção visual da forma e da resolução espacial."}],
+    }
+
+    assert pipeline._fact_pack_matches_topic(fact_pack, request, topic_plan) is False
+    assert fact_pack["topic_alignment"]["passed"] is False
+
+
+def test_fact_pack_rejects_optical_illusion_source_without_motion_for_motion_topic() -> None:
+    pipeline = orchestrator.script_pipeline
+    request = SimpleNamespace(seed_theme="Ilusão de ótica: por que imagem parada parece se mexer?")
+    topic_plan = SimpleNamespace(
+        canonical_topic="Ilusão de ótica de movimento parado",
+        angle="Explicar por que certas imagens estáticas parecem se mover na visão periférica.",
+        search_terms=["peripheral drift illusion", "illusory motion visual perception"],
+        entities=["ilusão de ótica", "movimento ilusório"],
+    )
+    fact_pack = {
+        "topic_title": "Ilusão transcendental e ilusão de ótica: a genealogia da ilusão nas obras kantianas",
+        "sources": [{"title": "Ilusão transcendental e ilusão de ótica: a genealogia da ilusão nas obras kantianas"}],
+        "facts": [{"claim": "O artigo discute a genealogia do termo ilusão em obras kantianas."}],
+    }
+
+    assert pipeline._fact_pack_matches_topic(fact_pack, request, topic_plan) is False
+    assert fact_pack["topic_alignment"]["passed"] is False
 
 
 def test_fact_pack_query_generation_protects_templarios_entity() -> None:

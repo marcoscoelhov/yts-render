@@ -27,8 +27,10 @@ from app.audio.sound_design import generate_sound_design_track, mix_sound_design
 from app.compliance.review import build_human_review_checklist
 from app.config import get_settings
 from app.db import SessionLocal, session_scope
+from app.editorial.research_brief import audit_source_relevance, build_research_brief
 from app.editorial.retention import attach_retention_metadata, enrich_plan_for_script_generation
 from app.editorial.repetition import build_channel_repetition_report
+from app.editorial.topic_mode import resolve_editorial_mode
 from app.models import (
     BackgroundMusicAsset,
     ErrorLog,
@@ -54,7 +56,7 @@ from app.quality.render_gate import RenderGate
 from app.quality.scene_gate import ScenePlanGate
 from app.quality.script_gate import ScriptQualityGate
 from app.quality.subtitle_gate import BAD_ENDINGS, SubtitleGate
-from app.schemas import SUPPORTED_NICHES, TopicRequestCreate
+from app.schemas import SUPPORTED_LANGUAGES, SUPPORTED_NICHES, TopicRequestCreate
 from app.storage import StorageManager
 from app.utils import (
     avg_words_per_sentence,
@@ -90,10 +92,36 @@ def normalize_script_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     }
     for key in score_keys:
         value = normalized.get(key)
+        if isinstance(value, str):
+            stripped = value.strip()
+            lowered = stripped.lower()
+            if lowered in {"true", "passed", "pass", "ok", "aprovado"}:
+                value = True
+            elif lowered in {"false", "failed", "fail", "reprovado"}:
+                value = False
+            else:
+                fraction_match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", stripped)
+                percentage_match = re.fullmatch(r"(\d+(?:\.\d+)?)\s*%", stripped)
+                if fraction_match:
+                    denominator = float(fraction_match.group(2))
+                    value = round(float(fraction_match.group(1)) / denominator, 3) if denominator > 0 else value
+                elif percentage_match:
+                    value = round(float(percentage_match.group(1)) / 100, 3)
+                else:
+                    try:
+                        value = float(stripped.replace(",", "."))
+                    except ValueError:
+                        pass
         if isinstance(value, int | float) and 1 < value <= 10:
             normalized[key] = round(value / 10, 3)
-    if normalized.get("repetition_score") == 1:
+            continue
+        normalized[key] = value
+    repetition_value = normalized.get("repetition_score")
+    if repetition_value == 1:
         normalized["repetition_score"] = 0.1
+        return normalized
+    if isinstance(repetition_value, int | float) and 0.88 < repetition_value <= 1:
+        normalized["repetition_score"] = round(max(0.0, 1 - repetition_value), 3)
     return normalized
 
 
@@ -760,17 +788,58 @@ class JobOrchestrator:
         assert request
         if request.niche_id not in SUPPORTED_NICHES:
             raise FatalStepError(f"unsupported niche_id: {request.niche_id}")
-        blocked = any(term in request.seed_theme.lower() for term in ["odio", "terrorismo", "explosivo"])
-        if blocked:
-            raise FatalStepError("input blocked by moderation")
+        normalized_theme = str(request.seed_theme or "").strip()
+        if len(normalized_theme) < 3:
+            raise FatalStepError("seed_theme too short after normalization")
+        if request.target_duration_sec < 35 or request.target_duration_sec > 55:
+            raise FatalStepError(f"target_duration_sec outside supported range: {request.target_duration_sec}")
+        normalized_language = str(request.language or "").strip().lower().replace("_", "-")
+        resolved_language = {
+            "pt-br": "pt-BR",
+            "portuguese-br": "pt-BR",
+            "ptbr": "pt-BR",
+        }.get(normalized_language)
+        if resolved_language not in SUPPORTED_LANGUAGES:
+            raise FatalStepError(f"unsupported language: {request.language}")
+        moderation_match = self._input_moderation_block_match(
+            " ".join(
+                part
+                for part in [
+                    normalized_theme,
+                    str(request.requested_angle or "").strip(),
+                    str(request.notes or "").strip(),
+                ]
+                if part
+            )
+        )
+        if moderation_match:
+            raise FatalStepError(f"input blocked by moderation: {moderation_match}")
         quality = {
             "schema_valid": True,
             "niche_supported": True,
-            "language": request.language,
+            "language": resolved_language,
+            "target_duration_sec": request.target_duration_sec,
+            "seed_theme_length": len(normalized_theme),
             "moderation_ok": True,
         }
+        self.storage.persist_json(job.job_id, "input_gate.json", self._serialize_for_json(quality))
         self._append_event(job.job_id, "input_gate.passed", "succeeded", quality)
-        return ["request.json"]
+        return ["request.json", "input_gate.json"]
+
+    def _input_moderation_block_match(self, surface: str) -> str | None:
+        normalized = unicodedata.normalize("NFKD", surface).encode("ascii", "ignore").decode("ascii").lower()
+        patterns = {
+            "terrorism": r"\bterroris(?:mo|t)\b",
+            "explosive_instructions": r"\b(?:bomba caseira|fabricar bomba|explosiv(?:o|a|os|as))\b",
+            "mass_harm": r"\b(?:massacre|atirar em escola|explodir escola)\b",
+            "self_harm": r"\b(?:suicid(?:io|a)|autoagress)\b",
+            "child_abuse": r"\b(?:abuso infantil|exploracao infantil)\b",
+            "hate_targeting": r"\b(?:odio contra|matar (?:gays|negros|judeus|mulheres))\b",
+        }
+        for reason, pattern in patterns.items():
+            if re.search(pattern, normalized):
+                return reason
+        return None
 
     def _step_topic_plan(self, session: Session, job: Job, attempt: int) -> list[str]:
         request = session.scalar(select(TopicRequest).where(TopicRequest.job_id == job.job_id))
@@ -797,6 +866,7 @@ class JobOrchestrator:
         session.execute(delete(TopicPlan).where(TopicPlan.job_id == job.job_id))
         session.add(TopicPlan(**model_payload(TopicPlan, payload)))
         self.storage.persist_json(job.job_id, "topic_plan.json", self._serialize_for_json(payload))
+        self.storage.persist_json(job.job_id, "research_brief.json", self._serialize_for_json(payload.get("research_brief") or {}))
         topic_telemetry_file = self._persist_repair_telemetry(
             job.job_id,
             "topic_plan",
@@ -810,7 +880,7 @@ class JobOrchestrator:
         )
         job.topic_summary = f"{plan['canonical_topic']} | {plan['angle']}"
         self._append_event(job.job_id, "topic.generated", "succeeded", payload["quality_metrics"])
-        return ["topic_plan.json", topic_telemetry_file]
+        return ["topic_plan.json", "research_brief.json", topic_telemetry_file]
 
     def _recent_topic_history(self, session: Session, niche_id: str, limit: int = 30) -> list[dict[str, Any]]:
         rows = session.scalars(
@@ -999,8 +1069,20 @@ class JobOrchestrator:
                 **quality_metrics,
                 "topic_repair_used": any(key not in plan or plan.get(key) in (None, "", []) for key in required),
             }
+        quality_metrics = {
+            **quality_metrics,
+            "editorial_mode": resolve_editorial_mode(
+                {
+                    "canonical_topic": canonical_topic,
+                    "angle": angle,
+                    "hook_promise": hook_promise,
+                    "quality_metrics": quality_metrics,
+                },
+                request,
+            ),
+        }
 
-        return {
+        normalized_plan = {
             **plan,
             "canonical_topic": canonical_topic,
             "angle": angle,
@@ -1010,6 +1092,16 @@ class JobOrchestrator:
             "search_terms": [str(term).strip() for term in search_terms if str(term).strip()],
             "quality_metrics": quality_metrics,
         }
+        return {
+            **normalized_plan,
+            "research_brief": build_research_brief(normalized_plan, request),
+        }
+
+    def _build_research_brief(self, topic_plan: Any, request: Any) -> dict[str, Any]:
+        return build_research_brief(topic_plan, request)
+
+    def _audit_source_relevance(self, research_brief: dict[str, Any], title: str, extract: str) -> dict[str, Any]:
+        return audit_source_relevance(research_brief, title, extract)
 
     def _step_script(self, session: Session, job: Job, attempt: int) -> list[str]:
         return self.script_pipeline.step_script(session, job, attempt)
@@ -1066,11 +1158,17 @@ class JobOrchestrator:
     def _normalize_fact_text(self, text: str) -> str:
         return self.script_pipeline._normalize_fact_text(text)
 
-    def _fact_result_is_relevant(self, query: str, title: str, extract: str) -> bool:
-        return self.script_pipeline._fact_result_is_relevant(query, title, extract)
+    def _fact_result_is_relevant(
+        self,
+        query: str,
+        title: str,
+        extract: str,
+        research_brief: dict[str, Any] | None = None,
+    ) -> bool:
+        return self.script_pipeline._fact_result_is_relevant(query, title, extract, research_brief)
 
-    def _scientific_article_fact_pack(self, query: str) -> dict[str, Any]:
-        return self.script_pipeline._scientific_article_fact_pack(query)
+    def _scientific_article_fact_pack(self, query: str, research_brief: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.script_pipeline._scientific_article_fact_pack(query, research_brief)
 
     def _openalex_abstract_text(self, abstract_inverted_index: Any) -> str:
         return self.script_pipeline._openalex_abstract_text(abstract_inverted_index)

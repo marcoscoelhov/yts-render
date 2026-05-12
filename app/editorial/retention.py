@@ -5,17 +5,17 @@ from typing import Any
 from app.utils import stable_hash, word_tokens
 
 
-EDITORIAL_PROMPT_VERSION = "shorts-retention-v2"
+EDITORIAL_PROMPT_VERSION = "shorts-retention-v3"
 
 GOLDEN_SCRIPT_SAMPLES = {
     "good": [
         {
             "label": "visual_first_frame",
-            "pattern": "abre com resultado visual concreto, segura a explicação e fecha voltando ao primeiro contraste",
+            "pattern": "abre com resultado visual concreto, segura a explicação e fecha voltando ao primeiro contraste com replay mental",
         },
         {
             "label": "single_idea_payoff",
-            "pattern": "uma ideia central, micro-recompensas progressivas e payoff no último terço",
+            "pattern": "uma ideia central, beats em escalada e payoff só no último terço",
         },
     ],
     "bad": [
@@ -25,7 +25,7 @@ GOLDEN_SCRIPT_SAMPLES = {
         },
         {
             "label": "unsupported_precision",
-            "pattern": "usa números, datas ou causalidade forte sem fonte verificável para parecer mais viral",
+            "pattern": "usa clickbait não provado, precisão falsa ou causalidade forte sem base para parecer mais viral",
         },
     ],
 }
@@ -71,9 +71,9 @@ def build_retention_map(target_duration_sec: int) -> dict[str, Any]:
         "rules": [
             "uma ideia central por short",
             "primeiro frame precisa ser visualmente legível sem contexto",
-            "cada beat deve acrescentar informação nova ou tensão nova",
-            "payoff no último terço, não no primeiro beat",
-            "final deve recontextualizar o começo sem parecer template repetido",
+            "cada beat deve subir estranheza, imagem mental ou impacto",
+            "loop fica aberto até o payoff no último terço",
+            "final deve recontextualizar o começo e provocar replay sem parecer template repetido",
         ],
     }
 

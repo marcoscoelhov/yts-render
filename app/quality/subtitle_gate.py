@@ -9,6 +9,8 @@ from app.utils import word_tokens
 
 
 BAD_ENDINGS = {"de", "do", "da", "dos", "das", "em", "no", "na", "nos", "nas", "por", "para", "que", "e"}
+P95_DRIFT_THRESHOLD_MS = 900
+MAX_DRIFT_THRESHOLD_MS = 1800
 
 
 @dataclass(frozen=True)
@@ -19,11 +21,15 @@ class SubtitleGateResult:
 
 
 class SubtitleGate:
-    def validate(self, items: list[dict[str, Any]], coverage_ratio: float) -> SubtitleGateResult:
+    def validate(self, items: list[dict[str, Any]], coverage_ratio: float, p95_drift_ms: int = 0, max_drift_ms: int = 0) -> SubtitleGateResult:
         reasons: list[str] = []
         item_results: list[dict[str, Any]] = []
         if coverage_ratio < 0.99:
             reasons.append("coverage_below_threshold")
+        if p95_drift_ms > P95_DRIFT_THRESHOLD_MS:
+            reasons.append("p95_timing_drift_too_high")
+        if max_drift_ms > MAX_DRIFT_THRESHOLD_MS:
+            reasons.append("max_timing_drift_too_high")
         if not items:
             reasons.append("missing_subtitle_items")
         for item in items:
@@ -50,5 +56,11 @@ class SubtitleGate:
         return SubtitleGateResult(
             passed=not reasons,
             reasons=reasons,
-            metrics={"coverage_ratio": coverage_ratio, "item_count": len(items), "items": item_results},
+            metrics={
+                "coverage_ratio": coverage_ratio,
+                "item_count": len(items),
+                "p95_drift_ms": int(p95_drift_ms),
+                "max_drift_ms": int(max_drift_ms),
+                "items": item_results,
+            },
         )

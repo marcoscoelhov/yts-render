@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.editorial.repetition import build_channel_repetition_report
 from app.compliance.review import build_human_review_checklist
+from app.editorial.topic_mode import resolve_editorial_mode
 from app.models import BackgroundMusicAsset, Job, NarrationAsset, PerformanceMetric, RenderOutput, ReviewRecord, SceneAsset, Script, SubtitleTrack, TopicPlan, TopicRequest
 from app.pipelines.base import BasePipeline
 from app.utils import iso_now, stable_hash, word_tokens
@@ -534,13 +535,13 @@ class MonetizationPipeline(BasePipeline):
         self.storage.persist_json(job.job_id, "publish_package.json", self._serialize_for_json(publish_package))
         artifact_index = {
             "request": "request.json",
+            "input_gate": "input_gate.json",
             "topic_plan": "topic_plan.json",
+            "research_brief": "research_brief.json",
             "script": "script.json",
             "text_publish_audit": "text_publish_audit.json",
             "scene_plan": "scene_plan.json",
             "audio": "audio/narration.wav",
-            "background_music": "audio/background_source.wav",
-            "mixed_audio": "audio/mixed.wav",
             "raw_subtitles": "audio/raw.srt",
             "subtitles": "audio/subtitles.ass",
             "render": "render/final.mp4",
@@ -556,6 +557,14 @@ class MonetizationPipeline(BasePipeline):
             "publish_package": "publish_package.json",
             "performance_timeline": "performance_timeline.json",
         }
+        if (self.storage.job_dir(job.job_id) / "subtitle_timing_report.json").exists():
+            artifact_index["subtitle_timing"] = "subtitle_timing_report.json"
+        if (self.storage.job_dir(job.job_id) / "audio" / "background_source.wav").exists():
+            artifact_index["background_music"] = "audio/background_source.wav"
+        if (self.storage.job_dir(job.job_id) / "audio" / "mixed.wav").exists():
+            artifact_index["mixed_audio"] = "audio/mixed.wav"
+        if (self.storage.job_dir(job.job_id) / "background_music_quality_report.json").exists():
+            artifact_index["background_music_quality"] = "background_music_quality_report.json"
         if (self.storage.job_dir(job.job_id) / "audio" / "sound_design.wav").exists():
             artifact_index["sound_design"] = "audio/sound_design.wav"
             artifact_index["sound_design_report"] = "sound_design.json"
@@ -757,7 +766,8 @@ class MonetizationPipeline(BasePipeline):
         if isinstance(source_ids, str):
             source_ids = [source_ids]
         fact_risk = self.script_gate._fact_risk_report(script_dict) if script_dict else {"blocked": False, "claim_count": 0}  # noqa: SLF001
-        factual_topic = bool(topic_plan and re.search(r"\b(?:por que|porque|como|ci[eê]ncia|f[ií]sica|biologia|engenharia|hist[oó]ria|sa[uú]de|m[eé]dico|animal|animais|flamingo|torre|c[eé]rebro|neuro)\b", f"{topic_plan.canonical_topic} {topic_plan.angle}", re.IGNORECASE))
+        editorial_mode = resolve_editorial_mode(topic_plan, None) if topic_plan else "viral_curiosidades"
+        factual_topic = editorial_mode == "factual_strict"
         reasons: list[str] = []
         if not all(checklist.values()):
             reasons.append("quality_checklist_failed")
@@ -784,6 +794,7 @@ class MonetizationPipeline(BasePipeline):
                 "fact_risk": {**fact_risk, "simple_shorts_mode": True},
                 "minimax_audit": minimax_audit or {"skipped": True},
                 "simple_shorts_mode": True,
+                "editorial_mode": editorial_mode,
             }
         if fact_pack.get("status") != "verified" and source_ids:
             reasons.append("invented_source_fact_ids")
@@ -809,6 +820,7 @@ class MonetizationPipeline(BasePipeline):
             "weak_hashtags": weak_tags,
             "fact_risk": fact_risk,
             "minimax_audit": minimax_audit or {"skipped": True},
+            "editorial_mode": editorial_mode,
         }
 
     def script_to_dict(self, script: Script) -> dict[str, Any]:

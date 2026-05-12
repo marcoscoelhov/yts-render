@@ -26,6 +26,7 @@ from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFilter
 
 from app.config import get_settings
+from app.editorial.research_brief import build_research_brief
 from app.editorial.retention import EDITORIAL_PROMPT_VERSION, build_retention_map, build_visual_opening_brief
 from app.utils import avg_words_per_sentence, max_words_single_sentence, parse_srt, sentence_split, tokenize, word_tokens, wrap_caption
 
@@ -344,7 +345,8 @@ class MinimaxCreativeProvider:
     ) -> dict[str, Any]:
         history_text = json.dumps(history[-8:], ensure_ascii=False)
         prompt = f"""
-Você cria pautas de Shorts de curiosidades em pt-BR.
+Crie pautas de curiosidades globais para YouTube Shorts em pt-BR.
+Meta: retenção máxima, replay, compartilhamento orgânico e espanto genuíno. Zero clickbait falso.
 Entrada do usuario: {seed_theme}
 Tom selecionado: {tone or "intrigante_direto"}
 Ângulo solicitado: {requested_angle or "auto"}
@@ -356,6 +358,13 @@ A entrada pode ser um tema bruto ou um titulo completo.
 Sempre transforme tema/titulo em uma pauta com copywriting viral e SEO otimizado para YouTube.
 Se a entrada for titulo completo: preserve a promessa central, mas melhore clareza, palavra-chave, curiosidade e retenção.
 Se a entrada for tema: crie um recorte especifico e pesquisavel, evitando assunto generico.
+Pense cada pauta com esta régua editorial:
+- Título: palavra-chave cedo quando natural, promessa específica e verificável
+- Hook: 0 a 2 segundos, contraste, paradoxo ou fato impossível-mas-verdadeiro
+- Loop: pergunta mental de tensão que só fecha no payoff
+- Beats: escalada obrigatória de fato, implicação, consequência, imagem visual e virada
+- Payoff: revelação mais surpreendente no último terço
+- Fechamento: recontextualiza o hook e provoca replay mental
 title_candidates devem ser em pt-BR, com 45 a 75 caracteres quando possivel, palavra-chave principal cedo, curiosidade concreta e sem promessa falsa.
 Evite caixa alta exagerada, emojis obrigatorios e clickbait que o roteiro nao consiga cumprir.
 Todos os campos textuais do JSON devem estar em portugues do Brasil (pt-BR).
@@ -364,6 +373,14 @@ Excecoes permitidas: nomes proprios, nomes cientificos, siglas, marcas, titulos 
 
 Responda JSON estrito com:
 canonical_topic, angle, hook_promise, title_candidates (3 a 5), entities, search_terms, quality_metrics.
+
+Regras para search_terms:
+- search_terms devem servir para pesquisa factual em fonte primária, não só SEO.
+- evite entidade nua isolada; prefira entidade + mecanismo + efeito + contexto.
+- para temas científicos, médicos, técnicos ou históricos, inclua termos específicos e pesquisáveis, não genéricos.
+- quando ajudar a recuperar papers ou documentação primária, inclua também 2 ou mais search_terms em inglês.
+- misture consultas curtas e consultas explicativas, mas sem frases vagas.
+- quality_metrics pode refletir se a pauta sustenta loop, payoff tardio, replay e promessa verificável.
 Sem markdown.
 """
         payload = self._json_completion(prompt)
@@ -425,7 +442,7 @@ Sem markdown.
         if not isinstance(quality_metrics, dict):
             quality_metrics = {}
 
-        return {
+        normalized_payload = {
             **payload,
             "canonical_topic": canonical_topic,
             "angle": angle,
@@ -434,6 +451,16 @@ Sem markdown.
             "entities": [str(entity).strip() for entity in entities if str(entity).strip()],
             "search_terms": [str(term).strip() for term in search_terms if str(term).strip()],
             "quality_metrics": quality_metrics,
+        }
+        return {
+            **normalized_payload,
+            "research_brief": build_research_brief(
+                normalized_payload,
+                {
+                    "seed_theme": seed_theme,
+                    "requested_angle": None,
+                },
+            ),
         }
 
     def generate_script(self, topic_plan: dict[str, Any]) -> dict[str, Any]:
@@ -444,17 +471,30 @@ Entrada JSON: {json.dumps(topic_plan, ensure_ascii=False)}
 Retorne JSON estrito com:
 title, hook, body_beats, ending, cta, full_narration, estimated_duration_sec, key_facts, source_fact_ids, claim_trace, token_count, language, retention_map, visual_opening, qa_metrics, prompt_version
 
+Mapeamento editorial obrigatório:
+- title equivale ao Título
+- hook equivale ao Hook de 0 a 2 segundos
+- body_beats equivale aos Beats em escalada; mantenha o loop aberto nos beats iniciais e entregue o payoff no último beat ou no último terço da narração
+- ending equivale ao Fechamento; ele deve recontextualizar o hook e provocar replay mental
+- hashtags não fazem parte deste JSON e não devem aparecer nos campos narrados
+
 Regras:
 - 35 a 55 segundos
+- meta editorial: retenção máxima, replay, compartilhamento orgânico e espanto genuíno, sem clickbait falso
 - prompt_version deve ser "{EDITORIAL_PROMPT_VERSION}" salvo se a Entrada JSON trouxer versão editorial mais nova
+- se Entrada JSON.editorial_mode for "viral_curiosidades", priorize simplicidade viral, clareza e wording seguro; não force explicação mecanística específica quando o fact_pack não sustentar isso
+- se Entrada JSON.editorial_mode for "factual_strict", priorize grounding factual e não complete lacunas causais com plausibilidade editorial
 - retention_map deve refletir os blocos da Entrada JSON.retention_map e mapear o roteiro em: visual_hook, proof_or_tension, escalation, turn_or_payoff, loop_close
 - visual_opening deve descrever o primeiro frame esperado: sujeito, contraste visual, ação/resultado e o que evitar
 - os primeiros 0-2s precisam funcionar visualmente mesmo sem áudio, com resultado, movimento ou contraste concreto
 - use golden_sample_brief como régua editorial: aproxime-se dos padrões bons e evite os padrões ruins
 - primeira frase com no maximo 12 palavras
 - media por frase <= 14
+- 80 a 120 palavras no total quando possível, sem sacrificar clareza factual
 - use estrutura agressiva de retenção: hook de choque, loop aberto, escalada de fatos, payoff atrasado e fechamento memoravel
 - cada frase deve criar uma pergunta mental ou tensão para a frase seguinte
+- cada beat precisa justificar o próximo; é proibido soar neutro, didático demais, enciclopédico ou decorativo
+- cada beat deve ficar mais estranho, visual ou impactante que o anterior
 - não entregue a explicação completa no primeiro beat; plante o mistério e pague no último terço
 - fatos científicos são matéria-prima, não estilo: transforme termos acadêmicos em consequência visual, tensão ou surpresa concreta
 - não escreva como aula, artigo, definição enciclopédica ou professor explicando; escreva como Short de curiosidade com precisão factual
@@ -471,6 +511,7 @@ Regras:
 - title deve ser otimizado para SEO e copywriting viral, com promessa especifica e palavra-chave cedo quando natural
 - title não pode parecer título de artigo científico; evite "metabolismo de", "análise de", "estudo sobre", "mecanismos de" e formule como promessa visual ou surpresa concreta
 - hook deve abrir com choque, contraste ou tensão imediata, sem introducao generica
+- a primeira palavra do hook deve ser, quando natural, um número, nome próprio ou verbo de ação
 - proibido começar hook ou full_narration com "você sabia", "voce sabia", "já imaginou", "ja imaginou", "nesse vídeo", "nesse video" ou fórmulas genéricas equivalentes
 - comece direto por contraste, consequência, conflito ou fato específico
 - cada body_beat deve entregar um fato concreto que sustente a promessa do titulo e aumente a curiosidade
@@ -510,6 +551,9 @@ title, hook, body_beats, ending, cta, full_narration, estimated_duration_sec, ke
 
 Regras obrigatórias:
 - mantenha prompt_version="{EDITORIAL_PROMPT_VERSION}" e preserve/atualize retention_map e visual_opening
+- se Contexto da pauta JSON.editorial_mode for "viral_curiosidades", prefira wording seguro, simples e forte em retenção, sem insistir em mecanismo específico não sustentado
+- se Contexto da pauta JSON.editorial_mode for "factual_strict", preserve o grounding factual e remova qualquer mecanismo sem lastro
+- preserve a régua editorial do app: hook forte, loop aberto, beats em escalada, payoff no último terço e fechamento que provoque replay
 - se os motivos incluírem weak_loop_closure ou ending_not_connected_to_hook, corrija o bloco loop_close sem criar final genérico repetitivo
 - o novo ending deve criar loop de reassistência: o início precisa ganhar novo significado na segunda visualização
 - não use frase meta como "fecha o ciclo", "agora tudo faz sentido" ou "essa curiosidade muda como você olha"
@@ -525,9 +569,13 @@ Regras obrigatórias:
 - mantenha duração estimada entre 35 e 55 segundos
 - primeira frase com no máximo 12 palavras
 - média por frase <= 14 e frase máxima <= 20 palavras
+- mantenha 80 a 120 palavras no total quando possível
 - preserve a promessa central e os fatos úteis, mas reescreva o necessário
+- a primeira palavra do hook deve ser, quando natural, um número, nome próprio ou verbo de ação
 - se o hook ou full_narration começar com "você sabia", "voce sabia", "já imaginou", "ja imaginou", "nesse vídeo" ou equivalente, reescreva para começar direto por contraste, consequência, conflito ou fato específico
 - aumente retenção sem inventar fatos: hook mais agressivo, loop aberto, escalada de curiosidade, payoff no ultimo terço e final memoravel
+- cada beat precisa justificar o próximo; remova frase neutra, didática demais, enciclopédica ou decorativa
+- cada beat deve ficar mais estranho, visual ou impactante que o anterior
 - fatos acima de viralidade: remova números, nacionalidades, planos, materiais, causas técnicas ou soluções de engenharia que não estejam bem sustentados pelo contexto
 - evite frases absolutas/enganosas como “está garantida”, “a física prova”, “domina a física”, “desafia a física” ou “a inclinação sustenta”
 - se os motivos incluírem factual_risk_requires_conservative_rewrite, reescreva TODA afirmação de risco factual: números precisos, datas, porcentagens, medidas, causalidade técnica, claims médicos/biológicos, engenharia e frases absolutas
@@ -606,10 +654,38 @@ Regras obrigatorias para image_prompt:
 - Example for narration about blue blood: "octopus anatomy close-up with blue copper-rich blood vessels, cinematic underwater realism, no readable text anywhere"
 - Example for narration about color change: "octopus changing skin color and texture while camouflaging from a predator, cinematic underwater realism, no readable text anywhere"
 """
-        payload = self._json_completion(prompt)
+        completion = getattr(self, "_json_array_completion", self._json_completion)
+        payload = completion(prompt)
+        payload = self._normalize_scene_plan_payload(payload)
         if not isinstance(payload, list):
             raise ProviderFailure(self.failure_provider_name, "scene planner returned non-list json")
         return payload
+
+    def _normalize_scene_plan_payload(self, payload: Any) -> Any:
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("scenes", "items", "results", "plan"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+            for value in payload.values():
+                nested = self._extract_nested_scene_list(value)
+                if nested is not None:
+                    return nested
+        return payload
+
+    def _extract_nested_scene_list(self, value: Any) -> list[dict[str, Any]] | None:
+        if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+            first = value[0]
+            if {"scene_id", "narration_text"} & set(first):
+                return value
+        if isinstance(value, dict):
+            for nested in value.values():
+                result = self._extract_nested_scene_list(nested)
+                if result is not None:
+                    return result
+        return None
 
     def _json_completion(self, prompt: str) -> Any:
         try:
@@ -724,6 +800,35 @@ class OpenAICreativeProvider(MinimaxCreativeProvider):
                 except Exception:
                     pass
             raise ProviderFailure(self.failure_provider_name, f"invalid json: {raw[:300]}") from exc
+
+    def _json_array_completion(self, prompt: str) -> Any:
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[
+                    {"role": "system", "content": "Return valid JSON only. Top-level must be an array. No markdown fences."},
+                    {"role": "user", "content": prompt},
+                ],
+                timeout=self.timeout_sec,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderFailure(self.failure_provider_name, str(exc)) from exc
+        raw = (response.choices[0].message.content or "").strip()
+        if not raw:
+            raise ProviderFailure(self.failure_provider_name, "empty text response")
+        raw = self._strip_think(raw)
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+        try:
+            return json.loads(raw)
+        except Exception as exc:  # noqa: BLE001
+            extracted = self._extract_json(raw)
+            if extracted is not None:
+                try:
+                    return json.loads(extracted)
+                except Exception:
+                    pass
+            raise ProviderFailure(self.failure_provider_name, f"invalid json array: {raw[:300]}") from exc
 
 
 class QwenCreativeProvider(MinimaxCreativeProvider):
