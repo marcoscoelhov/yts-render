@@ -811,9 +811,9 @@ class MonetizationPipeline(BasePipeline):
         return list(dict.fromkeys(normalized_tags))[:5]
 
     def build_publish_hashtags(self, topic_plan: TopicPlan | None, script: Script | None) -> list[str]:
-        tags = ["#shorts", "#curiosidades"]
+        tags = ["#shorts", "#fatos"]
         weak = self.weak_hashtag_terms()
-        blocked_terms = weak | {"lugar", "lugares", "mais", "mundo", "terra", "aqui", "ainda", "vive", "vivem", "segredo", "extremo", "extrema"}
+        blocked_terms = weak | {"lugar", "lugares", "mais", "mundo", "terra", "aqui", "ainda", "vive", "vivem", "segredo", "extremo", "extrema", "tinha", "tinham", "seus", "suas"}
         text = " ".join(
             str(part or "")
             for part in [
@@ -831,6 +831,10 @@ class MonetizationPipeline(BasePipeline):
             "cerebro": ["#cerebro", "#neurociencia", "#percepcao"],
             "cérebro": ["#cerebro", "#neurociencia", "#percepcao"],
             "neuro": ["#neurociencia", "#cerebro", "#percepcao"],
+            "dinossauro": ["#dinossauros", "#paleontologia", "#trex"],
+            "dinossauros": ["#dinossauros", "#paleontologia", "#trex"],
+            "tiranossauro": ["#tiranossauro", "#trex", "#dinossauros"],
+            "trex": ["#trex", "#dinossauros", "#paleontologia"],
             "polvo": ["#polvo", "#biologia", "#animais"],
             "polvos": ["#polvo", "#biologia", "#animais"],
             "templario": ["#templarios", "#historia", "#medieval", "#portugal"],
@@ -859,6 +863,7 @@ class MonetizationPipeline(BasePipeline):
         return {
             "por", "que", "qual", "como", "porque", "para", "com", "uma", "uns", "umas", "tem", "têm", "fica", "ficam", "ficou", "ser", "sao", "são", "era",
             "foram", "esta", "está", "esse", "essa", "isso", "aquele", "aquela", "de", "do", "da", "dos", "das", "a", "o", "as", "os", "e", "cor", "cores",
+            "tinha", "tinham", "seu", "seus", "sua", "suas",
             "video", "short", "shorts", "curiosidade", "curiosidades",
         }
 

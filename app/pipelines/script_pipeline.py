@@ -1603,6 +1603,25 @@ class ScriptPipeline(BasePipeline):
             critical_reasons = self._simple_mode_blocking_script_reasons(gate_result.reasons)
             if critical_reasons:
                 raise RecoverableStepError(f"script quality gate failed: {', '.join(critical_reasons)}")
+            repairable_reasons = self._simple_mode_lightweight_repair_reasons(gate_result.reasons)
+            if repairable_reasons:
+                repaired = self._postprocess_script_for_quality(dict(script), plan_dict, repairable_reasons)
+                repaired["qa_metrics"] = normalize_script_metrics(dict(repaired.get("qa_metrics") or {}))
+                repaired_gate = self.script_gate.validate(repaired, target_duration_sec)
+                repaired_consistency_reasons: list[str] = []
+                attempts_log.append(
+                    {
+                        "repair_attempt": 1,
+                        "reason_codes": list(repaired_gate.reasons),
+                        "passed": repaired_gate.passed,
+                        "used_fallback": False,
+                        "repair_strategy": "simple_mode_local",
+                    }
+                )
+                if self._simple_mode_repair_improved(gate_result.reasons, repaired_gate.reasons):
+                    script = repaired
+                    gate_result = repaired_gate
+                    consistency_reasons = repaired_consistency_reasons
             metrics = {
                 **gate_result.metrics,
                 "script_quality_gate_pass": True,
@@ -1717,6 +1736,23 @@ class ScriptPipeline(BasePipeline):
             "generic_ai_style_phrase",
         }
         return [reason for reason in reasons if reason in blocking]
+
+    def _simple_mode_lightweight_repair_reasons(self, reasons: list[str]) -> list[str]:
+        repairable = {
+            "factual_claim_trace_missing",
+            "factual_risk_requires_conservative_rewrite",
+            "overconfident_or_unsupported_factual_claim",
+            "weak_loop_closure",
+            "ending_not_connected_to_hook",
+        }
+        return [reason for reason in reasons if reason in repairable]
+
+    def _simple_mode_repair_improved(self, original_reasons: list[str], repaired_reasons: list[str]) -> bool:
+        original = set(original_reasons)
+        repaired = set(repaired_reasons)
+        if not original:
+            return False
+        return len(repaired) < len(original) or repaired < original
 
     def _claim_trace_metrics(self, script: dict[str, Any]) -> dict[str, Any]:
         trace = script.get("claim_trace") if isinstance(script.get("claim_trace"), list) else []
