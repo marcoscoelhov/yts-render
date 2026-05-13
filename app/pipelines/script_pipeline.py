@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.editorial.research_brief import audit_source_relevance, build_research_brief, research_tokens
 from app.editorial.retention import attach_retention_metadata, enrich_plan_for_script_generation
 from app.editorial.topic_mode import resolve_editorial_mode
+from app.manual_script import extract_ready_script_from_notes
 from app.models import Job, Script, TopicPlan, TopicRequest
 from app.pipelines.common import FatalStepError, RecoverableStepError, model_payload
 from app.pipelines.base import BasePipeline
@@ -105,8 +106,27 @@ class ScriptPipeline(BasePipeline):
             recent_history=self._recent_topic_history(session, request.niche_id),
         )
         plan_dict["channel_learning_brief"] = self._channel_learning_brief(session, request.niche_id)
+        ready_script = extract_ready_script_from_notes(request.notes)
+        if ready_script is not None:
+            plan_dict["ready_script_mode"] = True
+            plan_dict["ready_script_fact_check_confirmed"] = ready_script.fact_check_confirmed
+            self.storage.persist_json(
+                job.job_id,
+                "ready_script_input.json",
+                {
+                    "schema_version": self.settings.schema_version,
+                    "job_id": job.job_id,
+                    "created_at": utcnow().isoformat(),
+                    "fact_check_confirmed": ready_script.fact_check_confirmed,
+                    "raw_text": ready_script.raw_text,
+                    "hashtags": ready_script.hashtags,
+                },
+            )
         fact_started = time.monotonic()
-        fact_pack = self._simple_mode_fact_pack(request) if simple_mode_fact_skip else self._build_fact_pack(topic_plan, request, research_brief)
+        if ready_script is not None:
+            fact_pack = ready_script.fact_pack
+        else:
+            fact_pack = self._simple_mode_fact_pack(request) if simple_mode_fact_skip else self._build_fact_pack(topic_plan, request, research_brief)
         stage_timings_ms["fact_pack_ms"] = round((time.monotonic() - fact_started) * 1000, 1)
         plan_dict["fact_pack"] = fact_pack
         self.storage.persist_json(job.job_id, "fact_pack.json", self._serialize_for_json(fact_pack))
@@ -127,25 +147,29 @@ class ScriptPipeline(BasePipeline):
             )
             raise error
         generation_started = time.monotonic()
-        try:
-            script = self.providers.creative.generate_script(plan_dict)
-        except Exception as exc:  # noqa: BLE001
-            self._persist_script_generation_debug(
-                job_id=job.job_id,
-                attempt=attempt,
-                plan_dict=plan_dict,
-                fact_pack=fact_pack,
-                phase="generation",
-                elapsed_ms=round((time.monotonic() - generation_started) * 1000, 1),
-                stage_timings_ms={
-                    **stage_timings_ms,
-                    "generation_ms": round((time.monotonic() - generation_started) * 1000, 1),
-                    "total_step_ms": round((time.monotonic() - step_started) * 1000, 1),
-                },
-                error=exc,
-            )
-            raise
-        generation_elapsed_ms = round((time.monotonic() - generation_started) * 1000, 1)
+        if ready_script is not None:
+            script = ready_script.script
+            generation_elapsed_ms = 0.0
+        else:
+            try:
+                script = self.providers.creative.generate_script(plan_dict)
+            except Exception as exc:  # noqa: BLE001
+                self._persist_script_generation_debug(
+                    job_id=job.job_id,
+                    attempt=attempt,
+                    plan_dict=plan_dict,
+                    fact_pack=fact_pack,
+                    phase="generation",
+                    elapsed_ms=round((time.monotonic() - generation_started) * 1000, 1),
+                    stage_timings_ms={
+                        **stage_timings_ms,
+                        "generation_ms": round((time.monotonic() - generation_started) * 1000, 1),
+                        "total_step_ms": round((time.monotonic() - step_started) * 1000, 1),
+                    },
+                    error=exc,
+                )
+                raise
+            generation_elapsed_ms = round((time.monotonic() - generation_started) * 1000, 1)
         stage_timings_ms["generation_ms"] = generation_elapsed_ms
         validation_started = time.monotonic()
         try:
@@ -204,7 +228,8 @@ class ScriptPipeline(BasePipeline):
             },
         )
         script = self._attach_editorial_source(script, plan_dict)
-        metrics = {**metrics, "editorial_source": "hub_viral_prompt", "downstream_source_of_truth": "script_full_narration"}
+        editorial_source = "ready_script" if ready_script is not None else "hub_viral_prompt"
+        metrics = {**metrics, "editorial_source": editorial_source, "downstream_source_of_truth": "script_full_narration"}
         created_at = utcnow()
         payload = {
             "schema_version": self.settings.schema_version,
@@ -231,9 +256,14 @@ class ScriptPipeline(BasePipeline):
         quality_summary["script"] = metrics
         job.quality_summary = quality_summary
         self._append_event(job.job_id, "script.generated", "succeeded", metrics)
-        return ["fact_pack.json", "script.json", "script_generation_debug.json", "text_publish_audit.json", script_telemetry_file]
+        artifacts = ["fact_pack.json", "script.json", "script_generation_debug.json", "text_publish_audit.json", script_telemetry_file]
+        if ready_script is not None:
+            artifacts.append("ready_script_input.json")
+        return artifacts
 
     def _requires_verified_fact_pack(self, topic_plan: TopicPlan, request: TopicRequest, fact_pack: dict[str, Any]) -> bool:
+        if extract_ready_script_from_notes(request.notes) is not None:
+            return False
         if self.settings.use_mock_providers:
             return False
         if fact_pack.get("status") == "verified":
@@ -262,6 +292,25 @@ class ScriptPipeline(BasePipeline):
     def _text_publish_audit(self, job_id: str, script: dict[str, Any], fact_pack: dict[str, Any]) -> dict[str, Any]:
         if self.settings.simple_shorts_mode and fact_pack.get("status") == "skipped":
             audit = {"passed": True, "reasons": [], "provider": "simple_shorts_mode", "skipped": True}
+            self.storage.persist_json(
+                job_id,
+                "text_publish_audit.json",
+                {
+                    "schema_version": self.settings.schema_version,
+                    "job_id": job_id,
+                    "created_at": utcnow().isoformat(),
+                    "audit": self._serialize_for_json(audit),
+                },
+            )
+            return audit
+        if fact_pack.get("provider") == "user_declared_fact_check" and fact_pack.get("status") == "verified":
+            audit = {
+                "passed": True,
+                "reasons": [],
+                "provider": "user_declared_fact_check",
+                "skipped": True,
+                "scope": "ready_script_human_fact_confirmation",
+            }
             self.storage.persist_json(
                 job_id,
                 "text_publish_audit.json",
@@ -1078,7 +1127,7 @@ class ScriptPipeline(BasePipeline):
         valid_ids = {str(fact.get("fact_id")) for fact in facts if fact.get("fact_id")}
         if not valid_ids:
             return []
-        used_ids = {str(item) for item in source_ids if str(item) in valid_ids}
+        used_ids = {str(item) for item in [*source_ids, *trace_source_ids] if str(item) in valid_ids}
         minimum = min(2, len(valid_ids))
         reasons: list[str] = []
         if len(used_ids) < minimum:
@@ -1142,7 +1191,7 @@ class ScriptPipeline(BasePipeline):
         metrics = dict(enriched.get("qa_metrics") or {})
         metrics.update(
             {
-                "editorial_source": "hub_viral_prompt",
+                "editorial_source": "ready_script" if plan_dict.get("ready_script_mode") else "hub_viral_prompt",
                 "downstream_source_of_truth": "script_full_narration",
                 "original_input": plan_dict.get("original_input"),
                 "requested_angle": plan_dict.get("requested_angle"),
@@ -1246,6 +1295,7 @@ class ScriptPipeline(BasePipeline):
     def _normalize_script_visible_text(self, value: Any) -> Any:
         if isinstance(value, str):
             text = value.replace("—", ", ").replace("–", ", ")
+            text = text.translate(str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"}))
             text = re.sub(r"\b(pedir)\s*[^\x00-\x7FÀ-ÖØ-öø-ÿĀ-ſ]+\s*(ao)\b", r"\1 instrução \2", text, flags=re.IGNORECASE)
             text = re.sub(r"\b([a-záàãâéêíóõôúç]{3,})dede\b", r"\1 de", text, flags=re.IGNORECASE)
             text = re.sub(
@@ -1599,6 +1649,19 @@ class ScriptPipeline(BasePipeline):
                 "used_fallback": False,
             }
         ]
+        if self._ready_script_declared_fact_check_accepts(script, plan_dict, gate_result.reasons, consistency_reasons):
+            metrics = {
+                **gate_result.metrics,
+                "script_quality_gate_pass": True,
+                "script_quality_gate_blocking": False,
+                "script_quality_gate_warnings": list(gate_result.reasons),
+                "fact_pack_consistency_pass": True,
+                "ready_script_declared_fact_check_accepted": True,
+                "script_repair_attempts_log": attempts_log,
+                **self._claim_trace_metrics(script),
+            }
+            script["qa_metrics"] = metrics
+            return script, metrics
         if simple_mode_fact_skip:
             critical_reasons = self._simple_mode_blocking_script_reasons(gate_result.reasons)
             if critical_reasons:
@@ -1722,6 +1785,26 @@ class ScriptPipeline(BasePipeline):
             last_reasons = [*fallback_gate.reasons, *fallback_consistency_reasons]
 
         raise RecoverableStepError(f"script quality gate failed: {', '.join(last_reasons)}")
+
+    def _ready_script_declared_fact_check_accepts(
+        self,
+        script: dict[str, Any],
+        plan_dict: dict[str, Any],
+        gate_reasons: list[str],
+        consistency_reasons: list[str],
+    ) -> bool:
+        if not plan_dict.get("ready_script_mode") or not plan_dict.get("ready_script_fact_check_confirmed"):
+            return False
+        fact_pack = plan_dict.get("fact_pack") if isinstance(plan_dict.get("fact_pack"), dict) else {}
+        if fact_pack.get("provider") != "user_declared_fact_check" or fact_pack.get("status") != "verified":
+            return False
+        if consistency_reasons:
+            return False
+        allowed_warnings = {"factual_risk_requires_conservative_rewrite"}
+        if any(reason not in allowed_warnings for reason in gate_reasons):
+            return False
+        trace_metrics = self._claim_trace_metrics(script)
+        return bool(trace_metrics["claim_trace_items"] and trace_metrics["claim_trace_missing_items"] == 0)
 
     def _simple_mode_blocking_script_reasons(self, reasons: list[str]) -> list[str]:
         blocking = {

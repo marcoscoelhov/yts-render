@@ -4,123 +4,152 @@
   <div>
     <p class="eyebrow">Operação</p>
     <h2>Revisar, aprovar, programar</h2>
+    <p class="hero-copy">Comece pelo que exige decisão humana. Diagnósticos e publicação ficam depois da fila.</p>
   </div>
   <div class="workflow-metrics">
     <span><strong>{{ workflow_summary.awaiting_approval_count }}</strong> para aprovar</span>
     <span><strong>{{ workflow_summary.unscheduled_approved_count }}</strong> para programar</span>
     <span><strong>{{ workflow_summary.scheduled_count }}</strong> programados</span>
   </div>
+  <div class="hub-action-bar">
+    <a class="button-link" href="#create-job">Criar novo vídeo</a>
+    <a class="button-link ghost-link" href="#jobs-table">Revisar fila</a>
+    <a class="button-link ghost-link" href="/calendar">Abrir agenda</a>
+  </div>
+</section>
+
+<section class="hub-workbench">
+  <aside class="workbench-side" aria-label="Comandos do hub">
+    <section id="create-job" class="panel create-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Novo vídeo</p>
+          <h3>Criar job</h3>
+        </div>
+        <p class="section-note">Modo enxuto. Só aparece o que precisa preencher.</p>
+      </div>
+      <form method="post" action="/jobs" class="job-form">
+        <input type="hidden" name="niche_id" value="{{ hub_defaults.niche_id }}">
+        <div class="field full">
+          <label for="input_mode">Entrada</label>
+          <select id="input_mode" name="input_mode">
+            <option value="theme" selected>Tema</option>
+            <option value="title">Título completo</option>
+            <option value="script">Roteiro pronto</option>
+          </select>
+          <p class="field-help" data-mode-help="theme">Vazio = pesquisar tendências reais automaticamente.</p>
+          <p class="field-help hidden" data-mode-help="title">Cole um título completo; o app preserva a promessa.</p>
+          <p class="field-help hidden" data-mode-help="script">Cole o texto rotulado; o app não gera outro roteiro.</p>
+        </div>
+        <div class="field wide" data-mode-section="theme title">
+          <label for="seed_theme">Tema ou título</label>
+          <input id="seed_theme" name="seed_theme" value="{{ hub_defaults.seed_theme }}" placeholder="Ex.: Danakil, polvos, cafeína. Vazio = tendência real.">
+        </div>
+        <div class="field wide hidden" data-mode-section="script">
+          <label for="ready_script_text">Roteiro pronto em texto rotulado</label>
+          <textarea id="ready_script_text" name="ready_script_text" rows="10" placeholder="Título: ...&#10;Hook: ...&#10;Loop: ...&#10;Beats: ...&#10;Payoff: ...&#10;Fechamento: ..."></textarea>
+          <label class="checkbox-line">
+            <input type="checkbox" name="ready_script_fact_check_confirmed" value="true">
+            Confirmo que os fatos deste roteiro pronto já foram revisados antes do envio.
+          </label>
+        </div>
+        <div class="field">
+          <label for="target_duration_sec">Duração</label>
+          <input id="target_duration_sec" name="target_duration_sec" type="number" min="35" max="55" value="{{ hub_defaults.target_duration_sec }}">
+        </div>
+        <div class="field">
+          <label for="tone">Tom</label>
+          <select id="tone" name="tone">
+            <option value="intrigante_direto" selected>Intrigante direto</option>
+            <option value="surpresa_cientifica">Surpresa científica</option>
+            <option value="mito_vs_realidade">Mito vs realidade</option>
+            <option value="urgente_curioso">Urgente curioso</option>
+            <option value="narrativo_misterioso">Narrativo misterioso</option>
+            <option value="lista_viral">Lista viral</option>
+          </select>
+        </div>
+        <div class="field" data-mode-section="theme title">
+          <label for="requested_angle">Ângulo</label>
+          <select id="requested_angle" name="requested_angle">
+            <option value="auto" selected>Automático</option>
+            <option value="habilidade biologica impossivel">Habilidade biológica impossível</option>
+            <option value="mecanismo oculto">Mecanismo oculto</option>
+            <option value="comparacao inesperada">Comparação inesperada</option>
+            <option value="mito vs realidade">Mito vs realidade</option>
+            <option value="erro comum">Erro comum</option>
+            <option value="ranking/lista">Ranking ou lista</option>
+          </select>
+        </div>
+        <div class="field wide" data-mode-section="theme title">
+          <label for="custom_angle">Ângulo customizado</label>
+          <input id="custom_angle" name="custom_angle" placeholder="Opcional; substitui o seletor.">
+        </div>
+        <button type="submit">Criar job</button>
+      </form>
+    </section>
+
+    <section class="panel filters-panel">
+      <div class="section-heading">
+        <div>
+          <p class="eyebrow">Busca</p>
+          <h3>Filtrar fila</h3>
+        </div>
+        <p class="section-note">Isole aprovação, programação ou falhas.</p>
+      </div>
+      <form class="filters-grid" hx-get="/jobs" hx-target="#jobs-table" hx-trigger="change, keyup delay:300ms">
+        <input type="hidden" name="niche" value="curiosidades">
+        <input type="hidden" name="page" value="1">
+        <input type="hidden" name="per_page" value="{{ pagination.per_page }}">
+        <div class="field">
+          <label for="status">Status</label>
+          <select id="status" name="status">
+            <option value="">Todos</option>
+            {% for value in ["queued","running","script_quality_failed","scene_plan_quality_failed","asset_quality_failed","subtitle_quality_failed","render_quality_failed","monetization_review","blocked_for_monetization","ready_for_upload","approved_for_publish","published","approved","rejected","failed"] %}
+            <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ job_status_label(value) }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field wide">
+          <label for="search">Busca</label>
+          <input id="search" name="search" value="{{ filters.search }}" placeholder="Tema, título ou job_id">
+        </div>
+        <div class="field">
+          <label for="fallback">Fallback</label>
+          <select id="fallback" name="fallback">
+            <option value="">Todos</option>
+            <option value="yes" {% if filters.fallback == "yes" %}selected{% endif %}>Com fallback</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="review">Review</label>
+          <select id="review" name="review">
+            <option value="">Todos</option>
+            <option value="approved" {% if filters.review == "approved" %}selected{% endif %}>Aprovado</option>
+            <option value="rejected" {% if filters.review == "rejected" %}selected{% endif %}>Rejeitado</option>
+          </select>
+        </div>
+      </form>
+    </section>
+  </aside>
+
+  <section class="panel queue-panel">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Fila de decisão</p>
+        <h3>Próximas ações</h3>
+      </div>
+      <p class="section-note">Abra o job que precisa de revisão, aprovação ou programação.</p>
+    </div>
+    <div id="jobs-table" hx-get="/jobs?{{ pagination.current_query }}" hx-trigger="load, every 5s">
+      {% include "jobs_table.html" %}
+    </div>
+  </section>
 </section>
 
 <section id="publication-hub" hx-get="/publication-hub" hx-trigger="load, every 15s" hx-swap="outerHTML">
   <section class="panel">
     <p>Carregando centro de publicação...</p>
   </section>
-</section>
-
-<section class="panel create-panel">
-  <div class="section-heading">
-    <div>
-      <p class="eyebrow">Novo vídeo</p>
-      <h3>Criar job</h3>
-    </div>
-    <p class="section-note">Vazio = tendência real.</p>
-  </div>
-  <form method="post" action="/jobs" class="job-form">
-    <input type="hidden" name="niche_id" value="{{ hub_defaults.niche_id }}">
-    <div class="field">
-      <label for="input_mode">Entrada</label>
-      <select id="input_mode" name="input_mode">
-        <option value="theme" selected>Tema</option>
-        <option value="title">Título completo</option>
-      </select>
-    </div>
-    <div class="field wide">
-      <label for="seed_theme">Tema ou título</label>
-      <input id="seed_theme" name="seed_theme" value="{{ hub_defaults.seed_theme }}" placeholder="Ex.: Danakil, polvos, cafeína. Vazio = pesquisar tendências reais.">
-    </div>
-    <div class="field">
-      <label for="target_duration_sec">Duração</label>
-      <input id="target_duration_sec" name="target_duration_sec" type="number" min="35" max="55" value="{{ hub_defaults.target_duration_sec }}">
-    </div>
-    <div class="field">
-      <label for="tone">Tom</label>
-      <select id="tone" name="tone">
-        <option value="intrigante_direto" selected>Intrigante direto</option>
-        <option value="surpresa_cientifica">Surpresa científica</option>
-        <option value="mito_vs_realidade">Mito vs realidade</option>
-        <option value="urgente_curioso">Urgente curioso</option>
-        <option value="narrativo_misterioso">Narrativo misterioso</option>
-        <option value="lista_viral">Lista viral</option>
-      </select>
-    </div>
-    <div class="field">
-      <label for="requested_angle">Ângulo</label>
-      <select id="requested_angle" name="requested_angle">
-        <option value="auto" selected>Automático</option>
-        <option value="habilidade biologica impossivel">Habilidade biológica impossível</option>
-        <option value="mecanismo oculto">Mecanismo oculto</option>
-        <option value="comparacao inesperada">Comparação inesperada</option>
-        <option value="mito vs realidade">Mito vs realidade</option>
-        <option value="erro comum">Erro comum</option>
-        <option value="ranking/lista">Ranking ou lista</option>
-      </select>
-    </div>
-    <div class="field wide">
-      <label for="custom_angle">Ângulo customizado</label>
-      <input id="custom_angle" name="custom_angle" placeholder="Opcional; se preencher, substitui o seletor.">
-    </div>
-    <button type="submit">Criar job</button>
-  </form>
-</section>
-
-<section class="panel filters-panel">
-  <div class="section-heading">
-    <div>
-      <p class="eyebrow">Busca</p>
-      <h3>Filtrar jobs</h3>
-    </div>
-    <p class="section-note">Ache rápido o que falta aprovar ou programar.</p>
-  </div>
-  <form class="filters-grid" hx-get="/jobs" hx-target="#jobs-table" hx-trigger="change, keyup delay:300ms">
-    <input type="hidden" name="niche" value="curiosidades">
-    <input type="hidden" name="page" value="1">
-    <input type="hidden" name="per_page" value="{{ pagination.per_page }}">
-    <div class="field">
-      <label for="status">Status</label>
-      <select id="status" name="status">
-        <option value="">Todos</option>
-        {% for value in ["queued","running","script_quality_failed","scene_plan_quality_failed","asset_quality_failed","subtitle_quality_failed","render_quality_failed","monetization_review","blocked_for_monetization","ready_for_upload","approved_for_publish","published","approved","rejected","failed"] %}
-        <option value="{{ value }}" {% if filters.status == value %}selected{% endif %}>{{ job_status_label(value) }}</option>
-        {% endfor %}
-      </select>
-    </div>
-    <div class="field wide">
-      <label for="search">Busca</label>
-      <input id="search" name="search" value="{{ filters.search }}" placeholder="Tema, título ou job_id">
-    </div>
-    <div class="field">
-      <label for="fallback">Fallback</label>
-      <select id="fallback" name="fallback">
-        <option value="">Todos</option>
-        <option value="yes" {% if filters.fallback == "yes" %}selected{% endif %}>Com fallback</option>
-      </select>
-    </div>
-    <div class="field">
-      <label for="review">Review</label>
-      <select id="review" name="review">
-        <option value="">Todos</option>
-        <option value="approved" {% if filters.review == "approved" %}selected{% endif %}>Aprovado</option>
-        <option value="rejected" {% if filters.review == "rejected" %}selected{% endif %}>Rejeitado</option>
-      </select>
-    </div>
-  </form>
-</section>
-
-<section class="panel">
-  <div id="jobs-table" hx-get="/jobs?{{ pagination.current_query }}" hx-trigger="load, every 5s">
-    {% include "jobs_table.html" %}
-  </div>
 </section>
 
 <section class="panel hub-settings-panel">
@@ -141,4 +170,20 @@
     </form>
   </details>
 </section>
+<script>
+  (() => {
+    const mode = document.querySelector("#input_mode");
+    if (!mode) return;
+    const sync = () => {
+      document.querySelectorAll("[data-mode-section]").forEach((item) => {
+        item.classList.toggle("hidden", !item.dataset.modeSection.split(" ").includes(mode.value));
+      });
+      document.querySelectorAll("[data-mode-help]").forEach((item) => {
+        item.classList.toggle("hidden", item.dataset.modeHelp !== mode.value);
+      });
+    };
+    mode.addEventListener("change", sync);
+    sync();
+  })();
+</script>
 {% endblock %}

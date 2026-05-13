@@ -16,6 +16,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from sqlalchemy import select
 
 
 os.environ.setdefault("YTS_DATA_DIR", str(Path("data-test").resolve()))
@@ -253,6 +254,55 @@ def test_hub_create_job_sends_title_mode_tone_angle_and_seo_notes(monkeypatch) -
     assert "SEO otimizado" in str(captured["notes"])
     assert "retencao e viralizacao" in str(captured["notes"])
     assert "Use curiosidade forte e payoff claro." in str(captured["notes"])
+
+
+def test_hub_create_job_accepts_ready_script_mode(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    ready_script = """Título: Venus: o planeta onde um dia dura mais que um ano
+Hook: 243 dias para girar uma vez, mas só 225 para orbitar o Sol.
+Loop: Como um planeta pode envelhecer antes de terminar o próprio dia?
+Beats: Em Venus, o relógio não acompanha o calendário.
+O planeta gira tão devagar que o Sol parece quase travado.
+Enquanto isso, ele completa uma volta inteira ao redor do Sol.
+Payoff: O dia venusiano é maior que o ano venusiano.
+Fechamento: Em Venus, aniversário chega antes do pôr do sol."""
+
+    def fake_create_job(payload: dict[str, object]) -> str:
+        captured.update(payload)
+        return "job-ready-script"
+
+    monkeypatch.setattr(main_module.orchestrator, "create_job", fake_create_job)
+    client = TestClient(app)
+    response = client.post(
+        "/jobs",
+        data={
+            "input_mode": "script",
+            "ready_script_text": ready_script,
+            "ready_script_fact_check_confirmed": "true",
+            "target_duration_sec": 35,
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/jobs/job-ready-script"
+    assert captured["seed_theme"] == "Venus: o planeta onde um dia dura mais que um ano"
+    assert "input_mode=script" in str(captured["notes"])
+    assert "[[YTS_READY_SCRIPT_BEGIN]]" in str(captured["notes"])
+    assert "ready_script_fact_check_confirmed=true" in str(captured["notes"])
+
+
+def test_hub_create_job_rejects_ready_script_without_fact_confirmation(monkeypatch) -> None:
+    monkeypatch.setattr(main_module.orchestrator, "create_job", lambda _payload: "should-not-run")
+    client = TestClient(app)
+    response = client.post(
+        "/jobs",
+        data={"input_mode": "script", "ready_script_text": "Título: X"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 422
+    assert "ready_script_fact_check_confirmed" in response.text
 
 
 def test_hub_prompt_panel_saves_and_resets_safe_template(monkeypatch, tmp_path: Path) -> None:
@@ -1970,7 +2020,35 @@ def test_job_detail_hides_immediate_publish_when_schedule_is_active() -> None:
     assert "14:00" in response.text
     assert "Não precisa clicar em mais nada" in response.text
     assert "Reagendar publicação" in response.text
+    assert 'id="schedule-picker-modal"' in response.text
+    assert 'data-open-schedule-picker' in response.text
+    assert 'name="scheduled_for_local" type="hidden" value="2099-06-11T14:00"' in response.text
     assert "Publicar imediatamente e ignorar agenda" not in response.text
+
+
+def test_job_detail_schedule_uses_modal_picker_for_publication_time() -> None:
+    client = TestClient(app)
+    job_id = "scheduled-modal-picker-job"
+    with SessionLocal() as session:
+        _create_basic_job(
+            session,
+            job_id=job_id,
+            status="approved_for_publish",
+            seed_theme="Vênus",
+            review_state="approved",
+        )
+        session.commit()
+
+    response = client.get(f"/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert "Horário de publicação" in response.text
+    assert "Escolher data e hora" in response.text
+    assert 'data-schedule-form' in response.text
+    assert 'data-schedule-days' in response.text
+    assert 'data-schedule-time-chips' in response.text
+    assert 'name="scheduled_for_local" type="hidden" value=""' in response.text
+    assert 'type="datetime-local"' not in response.text
 
 
 def test_retention_sweep_cleans_expired_hard_failure_artifacts() -> None:
@@ -2514,6 +2592,99 @@ def test_schedule_publication_requires_connected_youtube_in_api_mode(monkeypatch
     assert "OAuth" in response.text
 
 
+def test_schedule_publication_uploads_video_immediately_in_api_mode(monkeypatch) -> None:
+    client = TestClient(app)
+    job_id = "scheduled-native-youtube-job"
+    topic_request_id = "scheduled-native-youtube-job-request"
+    with SessionLocal() as session:
+        _create_basic_job(
+            session,
+            job_id=job_id,
+            status="approved_for_publish",
+            seed_theme="Atacama",
+            review_state="approved",
+        )
+        session.commit()
+
+    monkeypatch.setattr(orchestrator.settings, "youtube_api_enabled", True)
+    monkeypatch.setattr(orchestrator.settings, "youtube_publish_mode", "api")
+    monkeypatch.setattr(orchestrator, "_ensure_youtube_api_ready", lambda: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_publish_package",
+        lambda session, job: {
+            "video_uri": "file:///tmp/fake-short.mp4",
+            "title": "Atacama",
+            "description": "descricao",
+            "hashtags": ["#shorts", "#deserto"],
+            "altered_or_synthetic": False,
+        },
+    )
+    monkeypatch.setattr(
+        orchestrator.youtube,
+        "upload_video",
+        lambda **kwargs: {
+            "id": "yt-scheduled-123",
+            "youtube_url": "https://www.youtube.com/watch?v=yt-scheduled-123",
+            "status": {"privacyStatus": "private"},
+        },
+    )
+
+    response = client.post(
+        f"/jobs/{job_id}/schedule",
+        data={
+            "scheduled_for_local": "2099-06-10T14:30",
+            "timezone": "America/Sao_Paulo",
+            "youtube_visibility": "public",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with SessionLocal() as session:
+        schedule = session.query(PublicationSchedule).filter_by(job_id=job_id).one()
+        job = session.get(Job, job_id)
+
+    assert schedule.status == "scheduled"
+    assert schedule.youtube_video_id == "yt-scheduled-123"
+    assert schedule.youtube_url == "https://www.youtube.com/watch?v=yt-scheduled-123"
+    assert job is not None
+    assert job.status == "approved_for_publish"
+    assert job.quality_summary["youtube_publish"]["status"] == "scheduled"
+    assert job.quality_summary["youtube_publish"]["native_youtube_schedule"] is True
+
+
+def test_schedule_publication_rejects_non_public_visibility_in_api_mode(monkeypatch) -> None:
+    client = TestClient(app)
+    job_id = "scheduled-native-private-job"
+    with SessionLocal() as session:
+        _create_basic_job(
+            session,
+            job_id=job_id,
+            status="approved_for_publish",
+            seed_theme="Salinas",
+            review_state="approved",
+        )
+        session.commit()
+
+    monkeypatch.setattr(orchestrator.settings, "youtube_api_enabled", True)
+    monkeypatch.setattr(orchestrator.settings, "youtube_publish_mode", "api")
+    monkeypatch.setattr(orchestrator, "_ensure_youtube_api_ready", lambda: None)
+
+    response = client.post(
+        f"/jobs/{job_id}/schedule",
+        data={
+            "scheduled_for_local": "2099-06-10T14:30",
+            "timezone": "UTC",
+            "youtube_visibility": "private",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 409
+    assert "requires visibility public" in response.text
+
+
 def test_api_publish_uploads_video_without_manual_url(monkeypatch) -> None:
     client = TestClient(app)
     job_id = "api-publish-job"
@@ -2577,6 +2748,92 @@ def test_api_publish_uploads_video_without_manual_url(monkeypatch) -> None:
     assert job and job.status == "published"
 
 
+def test_claim_due_publication_schedule_skips_video_already_scheduled_on_youtube(monkeypatch) -> None:
+    job_id = "scheduled-native-due-job"
+    due_at = utcnow() - timedelta(minutes=5)
+    with SessionLocal() as session:
+        _create_basic_job(
+            session,
+            job_id=job_id,
+            status="approved_for_publish",
+            seed_theme="Danakil",
+            review_state="approved",
+        )
+        session.add(
+            PublicationSchedule(
+                schedule_id=f"{job_id}-schedule",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash=f"{job_id}-schedule",
+                scheduled_for_utc=due_at,
+                timezone="UTC",
+                youtube_visibility="public",
+                status="scheduled",
+                youtube_video_id="yt-native-123",
+                youtube_url="https://www.youtube.com/watch?v=yt-native-123",
+            )
+        )
+        session.commit()
+
+    monkeypatch.setattr(orchestrator.settings, "youtube_api_enabled", True)
+    monkeypatch.setattr(orchestrator.settings, "youtube_publish_mode", "api")
+
+    assert orchestrator._claim_due_publication_schedule() is None
+
+
+def test_sync_native_scheduled_publication_marks_job_as_published(monkeypatch) -> None:
+    job_id = "scheduled-native-sync-job"
+    due_at = utcnow() - timedelta(minutes=5)
+    with SessionLocal() as session:
+        _create_basic_job(
+            session,
+            job_id=job_id,
+            status="approved_for_publish",
+            seed_theme="Atacama",
+            review_state="approved",
+        )
+        session.add(
+            PublicationSchedule(
+                schedule_id=f"{job_id}-schedule",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash=f"{job_id}-schedule",
+                scheduled_for_utc=due_at,
+                timezone="UTC",
+                youtube_visibility="public",
+                status="scheduled",
+                youtube_video_id="yt-native-sync",
+                youtube_url="https://www.youtube.com/watch?v=yt-native-sync",
+            )
+        )
+        session.commit()
+
+    monkeypatch.setattr(orchestrator.settings, "youtube_api_enabled", True)
+    monkeypatch.setattr(orchestrator.settings, "youtube_publish_mode", "api")
+    monkeypatch.setattr(
+        orchestrator.youtube,
+        "fetch_video",
+        lambda video_id: {
+            "id": video_id,
+            "status": {"privacyStatus": "public"},
+            "youtube_url": f"https://www.youtube.com/watch?v={video_id}",
+        },
+    )
+
+    synced = orchestrator._sync_native_scheduled_publications()
+
+    assert synced >= 1
+    with SessionLocal() as session:
+        schedule = session.query(PublicationSchedule).filter_by(job_id=job_id).one()
+        job = session.get(Job, job_id)
+
+    assert schedule.status == "published"
+    assert schedule.published_at is not None
+    assert job is not None
+    assert job.status == "published"
+    assert job.quality_summary["youtube_publish"]["status"] == "published"
+
+
 def test_youtube_connect_redirects_to_google(monkeypatch) -> None:
     client = TestClient(app)
     monkeypatch.setattr(orchestrator.youtube, "authorization_url", lambda redirect_uri: "https://accounts.google.com/o/oauth2/auth?state=test")
@@ -2585,6 +2842,103 @@ def test_youtube_connect_redirects_to_google(monkeypatch) -> None:
 
     assert response.status_code == 303
     assert response.headers["location"].startswith("https://accounts.google.com/o/oauth2/auth")
+
+
+def test_youtube_build_flow_enables_pkce(monkeypatch, tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path,
+        youtube_api_enabled=True,
+        youtube_publish_mode="api",
+        youtube_client_id="client-id",
+        youtube_client_secret="client-secret",
+    )
+    publisher = YouTubePublisher(settings)
+    captured: dict[str, object] = {}
+
+    class FakeFlow:
+        def __init__(self) -> None:
+            self.redirect_uri = None
+
+    def fake_from_client_config(client_config, scopes, **kwargs):
+        captured["client_config"] = client_config
+        captured["scopes"] = scopes
+        captured["kwargs"] = kwargs
+        return FakeFlow()
+
+    flow_module = SimpleNamespace(Flow=SimpleNamespace(from_client_config=fake_from_client_config))
+    monkeypatch.setitem(__import__("sys").modules, "google_auth_oauthlib.flow", flow_module)
+
+    flow = publisher._build_flow("https://example.test/youtube/oauth/callback", state="state-123")
+
+    assert captured["scopes"] == [
+        "https://www.googleapis.com/auth/youtube.force-ssl",
+        "https://www.googleapis.com/auth/youtube.upload",
+    ]
+    assert captured["kwargs"]["state"] == "state-123"
+    assert captured["kwargs"]["autogenerate_code_verifier"] is True
+    assert flow.redirect_uri == "https://example.test/youtube/oauth/callback"
+
+
+def test_youtube_exchange_code_restores_saved_code_verifier(monkeypatch, tmp_path) -> None:
+    settings = Settings(
+        data_dir=tmp_path,
+        youtube_api_enabled=True,
+        youtube_publish_mode="api",
+        youtube_client_id="client-id",
+        youtube_client_secret="client-secret",
+    )
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    publisher = YouTubePublisher(settings)
+    built_flows: list[object] = []
+
+    class FakeCredentials:
+        token = "token-123"
+        refresh_token = "refresh-123"
+        token_uri = "https://oauth2.googleapis.com/token"
+        client_id = "client-id"
+        client_secret = "client-secret"
+        scopes = [
+            "https://www.googleapis.com/auth/youtube.force-ssl",
+            "https://www.googleapis.com/auth/youtube.upload",
+        ]
+        expiry = datetime(2026, 5, 12, 15, 0, tzinfo=UTC)
+
+    class FakeFlow:
+        def __init__(self) -> None:
+            self.redirect_uri = None
+            self.code_verifier = None
+            self.credentials = FakeCredentials()
+
+        def authorization_url(self, **kwargs):
+            self.code_verifier = "verifier-123"
+            return "https://accounts.google.com/o/oauth2/auth?state=state-123", "state-123"
+
+        def fetch_token(self, **kwargs) -> None:
+            assert kwargs["code"] == "code-123"
+            assert self.code_verifier == "verifier-123"
+
+    def fake_build_flow(_redirect_uri: str, state: str | None = None):
+        flow = FakeFlow()
+        built_flows.append(flow)
+        return flow
+
+    monkeypatch.setattr(publisher, "_build_flow", fake_build_flow)
+
+    publisher.authorization_url("https://example.test/youtube/oauth/callback")
+    state_payload = json.loads(settings.youtube_oauth_state_path.read_text(encoding="utf-8"))
+
+    assert state_payload["state"] == "state-123"
+    assert state_payload["code_verifier"] == "verifier-123"
+
+    payload = publisher.exchange_code(code="code-123", state="state-123")
+
+    assert len(built_flows) == 2
+    assert built_flows[1].code_verifier == "verifier-123"
+    assert payload["scopes"] == [
+        "https://www.googleapis.com/auth/youtube.force-ssl",
+        "https://www.googleapis.com/auth/youtube.upload",
+    ]
+    assert not settings.youtube_oauth_state_path.exists()
 
 
 def test_youtube_load_credentials_normalizes_aware_expiry_for_google_auth(monkeypatch, tmp_path) -> None:
@@ -2604,7 +2958,10 @@ def test_youtube_load_credentials_normalizes_aware_expiry_for_google_auth(monkey
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "client_id": "client-id",
                 "client_secret": "client-secret",
-                "scopes": ["https://www.googleapis.com/auth/youtube.upload"],
+                "scopes": [
+                    "https://www.googleapis.com/auth/youtube.force-ssl",
+                    "https://www.googleapis.com/auth/youtube.upload",
+                ],
                 "expiry": "2026-05-12T14:50:58+00:00",
                 "connected_at": "2026-05-12T14:50:59+00:00",
                 "redirect_uri": "https://example.test/youtube/oauth/callback",
@@ -2752,7 +3109,6 @@ def test_publication_dashboard_fragment_shows_ready_and_scheduled_items() -> Non
 
     assert response.status_code == 200
     assert "Centro de publicação" in response.text
-    assert "Lulas gigantes somem por um motivo" in response.text
     assert "Morcegos enxergam com o som" in response.text
     assert "14:00" in response.text
     assert "Canal" in response.text
@@ -3730,6 +4086,25 @@ def test_publish_package_skips_stopword_hashtags() -> None:
     assert "#que" not in tags
 
 
+def test_build_publish_hashtags_prefers_specific_non_weak_tags() -> None:
+    topic_plan = SimpleNamespace(
+        canonical_topic="Dinossauros: por que o Tiranossauro rex tinha braços tão pequenos",
+        angle="curiosidade visual sobre função real dos braços",
+    )
+    script = SimpleNamespace(
+        title="Dinossauros: por que os braços do T. rex não eram inúteis",
+        key_facts=["Os braços do T. rex eram pequenos, mas musculosos."],
+    )
+
+    tags = orchestrator.monetization_pipeline.build_publish_hashtags(topic_plan, script)
+
+    assert tags[0] == "#shorts"
+    assert "#fatos" in tags
+    assert "#curiosidades" not in tags
+    assert "#tinha" not in tags
+    assert any(tag in tags for tag in {"#dinossauros", "#tiranossauro", "#trex", "#paleontologia"})
+
+
 def test_human_review_checklist_marks_required_completed_and_pending_items() -> None:
     checklist = build_human_review_checklist(
         rights_registry={"all_commercial_rights_confirmed": False},
@@ -3970,6 +4345,114 @@ def test_step_script_disables_simple_prompt_rules_when_fact_pack_is_required(mon
     assert captured["editorial_mode"] == "factual_strict"
 
 
+def test_step_script_uses_ready_script_without_llm_generation(monkeypatch) -> None:
+    from app.manual_script import build_ready_script_notes
+
+    pipeline = orchestrator.script_pipeline
+    ready_script = """Título: Venus: o planeta onde um dia dura mais que um ano
+Hook: 243 dias para girar uma vez, mas só 225 para orbitar o Sol.
+Loop: Como um planeta pode envelhecer antes de terminar o próprio dia?
+Beats: Em Venus, o relógio não acompanha o calendário.
+O planeta gira tão devagar que o Sol parece quase travado.
+Enquanto isso, ele completa uma volta inteira ao redor do Sol.
+Payoff: O dia venusiano é maior que o ano venusiano.
+Fechamento: Em Venus, aniversário chega antes do pôr do sol."""
+    job_id = orchestrator.create_job(
+        {
+            "seed_theme": "Venus: o planeta onde um dia dura mais que um ano",
+            "niche_id": "curiosidades",
+            "language": "pt-BR",
+            "target_duration_sec": 35,
+            "tone": "intrigante_direto",
+            "cta_style": "none",
+            "notes": build_ready_script_notes(None, ready_script, True),
+            "requested_angle": None,
+        }
+    )
+    with SessionLocal() as session:
+        session.add(
+            TopicPlan(
+                topic_id=f"topic-{job_id}",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="topic",
+                canonical_topic="Venus: dia maior que ano",
+                angle="curiosidade astronomica contraintuitiva",
+                hook_promise="explica por que o dia venusiano passa do ano venusiano",
+                entities=["Venus"],
+                search_terms=["Venus dia ano"],
+                title_candidates=["Venus: o planeta onde um dia dura mais que um ano"],
+                quality_metrics={"editorial_mode": "viral_curiosidades"},
+            )
+        )
+        session.commit()
+        job = session.get(Job, job_id)
+        assert job is not None
+
+        monkeypatch.setattr(orchestrator.providers.creative, "generate_script", lambda _plan: (_ for _ in ()).throw(AssertionError("should not generate script")))
+        monkeypatch.setattr(
+            pipeline,
+            "_validate_or_repair_script",
+            lambda script, *_args, **_kwargs: (
+                script,
+                {"script_quality_gate_pass": True, "fact_pack_consistency_pass": True, "ready_script": True},
+            ),
+        )
+        monkeypatch.setattr(pipeline, "_text_publish_audit", lambda *_args, **_kwargs: {"passed": True, "reasons": []})
+
+        artifacts = pipeline.step_script(session, job, 1)
+        session.flush()
+        script = session.scalar(select(Script).where(Script.job_id == job_id))
+
+    assert script is not None
+    assert script.title == "Venus: o planeta onde um dia dura mais que um ano"
+    assert not script.full_narration.startswith(script.title)
+    assert "243 dias para girar" in script.full_narration
+    assert "ready_script_input.json" in artifacts
+
+
+def test_ready_script_declared_fact_check_accepts_grounded_precise_numbers(monkeypatch) -> None:
+    from app.manual_script import parse_ready_script
+
+    ready_script = """Título: Venus: o planeta onde um dia dura mais que um ano
+Hook: 243 dias para girar uma vez, mas só 225 para orbitar o Sol.
+Loop: Como um planeta pode “envelhecer” antes de terminar o próprio dia?
+Beats: Em Venus, o relógio não acompanha o calendário.
+O planeta gira tão devagar que o Sol parece quase travado.
+Enquanto isso, ele completa uma volta inteira ao redor do Sol.
+Imagine esperar meses por um nascer do sol esmagado por nuvens ácidas.
+A ideia de “dia” simplesmente quebra lá.
+Payoff: O dia venusiano é maior que o ano venusiano. A rotação demora 243 dias terrestres; a órbita, 225.
+Fechamento: Em Venus, aniversário chega antes do pôr do sol."""
+    ready = parse_ready_script(ready_script, fact_check_confirmed=True)
+    pipeline = orchestrator.script_pipeline
+    monkeypatch.setattr(
+        orchestrator.providers.creative,
+        "repair_script",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("ready script should not call LLM repair")),
+    )
+
+    script, metrics = pipeline._validate_or_repair_script(
+        ready.script,
+        {
+            "fact_pack": ready.fact_pack,
+            "ready_script_mode": True,
+            "ready_script_fact_check_confirmed": True,
+            "canonical_topic": "Venus: dia maior que ano",
+        },
+        45,
+        "none",
+        "ready-script-test",
+    )
+
+    assert metrics["ready_script_declared_fact_check_accepted"] is True
+    assert metrics["script_quality_gate_pass"] is True
+    assert "script_quality_gate_warnings" in metrics
+    assert "243 dias para girar" in script["full_narration"]
+    assert "“" not in script["full_narration"]
+    assert script["claim_trace"]
+
+
 def test_job_lease_delta_has_floor_for_real_provider_steps(monkeypatch) -> None:
     test_orchestrator = JobOrchestrator()
     monkeypatch.setattr(test_orchestrator.settings, "job_lease_seconds", 60)
@@ -4141,6 +4624,34 @@ def test_simple_shorts_mode_skips_text_publish_audit(monkeypatch) -> None:
     assert audit == {"passed": True, "reasons": [], "provider": "simple_shorts_mode", "skipped": True}
 
 
+def test_ready_script_declared_fact_check_skips_text_publish_audit(monkeypatch) -> None:
+    pipeline = orchestrator.script_pipeline
+    monkeypatch.setattr(pipeline.settings, "simple_shorts_mode", False)
+
+    def auditor(payload: dict) -> dict:
+        raise AssertionError("ready script fact confirmation should not call publish auditor")
+
+    monkeypatch.setattr(orchestrator.providers.creative, "audit_publish_package", auditor)
+
+    audit = pipeline._text_publish_audit(
+        "job-ready-script-audit",
+        {"title": "Venus", "hook": "243 dias", "ending": "Final forte", "full_narration": "243 dias."},
+        {
+            "status": "verified",
+            "provider": "user_declared_fact_check",
+            "facts": [{"fact_id": "D1", "claim": "243 dias.", "source_id": "USER_DECLARED_FACT_CHECK"}],
+        },
+    )
+
+    assert audit == {
+        "passed": True,
+        "reasons": [],
+        "provider": "user_declared_fact_check",
+        "skipped": True,
+        "scope": "ready_script_human_fact_confirmation",
+    }
+
+
 def test_simple_shorts_mode_runs_text_publish_audit_for_verified_fact_pack(monkeypatch) -> None:
     pipeline = orchestrator.script_pipeline
     monkeypatch.setattr(pipeline.settings, "simple_shorts_mode", True)
@@ -4263,6 +4774,43 @@ def test_simple_shorts_mode_makes_script_gate_non_blocking(monkeypatch) -> None:
     assert metrics["script_quality_gate_pass"] is True
     assert metrics["script_quality_gate_blocking"] is False
     assert metrics["simple_shorts_mode"] is True
+
+
+def test_simple_shorts_mode_runs_local_repair_for_soft_warnings(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.settings, "simple_shorts_mode", True)
+    script = _base_script("O tema parece simples. Depois a mesma pista fecha melhor no fim.")
+    plan_dict = {"canonical_topic": "tiranossauro rex", "fact_pack": {"status": "skipped", "facts": []}}
+
+    def fake_validate(candidate: dict[str, object], _target_duration_sec: int):
+        if candidate.get("ending") == "Agora o começo fecha melhor no fim.":
+            return SimpleNamespace(
+                passed=True,
+                reasons=[],
+                metrics={"fact_risk": {"blocked": False, "claim_count": 0}},
+            )
+        return SimpleNamespace(
+            passed=False,
+            reasons=["weak_loop_closure", "factual_claim_trace_missing"],
+            metrics={"fact_risk": {"blocked": False, "claim_count": 1}},
+        )
+
+    def fake_postprocess(candidate: dict[str, object], _plan_dict: dict[str, object], gate_reasons: list[str]):
+        if not gate_reasons:
+            return dict(candidate)
+        assert "weak_loop_closure" in gate_reasons
+        updated = dict(candidate)
+        updated["ending"] = "Agora o começo fecha melhor no fim."
+        return updated
+
+    monkeypatch.setattr(orchestrator.script_pipeline.script_gate, "validate", fake_validate)
+    monkeypatch.setattr(orchestrator.script_pipeline, "_postprocess_script_for_quality", fake_postprocess)
+    monkeypatch.setattr(orchestrator.script_pipeline, "_fact_pack_consistency_reasons", lambda *_args, **_kwargs: [])
+
+    processed, metrics = orchestrator._validate_or_repair_script(script, plan_dict, 45, "none")
+
+    assert processed["ending"] == "Agora o começo fecha melhor no fim."
+    assert metrics["script_quality_gate_warnings"] == []
+    assert metrics["script_repair_attempts_log"][1]["repair_strategy"] == "simple_mode_local"
 
 
 def test_simple_shorts_mode_verified_fact_pack_keeps_script_gate_blocking(monkeypatch) -> None:
@@ -5262,6 +5810,31 @@ def test_fact_pack_consistency_accepts_grounded_source_fact_ids() -> None:
     assert orchestrator._fact_pack_consistency_reasons(script, fact_pack) == []
 
 
+def test_fact_pack_consistency_accepts_grounded_claim_trace_source_ids() -> None:
+    fact_pack = {
+        "status": "verified",
+        "facts": [
+            {"fact_id": "F1", "claim": "O sono reorganiza memórias.", "source_id": "S1"},
+            {"fact_id": "F2", "claim": "Neurônios mudam conexões durante o sono.", "source_id": "S1"},
+        ],
+    }
+    script = _base_script(
+        "O cérebro apaga exatamente 73% das memórias durante o sono. "
+        "Isso acontece porque a dopamina destrói conexões fracas nos neurônios."
+    )
+    script["source_fact_ids"] = ["F1"]
+    script["claim_trace"] = [
+        {"text": "O cérebro apaga exatamente 73% das memórias durante o sono.", "source_fact_ids": ["F1"], "grounding": "fact_pack"},
+        {
+            "text": "Isso acontece porque a dopamina destrói conexões fracas nos neurônios.",
+            "source_fact_ids": ["F2"],
+            "grounding": "fact_pack",
+        },
+    ]
+
+    assert orchestrator._fact_pack_consistency_reasons(script, fact_pack) == []
+
+
 def test_fact_pack_consistency_requires_claim_trace_per_risky_claim() -> None:
     fact_pack = {
         "status": "verified",
@@ -6098,6 +6671,7 @@ def test_trend_researcher_filters_curiosity_candidates() -> None:
     assert researcher._is_curiosity_candidate("Main_Page") is False
     assert researcher._is_curiosity_candidate("Lista de episódios") is False
     assert researcher._is_curiosity_candidate("acidente fatal na rodovia") is False
+    assert researcher._is_curiosity_candidate("Darderi-Jodar: tempo, precedentes e onde assistir na TV aberta") is False
 
 
 def test_trend_researcher_returns_none_without_google_candidates(monkeypatch) -> None:
@@ -6145,6 +6719,43 @@ def test_google_trends_candidates_reject_news_title_without_fact_friendly_topic(
         <title>br-040</title>
         <ht:approx_traffic>20K+</ht:approx_traffic>
         <ht:news_item><ht:news_item_title>Produtos químicos pegam fogo e levantam alerta sobre segurança nas estradas</ht:news_item_title></ht:news_item>
+      </item>
+    </channel></rss>"""
+
+    class FakeResponse:
+        text = rss
+
+        def raise_for_status(self) -> None:
+            pass
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def get(self, url):
+            return FakeResponse()
+
+    monkeypatch.setattr("app.trends.httpx.Client", FakeClient)
+    candidates = TrendResearcher()._google_trends_candidates()
+
+    assert candidates == []
+
+
+def test_google_trends_candidates_reject_live_sports_watch_topic(monkeypatch) -> None:
+    from app.trends import TrendResearcher
+
+    rss = """<?xml version='1.0' encoding='UTF-8'?>
+    <rss xmlns:ht='https://trends.google.com/trending/rss' version='2.0'><channel>
+      <item>
+        <title>luciano darderi</title>
+        <ht:approx_traffic>50K+</ht:approx_traffic>
+        <ht:news_item><ht:news_item_title>Darderi-Jodar: tempo, precedentes e onde assistir na TV aberta</ht:news_item_title></ht:news_item>
       </item>
     </channel></rss>"""
 

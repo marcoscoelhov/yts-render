@@ -8,22 +8,25 @@
     <script src="/static/htmx.min.js"></script>
   </head>
   <body>
-    <header class="topbar">
-      <div>
-        <p class="eyebrow">Hub de operação</p>
-        <h1><a href="/">{{ settings.app_name }}</a></h1>
-        <nav class="topnav">
+    <div class="app-frame">
+      <header class="topbar app-sidebar">
+        <div class="brand-block">
+          <p class="eyebrow">Console operacional</p>
+          <h1><a href="/">{{ settings.app_name }}</a></h1>
+          <p class="sidebar-copy">Fila, revisão humana e publicação em uma superfície.</p>
+        </div>
+        <nav class="topnav" aria-label="Navegação principal">
           <a href="/">Fila de jobs</a>
           <a href="/calendar">Agenda</a>
         </nav>
-      </div>
-      <div class="tailnet-box">
-        <span>App local: {{ settings.app_host }}:{{ settings.app_port }}</span>
-        <span>Tailnet: https://{{ settings.tailscale_hostname }}.{{ settings.tailnet_domain }}</span>
-      </div>
-    </header>
-    <main class="page-shell">
-      {% block content %}{% endblock %}
-    </main>
+        <div class="tailnet-box">
+          <span>Local: {{ settings.app_host }}:{{ settings.app_port }}</span>
+          <span>Tailnet: https://{{ settings.tailscale_hostname }}.{{ settings.tailnet_domain }}</span>
+        </div>
+      </header>
+      <main class="page-shell">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
   </body>
 </html>

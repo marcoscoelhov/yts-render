@@ -18,6 +18,7 @@ from sqlalchemy import case, func, or_, select
 
 from app.config import get_settings
 from app.db import SessionLocal, init_db
+from app.manual_script import build_ready_script_notes, parse_ready_script
 from app.models import FallbackEvent, Job, PublicationSchedule, RenderOutput, SceneAsset, Script, TopicRequest
 from app.orchestrator import FatalStepError, orchestrator
 from pydantic import ValidationError
@@ -751,13 +752,13 @@ def _trend_seed_theme(niche_id: str) -> tuple[str, str | None, str | None, dict[
 
 
 def _compose_hub_notes(input_mode: str, notes: str | None) -> str:
-    normalized_mode = "title" if input_mode == "title" else "theme"
-    mode_note = (
-        "Entrada do hub: titulo completo fornecido pelo usuario. Preserve a promessa central, "
-        "mas reescreva e otimize se necessario."
-        if normalized_mode == "title"
-        else "Entrada do hub: tema bruto fornecido pelo usuario. Transforme em pauta e titulo fortes."
-    )
+    normalized_mode = "script" if input_mode == "script" else ("title" if input_mode == "title" else "theme")
+    if normalized_mode == "title":
+        mode_note = "Entrada do hub: titulo completo fornecido pelo usuario. Preserve a promessa central, mas reescreva e otimize se necessario."
+    elif normalized_mode == "script":
+        mode_note = "Entrada do hub: roteiro pronto fornecido pelo usuario. Preserve como fonte de verdade editorial; nao gere outro roteiro."
+    else:
+        mode_note = "Entrada do hub: tema bruto fornecido pelo usuario. Transforme em pauta e titulo fortes."
     seo_note = (
         "Sempre aplicar copywriting viral e SEO otimizado para YouTube Shorts: promessa clara, "
         "palavra-chave principal no inicio quando natural, curiosidade forte, sem clickbait falso."
@@ -907,19 +908,34 @@ def create_job(
     notes: str | None = Form(default=None),
     requested_angle: str | None = Form(default=None),
     custom_angle: str | None = Form(default=None),
+    ready_script_text: str | None = Form(default=None),
+    ready_script_fact_check_confirmed: bool = Form(default=False),
 ):
     selected_angle = (custom_angle or "").strip() or (requested_angle or "").strip()
     if selected_angle == "auto":
         selected_angle = ""
     selected_niche = niche_id or HUB_DEFAULT_NICHE
     trend_notes = None
-    if seed_theme.strip():
+    normalized_mode = "script" if input_mode == "script" else ("title" if input_mode == "title" else "theme")
+    if normalized_mode == "script":
+        if not ready_script_fact_check_confirmed:
+            raise HTTPException(status_code=422, detail="ready_script_fact_check_confirmed is required for Roteiro Pronto")
+        try:
+            ready_script = parse_ready_script(ready_script_text or "", fact_check_confirmed=ready_script_fact_check_confirmed)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        selected_seed_theme = str(ready_script.script["title"]).strip()
+        combined_notes = build_ready_script_notes(notes, ready_script.raw_text, ready_script_fact_check_confirmed)
+        trend_report = None
+    elif seed_theme.strip():
         selected_seed_theme = seed_theme.strip()
         trend_report = None
     else:
         selected_seed_theme, trend_angle, trend_notes, trend_report = _trend_seed_theme(selected_niche)
         selected_angle = selected_angle or trend_angle or ""
-    combined_notes = "\n\n".join(part for part in [trend_notes, notes] if part)
+        combined_notes = "\n\n".join(part for part in [trend_notes, notes] if part)
+    if normalized_mode != "script" and seed_theme.strip():
+        combined_notes = "\n\n".join(part for part in [trend_notes, notes] if part)
     try:
         payload = TopicRequestCreate(
             seed_theme=selected_seed_theme,
@@ -928,7 +944,7 @@ def create_job(
             target_duration_sec=target_duration_sec,
             tone=tone,
             cta_style=cta_style,
-            notes=_compose_hub_notes(input_mode, combined_notes),
+            notes=_compose_hub_notes(normalized_mode, combined_notes),
             requested_angle=selected_angle or None,
         )
         job_id = orchestrator.create_job(payload.model_dump())

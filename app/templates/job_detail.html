@@ -360,21 +360,97 @@
         <p class="eyebrow">Passo 2</p>
         <h3>Agendar no YouTube</h3>
         {% if is_approved %}
-        <p class="publication-note">Escolha a data, a hora e a visibilidade. O worker publica quando o horário chegar.</p>
+        <p class="publication-note">
+          {% if youtube_integration.publish_mode == "api" %}
+          Ao salvar, o vídeo sobe agora como privado e fica programado no próprio YouTube para publicar no horário escolhido.
+          {% else %}
+          Escolha a data, a hora e a visibilidade. O worker publica quando o horário chegar.
+          {% endif %}
+        </p>
         {% if schedule_ready %}
         <div class="schedule-highlight">
           <strong>Publicação automática ativada</strong>
           <p>{{ publication_schedule_display.local_date }} às {{ publication_schedule_display.local_time }} · {{ publication_schedule_display.timezone }}</p>
-          <small>Não precisa clicar em mais nada. O worker publica automaticamente no horário salvo.</small>
+          <small>
+            {% if youtube_integration.publish_mode == "api" and publication_schedule_display.youtube_url %}
+            O vídeo já está no YouTube e programado no canal. Use o link abaixo para conferir no Studio ou na watch page.
+            {% else %}
+            Não precisa clicar em mais nada. O worker publica automaticamente no horário salvo.
+            {% endif %}
+          </small>
         </div>
         {% endif %}
         {% if publication_schedule_display and publication_schedule_display.youtube_url %}
         <p class="inline-hint">URL atual: {{ publication_schedule_display.youtube_url }}</p>
         {% endif %}
         {% if job.status != "published" %}
-        <form method="post" action="/jobs/{{ job.job_id }}/schedule" class="review-form">
+        <form method="post" action="/jobs/{{ job.job_id }}/schedule" class="review-form schedule-form" data-schedule-form>
           <label for="scheduled_for_local">Data e hora</label>
-          <input id="scheduled_for_local" name="scheduled_for_local" type="datetime-local" value="{{ publication_schedule_display.scheduled_for_local_form if publication_schedule_display else '' }}" required>
+          <input id="scheduled_for_local" name="scheduled_for_local" type="hidden" value="{{ publication_schedule_display.scheduled_for_local_form if publication_schedule_display else '' }}">
+          <button
+            type="button"
+            class="schedule-picker-trigger"
+            data-open-schedule-picker
+            aria-haspopup="dialog"
+            aria-controls="schedule-picker-modal"
+          >
+            <span class="schedule-picker-trigger-copy">
+              <strong data-schedule-picker-label>
+                {% if publication_schedule_display %}
+                {{ publication_schedule_display.local_date }} às {{ publication_schedule_display.local_time }}
+                {% else %}
+                Escolher data e hora
+                {% endif %}
+              </strong>
+              <small data-schedule-picker-helper>
+                {% if publication_schedule_display %}
+                Clique para reagendar com calendário e atalhos de horário.
+                {% else %}
+                Abra o calendário, escolha o dia e selecione um horário.
+                {% endif %}
+              </small>
+            </span>
+          </button>
+          <p class="inline-hint schedule-picker-error" data-schedule-picker-error hidden>Escolha data e hora antes de ativar a publicação.</p>
+          <dialog id="schedule-picker-modal" class="schedule-picker-modal" aria-labelledby="schedule-picker-title">
+            <div class="schedule-picker-card">
+              <div class="schedule-picker-head">
+                <div>
+                  <p class="eyebrow">Horário de publicação</p>
+                  <h4 id="schedule-picker-title">Escolha quando publicar</h4>
+                </div>
+                <button type="button" class="ghost icon-button" data-close-schedule-picker aria-label="Fechar seletor">X</button>
+              </div>
+              <div class="schedule-picker-monthbar">
+                <button type="button" class="ghost" data-schedule-prev-month>Mês anterior</button>
+                <strong data-schedule-current-month></strong>
+                <button type="button" class="ghost" data-schedule-next-month>Próximo mês</button>
+              </div>
+              <div class="schedule-picker-weekdays" aria-hidden="true">
+                <span>Seg</span>
+                <span>Ter</span>
+                <span>Qua</span>
+                <span>Qui</span>
+                <span>Sex</span>
+                <span>Sáb</span>
+                <span>Dom</span>
+              </div>
+              <div class="schedule-picker-days" data-schedule-days></div>
+              <div class="schedule-picker-time">
+                <label for="schedule_picker_time">Hora</label>
+                <div class="schedule-time-chips" data-schedule-time-chips></div>
+                <input id="schedule_picker_time" type="text" inputmode="numeric" pattern="[0-9]{2}:[0-9]{2}" placeholder="15:00" data-schedule-time>
+              </div>
+              <div class="schedule-picker-preview">
+                <span>Selecionado</span>
+                <strong data-schedule-preview>Nenhum horário escolhido</strong>
+              </div>
+              <div class="button-row action-stack">
+                <button type="button" data-apply-schedule-picker>Aplicar data e hora</button>
+                <button type="button" class="ghost" data-close-schedule-picker>Cancelar</button>
+              </div>
+            </div>
+          </dialog>
           <label for="publication_timezone">Timezone</label>
           <input id="publication_timezone" name="timezone" value="{{ publication_schedule_display.timezone if publication_schedule_display else 'UTC' }}" data-has-existing="{{ 'true' if publication_schedule_display else 'false' }}" list="timezones" placeholder="UTC ou America/Sao_Paulo">
           <datalist id="timezones">
@@ -385,9 +461,15 @@
           <label for="youtube_visibility">Visibilidade</label>
           <select id="youtube_visibility" name="youtube_visibility">
             {% for visibility in ["private", "unlisted", "public"] %}
-            <option value="{{ visibility }}" {% if publication_schedule_display and publication_schedule_display.youtube_visibility == visibility %}selected{% endif %}>{{ visibility }}</option>
+            <option
+              value="{{ visibility }}"
+              {% if publication_schedule_display and publication_schedule_display.youtube_visibility == visibility %}selected{% elif not publication_schedule_display and youtube_integration.publish_mode == "api" and visibility == "public" %}selected{% endif %}
+            >{{ visibility }}</option>
             {% endfor %}
           </select>
+          {% if youtube_integration.publish_mode == "api" %}
+          <p class="inline-hint">Para ficar programado no próprio YouTube, use visibilidade <strong>public</strong>.</p>
+          {% endif %}
           <div class="button-row action-stack">
             <button type="submit" name="action" value="schedule">{% if schedule_ready %}Reagendar publicação{% else %}Ativar publicação automática{% endif %}</button>
             {% if schedule_ready %}
@@ -482,6 +564,149 @@
     if (timezoneInput.dataset.hasExisting === "true" && timezoneInput.value) return;
     const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     if (browserTz) timezoneInput.value = browserTz;
+  })();
+
+  (function() {
+    const form = document.querySelector("[data-schedule-form]");
+    const input = document.getElementById("scheduled_for_local");
+    const dialog = document.getElementById("schedule-picker-modal");
+    if (!form || !input || !dialog) return;
+
+    const openButton = form.querySelector("[data-open-schedule-picker]");
+    const label = form.querySelector("[data-schedule-picker-label]");
+    const helper = form.querySelector("[data-schedule-picker-helper]");
+    const error = form.querySelector("[data-schedule-picker-error]");
+    const currentMonthLabel = dialog.querySelector("[data-schedule-current-month]");
+    const daysEl = dialog.querySelector("[data-schedule-days]");
+    const timeInput = dialog.querySelector("[data-schedule-time]");
+    const chipsEl = dialog.querySelector("[data-schedule-time-chips]");
+    const preview = dialog.querySelector("[data-schedule-preview]");
+    const monthFormatter = new Intl.DateTimeFormat("pt-BR", { month: "long", year: "numeric" });
+    const dateFormatter = new Intl.DateTimeFormat("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric" });
+    const quickTimes = ["09:00", "11:00", "13:00", "15:00", "18:00", "20:00", "22:00"];
+    const pad = (value) => String(value).padStart(2, "0");
+    const toDateKey = (date) => `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    const toLocalValue = (dateKey, timeValue) => `${dateKey}T${timeValue}`;
+    const parseLocalValue = (value) => {
+      const match = String(value || "").match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
+      return match ? { dateKey: match[1], time: match[2] } : null;
+    };
+    const today = new Date();
+    const parsed = parseLocalValue(input.value);
+    let selectedDateKey = parsed ? parsed.dateKey : toDateKey(today);
+    let selectedTime = parsed ? parsed.time : "15:00";
+    let visibleMonth = parsed ? new Date(`${parsed.dateKey}T00:00:00`) : new Date(today.getFullYear(), today.getMonth(), 1);
+
+    const renderSummary = () => {
+      const parsedValue = parseLocalValue(input.value);
+      if (!parsedValue) {
+        label.textContent = "Escolher data e hora";
+        helper.textContent = "Abra o calendário, escolha o dia e selecione um horário.";
+        return;
+      }
+      const date = new Date(`${parsedValue.dateKey}T00:00:00`);
+      label.textContent = `${dateFormatter.format(date)} às ${parsedValue.time}`;
+      helper.textContent = "Clique para reagendar com calendário e atalhos de horário.";
+      if (error) error.hidden = true;
+    };
+
+    const renderPreview = () => {
+      const date = new Date(`${selectedDateKey}T00:00:00`);
+      preview.textContent = `${dateFormatter.format(date)} às ${selectedTime}`;
+    };
+
+    const renderTimes = () => {
+      chipsEl.innerHTML = "";
+      quickTimes.forEach((time) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = time;
+        button.className = time === selectedTime ? "selected" : "";
+        button.addEventListener("click", () => {
+          selectedTime = time;
+          timeInput.value = time;
+          renderTimes();
+          renderPreview();
+        });
+        chipsEl.append(button);
+      });
+      timeInput.value = selectedTime;
+    };
+
+    const renderCalendar = () => {
+      daysEl.innerHTML = "";
+      const year = visibleMonth.getFullYear();
+      const month = visibleMonth.getMonth();
+      currentMonthLabel.textContent = monthFormatter.format(visibleMonth);
+      const first = new Date(year, month, 1);
+      const startOffset = (first.getDay() + 6) % 7;
+      const gridStart = new Date(year, month, 1 - startOffset);
+      for (let index = 0; index < 42; index += 1) {
+        const date = new Date(gridStart);
+        date.setDate(gridStart.getDate() + index);
+        const dateKey = toDateKey(date);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = date.getDate();
+        button.dataset.date = dateKey;
+        if (date.getMonth() !== month) button.classList.add("muted");
+        if (dateKey === selectedDateKey) button.classList.add("selected");
+        if (dateKey === toDateKey(today)) button.classList.add("today");
+        button.addEventListener("click", () => {
+          selectedDateKey = dateKey;
+          renderCalendar();
+          renderPreview();
+        });
+        daysEl.append(button);
+      }
+      renderPreview();
+    };
+
+    const openPicker = () => {
+      const parsedValue = parseLocalValue(input.value);
+      if (parsedValue) {
+        selectedDateKey = parsedValue.dateKey;
+        selectedTime = parsedValue.time;
+        visibleMonth = new Date(`${selectedDateKey}T00:00:00`);
+      }
+      renderCalendar();
+      renderTimes();
+      dialog.showModal();
+    };
+
+    openButton?.addEventListener("click", openPicker);
+    dialog.querySelectorAll("[data-close-schedule-picker]").forEach((button) => {
+      button.addEventListener("click", () => dialog.close());
+    });
+    dialog.querySelector("[data-schedule-prev-month]")?.addEventListener("click", () => {
+      visibleMonth = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() - 1, 1);
+      renderCalendar();
+    });
+    dialog.querySelector("[data-schedule-next-month]")?.addEventListener("click", () => {
+      visibleMonth = new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + 1, 1);
+      renderCalendar();
+    });
+    timeInput?.addEventListener("input", () => {
+      if (/^\d{2}:\d{2}$/.test(timeInput.value)) {
+        selectedTime = timeInput.value;
+        renderTimes();
+        renderPreview();
+      }
+    });
+    dialog.querySelector("[data-apply-schedule-picker]")?.addEventListener("click", () => {
+      input.value = toLocalValue(selectedDateKey, selectedTime);
+      renderSummary();
+      dialog.close();
+    });
+    form.addEventListener("submit", (event) => {
+      const submitter = event.submitter;
+      if (submitter && submitter.value === "clear") return;
+      if (input.value) return;
+      event.preventDefault();
+      if (error) error.hidden = false;
+      openPicker();
+    });
+    renderSummary();
   })();
 </script>
 {% endblock %}

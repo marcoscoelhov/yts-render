@@ -760,6 +760,145 @@ class JobOrchestrator:
             "actual_visibility": ((upload.get("status") or {}).get("privacyStatus") if isinstance(upload.get("status"), dict) else None),
         }
 
+    def _schedule_publish_package_on_youtube(self, package: dict[str, Any], scheduled_for_utc: datetime, visibility: str) -> dict[str, Any]:
+        video_uri = str(package.get("video_uri") or "").strip()
+        if not video_uri:
+            raise FatalStepError("publish package missing video_uri")
+        try:
+            upload = self.youtube.upload_video(
+                video_path=path_from_uri(video_uri),
+                title=str(package.get("title") or "") or "Short",
+                description=str(package.get("description") or ""),
+                tags=list(package.get("hashtags") or []),
+                privacy_status=visibility,
+                altered_or_synthetic=bool(package.get("altered_or_synthetic")),
+                publish_at=scheduled_for_utc,
+            )
+        except YouTubeIntegrationError as exc:
+            raise FatalStepError(str(exc)) from exc
+        return {
+            "mode": "api",
+            "api_enabled": True,
+            "video_id": str(upload.get("id") or "").strip() or None,
+            "url": upload.get("youtube_url"),
+            "scheduled_for_utc": scheduled_for_utc.isoformat(),
+            "response": upload,
+            "target_visibility": visibility,
+            "actual_visibility": ((upload.get("status") or {}).get("privacyStatus") if isinstance(upload.get("status"), dict) else None),
+            "native_youtube_schedule": True,
+        }
+
+    def _reschedule_youtube_video(self, youtube_video_id: str, scheduled_for_utc: datetime) -> dict[str, Any]:
+        try:
+            response = self.youtube.schedule_published_video(video_id=youtube_video_id, publish_at=scheduled_for_utc)
+        except YouTubeIntegrationError as exc:
+            raise FatalStepError(str(exc)) from exc
+        return {
+            "mode": "api",
+            "api_enabled": True,
+            "video_id": youtube_video_id,
+            "url": response.get("youtube_url"),
+            "scheduled_for_utc": scheduled_for_utc.isoformat(),
+            "response": response,
+            "target_visibility": "public",
+            "actual_visibility": ((response.get("status") or {}).get("privacyStatus") if isinstance(response.get("status"), dict) else None),
+            "native_youtube_schedule": True,
+        }
+
+    def _clear_youtube_video_schedule(self, youtube_video_id: str) -> dict[str, Any]:
+        try:
+            response = self.youtube.clear_scheduled_publish(video_id=youtube_video_id)
+        except YouTubeIntegrationError as exc:
+            raise FatalStepError(str(exc)) from exc
+        return {
+            "mode": "api",
+            "api_enabled": True,
+            "video_id": youtube_video_id,
+            "url": response.get("youtube_url"),
+            "response": response,
+            "native_youtube_schedule": True,
+        }
+
+    def _sync_native_scheduled_publications(self) -> int:
+        if not self._youtube_api_mode_enabled():
+            return 0
+        now = utcnow()
+        with session_scope() as session:
+            rows = session.execute(
+                select(PublicationSchedule.job_id, PublicationSchedule.youtube_video_id)
+                .join(Job, Job.job_id == PublicationSchedule.job_id)
+                .where(PublicationSchedule.status == "scheduled")
+                .where(PublicationSchedule.youtube_video_id.is_not(None))
+                .where(PublicationSchedule.scheduled_for_utc <= now)
+                .where(Job.status == "approved_for_publish")
+                .order_by(PublicationSchedule.scheduled_for_utc)
+            ).all()
+        synced = 0
+        for job_id, youtube_video_id in rows:
+            try:
+                payload = self.youtube.fetch_video(str(youtube_video_id or ""))
+            except YouTubeIntegrationError:
+                continue
+            status = dict(payload.get("status") or {})
+            privacy_status = str(status.get("privacyStatus") or "").strip().lower()
+            if privacy_status != "public":
+                continue
+            published_at = utcnow()
+            with session_scope() as session:
+                job = session.get(Job, job_id)
+                schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
+                if not job or not schedule or schedule.status != "scheduled":
+                    continue
+                schedule.status = "published"
+                schedule.published_at = published_at
+                schedule.youtube_video_id = str(youtube_video_id or "").strip() or None
+                schedule.youtube_url = payload.get("youtube_url")
+                schedule.content_hash = stable_hash(
+                    {
+                        "job_id": job_id,
+                        "scheduled_for_utc": schedule.scheduled_for_utc.isoformat(),
+                        "timezone": schedule.timezone,
+                        "youtube_visibility": schedule.youtube_visibility,
+                        "status": schedule.status,
+                        "notes": schedule.notes,
+                        "published_at": schedule.published_at.isoformat() if schedule.published_at else None,
+                        "youtube_video_id": schedule.youtube_video_id,
+                        "youtube_url": schedule.youtube_url,
+                    }
+                )
+                self._persist_publication_schedule_artifact(job, schedule)
+                job.status = "published"
+                job.review_state = "published"
+                quality_summary = dict(job.quality_summary or {})
+                quality_summary["youtube_publish"] = {
+                    "status": "published",
+                    "last_attempt_at": iso_now(),
+                    "mode": "api",
+                    "video_id": schedule.youtube_video_id,
+                    "youtube_url": schedule.youtube_url,
+                }
+                quality_summary["youtube"] = payload
+                job.quality_summary = quality_summary
+                self._update_publication_artifact_index(job)
+                self._refresh_retention_state(session, job, schedule)
+            self._append_publication_attempt(
+                job_id,
+                {
+                    "attempt_id": new_id(),
+                    "trigger": "youtube_schedule_sync",
+                    "started_at": iso_now(),
+                    "finished_at": iso_now(),
+                    "status": "published",
+                    "mode": "api",
+                    "target_visibility": "public",
+                    "youtube_video_id": youtube_video_id,
+                    "youtube_url": payload.get("youtube_url"),
+                },
+            )
+            self._append_event(job_id, "youtube.schedule.synced", "succeeded", {"video_id": youtube_video_id, "url": payload.get("youtube_url")})
+            synced += 1
+        return synced
+
     def review_job(self, payload: dict[str, Any], job_id: str) -> str | None:
         with session_scope() as session:
             job = session.get(Job, job_id)
@@ -1087,14 +1226,59 @@ class JobOrchestrator:
         scheduled_for_utc = self._scheduled_local_to_utc(validated.scheduled_for_local, validated.timezone)
         if scheduled_for_utc <= utcnow():
             raise FatalStepError("scheduled publish time must be in the future")
+        youtube_schedule_payload: dict[str, Any] | None = None
+        youtube_video_id: str | None = None
+        youtube_url: str | None = None
+        had_existing_youtube_video = False
         if self._youtube_api_mode_enabled():
             self._ensure_youtube_api_ready()
+            if validated.youtube_visibility != "public":
+                raise FatalStepError("native YouTube scheduling currently requires visibility public")
         with session_scope() as session:
             job = session.get(Job, job_id)
             if not job:
                 raise KeyError(job_id)
             if job.status != "approved_for_publish":
                 raise FatalStepError("job must be approved_for_publish before entering the publication schedule")
+            schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
+            package = self._build_publish_package(session, job) if self._youtube_api_mode_enabled() and (schedule is None or not schedule.youtube_video_id) else None
+            if schedule is not None:
+                youtube_video_id = str(schedule.youtube_video_id or "").strip() or None
+                youtube_url = str(schedule.youtube_url or "").strip() or None
+                had_existing_youtube_video = youtube_video_id is not None
+        if self._youtube_api_mode_enabled():
+            if youtube_video_id:
+                youtube_schedule_payload = self._reschedule_youtube_video(youtube_video_id, scheduled_for_utc)
+            else:
+                assert package is not None
+                youtube_schedule_payload = self._schedule_publish_package_on_youtube(
+                    package,
+                    scheduled_for_utc,
+                    validated.youtube_visibility,
+                )
+                youtube_video_id = str(youtube_schedule_payload.get("video_id") or "").strip() or None
+                youtube_url = str(youtube_schedule_payload.get("url") or "").strip() or None
+            attempt_started_at = iso_now()
+            self._append_publication_attempt(
+                job_id,
+                {
+                    "attempt_id": new_id(),
+                    "trigger": "schedule_update" if had_existing_youtube_video else "schedule_upload",
+                    "started_at": attempt_started_at,
+                    "finished_at": attempt_started_at,
+                    "status": "scheduled",
+                    "mode": "api",
+                    "target_visibility": validated.youtube_visibility,
+                    "scheduled_for_utc": scheduled_for_utc.isoformat(),
+                    "youtube_video_id": youtube_video_id,
+                    "youtube_url": youtube_url,
+                    "native_youtube_schedule": True,
+                },
+            )
+        with session_scope() as session:
+            job = session.get(Job, job_id)
+            if not job:
+                raise KeyError(job_id)
             schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
             if schedule is None:
                 schedule = PublicationSchedule(
@@ -1117,6 +1301,10 @@ class JobOrchestrator:
                 schedule.status = "scheduled"
                 schedule.notes = validated.notes
                 schedule.published_at = None
+            if self._youtube_api_mode_enabled():
+                schedule.youtube_video_id = youtube_video_id
+                schedule.youtube_url = youtube_url
+            else:
                 schedule.youtube_video_id = None
                 schedule.youtube_url = None
             schedule.content_hash = stable_hash(
@@ -1130,6 +1318,21 @@ class JobOrchestrator:
                 }
             )
             self._persist_publication_schedule_artifact(job, schedule)
+            if self._youtube_api_mode_enabled():
+                quality_summary = dict(job.quality_summary or {})
+                quality_summary["youtube_publish"] = {
+                    "status": "scheduled",
+                    "last_attempt_at": iso_now(),
+                    "mode": "api",
+                    "video_id": schedule.youtube_video_id,
+                    "youtube_url": schedule.youtube_url,
+                    "scheduled_for_utc": schedule.scheduled_for_utc.isoformat(),
+                    "native_youtube_schedule": True,
+                }
+                if youtube_schedule_payload is not None:
+                    quality_summary["youtube"] = youtube_schedule_payload
+                job.quality_summary = quality_summary
+                self._update_publication_artifact_index(job)
             self._refresh_retention_state(session, job, schedule)
         self._append_event(
             job_id,
@@ -1139,10 +1342,14 @@ class JobOrchestrator:
                 "scheduled_for_utc": scheduled_for_utc.isoformat(),
                 "timezone": validated.timezone,
                 "youtube_visibility": validated.youtube_visibility,
+                "native_youtube_schedule": self._youtube_api_mode_enabled(),
+                "youtube_video_id": youtube_video_id,
+                "youtube_url": youtube_url,
             },
         )
 
     def clear_publication_schedule(self, job_id: str) -> None:
+        youtube_video_id: str | None = None
         with session_scope() as session:
             job = session.get(Job, job_id)
             if not job:
@@ -1152,6 +1359,17 @@ class JobOrchestrator:
                 return
             if schedule.status == "published":
                 raise FatalStepError("published job schedule cannot be cleared")
+            if self._youtube_api_mode_enabled():
+                youtube_video_id = str(schedule.youtube_video_id or "").strip() or None
+        if self._youtube_api_mode_enabled() and youtube_video_id:
+            self._clear_youtube_video_schedule(youtube_video_id)
+        with session_scope() as session:
+            job = session.get(Job, job_id)
+            if not job:
+                raise KeyError(job_id)
+            schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
+            if schedule is None:
+                return
             schedule.status = "cancelled"
             schedule.content_hash = stable_hash(
                 {
@@ -1165,7 +1383,7 @@ class JobOrchestrator:
             )
             self._persist_publication_schedule_artifact(job, schedule)
             self._refresh_retention_state(session, job, schedule)
-        self._append_event(job_id, "youtube.schedule.cleared", "succeeded", {})
+        self._append_event(job_id, "youtube.schedule.cleared", "succeeded", {"youtube_video_id": youtube_video_id})
 
     def reopen_publication_for_republish(self, job_id: str) -> None:
         reopened_at = iso_now()
@@ -2306,6 +2524,8 @@ class JobOrchestrator:
                 should_sweep = time.monotonic() - self._last_retention_sweep_at >= self.settings.artifact_retention_sweep_seconds
                 if should_sweep:
                     self._run_retention_sweep()
+            if self._youtube_api_mode_enabled():
+                self._sync_native_scheduled_publications()
             with session_scope() as session:
                 claimed_job_id = self._claim_next_job(session)
             if claimed_job_id:
@@ -2353,6 +2573,7 @@ class JobOrchestrator:
                 select(PublicationSchedule.job_id)
                 .join(Job, Job.job_id == PublicationSchedule.job_id)
                 .where(PublicationSchedule.status == "scheduled")
+                .where(PublicationSchedule.youtube_video_id.is_(None))
                 .where(PublicationSchedule.scheduled_for_utc <= now)
                 .where(Job.status == "approved_for_publish")
                 .order_by(PublicationSchedule.scheduled_for_utc)

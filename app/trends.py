@@ -173,6 +173,8 @@ class TrendResearcher:
             "página principal", "main page", "buscar", "search", "portal", "wiki", "categoria", "lista de", "list of",
             "temporada", "campeonato", "eleição", "eleicao", "mortes em", "deaths in", "covid", "porn", "sex",
             "assassinato", "homicídio", "homicidio", "morre", "morte", "tragédia", "tragedia", "acidente", "acidentes",
+            "onde assistir", "ao vivo", "tv aberta", "transmissão", "transmissao", "horário", "horario", "escalação",
+            "escalacao", "palpite", "odds", "precedentes", "placar", "resultado",
         }
         if any(term in lowered for term in blocked_terms):
             return False

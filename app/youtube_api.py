@@ -10,7 +10,9 @@ from app.config import Settings, get_settings
 from app.utils import ensure_dir, new_id
 
 
+YOUTUBE_WRITE_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
 YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+YOUTUBE_OAUTH_SCOPES = [YOUTUBE_WRITE_SCOPE, YOUTUBE_UPLOAD_SCOPE]
 
 
 class YouTubeIntegrationError(RuntimeError):
@@ -64,8 +66,10 @@ class YouTubePublisher:
             missing_items.append("Dependências Google OAuth/API ainda não instaladas no ambiente")
         if not payload:
             missing_items.append("Canal ainda não conectado por OAuth")
+        elif YOUTUBE_WRITE_SCOPE not in list(payload.get("scopes") or []):
+            missing_items.append("OAuth atual não tem escopo para programar ou editar vídeos, reconecte o canal")
         return YouTubeConnectionStatus(
-            connected=bool(payload),
+            connected=bool(payload and YOUTUBE_WRITE_SCOPE in list(payload.get("scopes") or [])),
             client_configured=client_configured,
             dependencies_available=dependencies_available,
             missing_items=missing_items,
@@ -86,6 +90,7 @@ class YouTubePublisher:
             self.settings.youtube_oauth_state_path,
             {
                 "state": state,
+                "code_verifier": getattr(flow, "code_verifier", None),
                 "redirect_uri": redirect_uri,
                 "created_at": datetime.now(UTC).isoformat(),
             },
@@ -100,6 +105,9 @@ class YouTubePublisher:
         if not redirect_uri:
             raise YouTubeIntegrationError("redirect_uri do OAuth não encontrado")
         flow = self._build_flow(redirect_uri, state=state)
+        code_verifier = str(state_payload.get("code_verifier") or "").strip()
+        if code_verifier:
+            flow.code_verifier = code_verifier
         flow.fetch_token(code=code)
         credentials = flow.credentials
         existing = self._read_json(self.settings.youtube_token_path)
@@ -126,6 +134,7 @@ class YouTubePublisher:
         tags: list[str],
         privacy_status: str,
         altered_or_synthetic: bool,
+        publish_at: datetime | None = None,
         category_id: str = "27",
     ) -> dict[str, Any]:
         if not video_path.exists():
@@ -133,6 +142,13 @@ class YouTubePublisher:
         credentials = self._load_credentials(refresh=True)
         discovery, media_upload = self._google_upload_dependencies()
         service = discovery.build("youtube", "v3", credentials=credentials, cache_discovery=False)
+        effective_privacy = privacy_status
+        publish_at_iso = None
+        if publish_at is not None:
+            if privacy_status != "public":
+                raise YouTubeIntegrationError("agendamento nativo do YouTube exige visibilidade public")
+            effective_privacy = "private"
+            publish_at_iso = _iso_or_none(publish_at)
         body: dict[str, Any] = {
             "snippet": {
                 "title": title[:100],
@@ -141,10 +157,12 @@ class YouTubePublisher:
                 "categoryId": category_id,
             },
             "status": {
-                "privacyStatus": privacy_status,
+                "privacyStatus": effective_privacy,
                 "selfDeclaredMadeForKids": False,
             },
         }
+        if publish_at_iso:
+            body["status"]["publishAt"] = publish_at_iso
         if altered_or_synthetic:
             body["status"]["containsSyntheticMedia"] = True
         media = media_upload.MediaFileUpload(str(video_path), chunksize=8 * 1024 * 1024, resumable=True)
@@ -163,6 +181,8 @@ class YouTubePublisher:
         payload = self._serialize_response(response)
         payload["upload_progress_percent"] = progress or 100
         payload["youtube_url"] = self.watch_url(str(payload.get("id") or ""))
+        payload["requested_publish_at"] = publish_at_iso
+        payload["target_visibility"] = privacy_status
         return payload
 
     def watch_url(self, video_id: str) -> str | None:
@@ -182,7 +202,7 @@ class YouTubePublisher:
             token_uri=payload.get("token_uri"),
             client_id=payload.get("client_id"),
             client_secret=payload.get("client_secret"),
-            scopes=payload.get("scopes") or [YOUTUBE_UPLOAD_SCOPE],
+            scopes=payload.get("scopes") or YOUTUBE_OAUTH_SCOPES,
         )
         expiry_raw = payload.get("expiry")
         parsed_expiry = _google_expiry_datetime(str(expiry_raw) if expiry_raw else None)
@@ -210,12 +230,17 @@ class YouTubePublisher:
                 "redirect_uris": [redirect_uri],
             }
         }
-        flow = flow_module.Flow.from_client_config(client_config, scopes=[YOUTUBE_UPLOAD_SCOPE], state=state)
+        flow = flow_module.Flow.from_client_config(
+            client_config,
+            scopes=YOUTUBE_OAUTH_SCOPES,
+            state=state,
+            autogenerate_code_verifier=True,
+        )
         flow.redirect_uri = redirect_uri
         return flow
 
     def _credentials_to_payload(self, credentials: Any) -> dict[str, Any]:
-        scopes = list(credentials.scopes or [YOUTUBE_UPLOAD_SCOPE])
+        scopes = list(credentials.scopes or YOUTUBE_OAUTH_SCOPES)
         return {
             "token": credentials.token,
             "refresh_token": credentials.refresh_token,
@@ -225,6 +250,61 @@ class YouTubePublisher:
             "scopes": scopes,
             "expiry": _iso_or_none(credentials.expiry),
         }
+
+    def schedule_published_video(self, *, video_id: str, publish_at: datetime) -> dict[str, Any]:
+        credentials = self._load_credentials(refresh=True)
+        discovery, _ = self._google_upload_dependencies()
+        service = discovery.build("youtube", "v3", credentials=credentials, cache_discovery=False)
+        publish_at_iso = _iso_or_none(publish_at)
+        response = service.videos().update(
+            part="status",
+            body={
+                "id": video_id,
+                "status": {
+                    "privacyStatus": "private",
+                    "publishAt": publish_at_iso,
+                    "selfDeclaredMadeForKids": False,
+                },
+            },
+        ).execute()
+        payload = self._serialize_response(response)
+        payload["youtube_url"] = self.watch_url(video_id)
+        payload["requested_publish_at"] = publish_at_iso
+        payload["target_visibility"] = "public"
+        return payload
+
+    def clear_scheduled_publish(self, *, video_id: str) -> dict[str, Any]:
+        credentials = self._load_credentials(refresh=True)
+        discovery, _ = self._google_upload_dependencies()
+        service = discovery.build("youtube", "v3", credentials=credentials, cache_discovery=False)
+        response = service.videos().update(
+            part="status",
+            body={
+                "id": video_id,
+                "status": {
+                    "privacyStatus": "private",
+                    "selfDeclaredMadeForKids": False,
+                },
+            },
+        ).execute()
+        payload = self._serialize_response(response)
+        payload["youtube_url"] = self.watch_url(video_id)
+        return payload
+
+    def fetch_video(self, video_id: str) -> dict[str, Any]:
+        normalized = str(video_id or "").strip()
+        if not normalized:
+            raise YouTubeIntegrationError("video_id do YouTube ausente")
+        credentials = self._load_credentials(refresh=True)
+        discovery, _ = self._google_upload_dependencies()
+        service = discovery.build("youtube", "v3", credentials=credentials, cache_discovery=False)
+        response = service.videos().list(part="status,snippet", id=normalized).execute()
+        items = list(response.get("items") or [])
+        if not items:
+            raise YouTubeIntegrationError("vídeo agendado não encontrado no YouTube")
+        payload = self._serialize_response(items[0])
+        payload["youtube_url"] = self.watch_url(normalized)
+        return payload
 
     def _serialize_response(self, payload: dict[str, Any]) -> dict[str, Any]:
         return json.loads(json.dumps(payload))
