@@ -8,8 +8,8 @@ class ImageAssetDomain:
     def __init__(self, pipeline: Any) -> None:
         self.pipeline = pipeline
 
-    def generate_primary_asset(self, scene: dict[str, Any], output_path: Path) -> dict[str, Any]:
-        return self.pipeline._generate_primary_asset(scene, output_path)
+    def generate_primary_asset(self, job_id: str, scene: dict[str, Any], output_path: Path) -> dict[str, Any]:
+        return self.pipeline._generate_primary_asset(job_id, scene, output_path)
 
     def normalize_asset_uri_extension(self, asset: dict[str, Any]) -> dict[str, Any]:
         return self.pipeline._normalize_asset_uri_extension(asset)

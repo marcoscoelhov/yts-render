@@ -50,6 +50,8 @@ YTS_MINIMAX_TEXT_API_KEY=...
 YTS_MINIMAX_IMAGE_API_KEY=...
 ```
 
+Para imagem, a chave de texto MiniMax e usada primeiro. `YTS_MINIMAX_IMAGE_API_KEY` funciona como chave dedicada de imagem e entra apenas quando a chave de texto retorna quota, saldo, credito ou rate limit. Se a chave de texto estiver vazia, a dedicada de imagem e usada diretamente.
+
 ### Upload real no YouTube
 
 ```env
@@ -121,6 +123,27 @@ Se estiver usando outra porta, ajuste a URL do `curl`.
 
 Pelo navegador, use o formulario da home.
 
+Modos disponiveis no hub:
+
+- `Tema`: preencha um assunto ou deixe vazio para o app buscar tendencia real automaticamente.
+- `Titulo completo`: use quando ja existe uma promessa editorial pronta, mas o app ainda deve gerar o roteiro.
+- `Roteiro pronto`: use texto rotulado e confirme que os fatos ja foram revisados antes do envio.
+
+Formato de `Roteiro pronto`:
+
+```text
+Titulo: ...
+Hook: ...
+Loop: ...
+Beats:
+- ...
+Payoff: ...
+Fechamento: ...
+Hashtags: #opcional
+```
+
+Nesse modo, `Loop` faz parte da narracao como tensao editorial. Os fatos declarados ficam nos beats e no payoff.
+
 Via `curl`:
 
 ```bash
@@ -161,6 +184,13 @@ Se o objetivo for upload real via API:
 Se `YTS_YOUTUBE_OAUTH_REDIRECT_URI` estiver vazio, o app usa a URL atual do hub como callback.
 
 ## 10. Agendar ou publicar
+
+Voce pode agendar por dois caminhos:
+
+- detalhe do job em `/jobs/<job_id>`
+- calendario em `/calendar`, usando o botao `+` do dia desejado
+
+O calendario lista para agendamento apenas jobs em `approved_for_publish` sem agenda ativa e ainda nao publicados.
 
 ### Modo manual
 

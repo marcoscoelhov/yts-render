@@ -442,6 +442,32 @@ def _publication_title(job: Job, topic_request: TopicRequest | None, script: Scr
     )
 
 
+def _ready_to_schedule_entries(session, limit: int | None = None) -> list[dict[str, object]]:
+    stmt = (
+        select(Job, TopicRequest, Script, PublicationSchedule)
+        .join(TopicRequest, TopicRequest.job_id == Job.job_id)
+        .join(Script, Script.job_id == Job.job_id, isouter=True)
+        .join(PublicationSchedule, PublicationSchedule.job_id == Job.job_id, isouter=True)
+        .where(Job.status == "approved_for_publish")
+        .where(or_(PublicationSchedule.schedule_id.is_(None), PublicationSchedule.status == "cancelled"))
+        .order_by(Job.created_at.asc())
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    rows = session.execute(stmt).all()
+    return [
+        {
+            "job_id": job.job_id,
+            "title": _publication_title(job, topic_request, script),
+            "seed_theme": topic_request.seed_theme if topic_request else None,
+            "created_at": job.created_at.isoformat() if job.created_at else None,
+            "job_status": job.status,
+            "schedule": _schedule_display(schedule) if schedule else None,
+        }
+        for job, topic_request, script, schedule in rows
+    ]
+
+
 def _effective_youtube_redirect_uri(request: Request) -> str:
     return settings.youtube_oauth_redirect_uri or f"{str(request.base_url).rstrip('/')}/youtube/oauth/callback"
 
@@ -480,16 +506,7 @@ def _youtube_integration_context(request: Request) -> dict[str, object]:
 
 def _publication_dashboard_context(request: Request, limit: int = 6) -> dict[str, object]:
     with SessionLocal() as session:
-        approved_rows = session.execute(
-            select(Job, TopicRequest, Script, PublicationSchedule)
-            .join(TopicRequest, TopicRequest.job_id == Job.job_id)
-            .join(Script, Script.job_id == Job.job_id, isouter=True)
-            .join(PublicationSchedule, PublicationSchedule.job_id == Job.job_id, isouter=True)
-            .where(Job.status == "approved_for_publish")
-            .where(or_(PublicationSchedule.schedule_id.is_(None), PublicationSchedule.status == "cancelled"))
-            .order_by(Job.created_at.asc())
-            .limit(limit)
-        ).all()
+        ready_to_schedule = _ready_to_schedule_entries(session, limit=limit)
         schedule_rows = session.execute(
             select(PublicationSchedule, Job, TopicRequest, Script)
             .join(Job, Job.job_id == PublicationSchedule.job_id)
@@ -532,19 +549,6 @@ def _publication_dashboard_context(request: Request, limit: int = 6) -> dict[str
         published_count = session.scalar(
             select(func.count()).select_from(PublicationSchedule).where(PublicationSchedule.status == "published")
         ) or 0
-
-    ready_to_schedule = []
-    for job, topic_request, script, schedule in approved_rows:
-        ready_to_schedule.append(
-            {
-                "job_id": job.job_id,
-                "title": _publication_title(job, topic_request, script),
-                "seed_theme": topic_request.seed_theme if topic_request else None,
-                "created_at": job.created_at.isoformat() if job.created_at else None,
-                "job_status": job.status,
-                "schedule": _schedule_display(schedule) if schedule else None,
-            }
-        )
 
     upcoming_schedule = [
         {
@@ -623,6 +627,7 @@ def _calendar_context(month: str | None) -> dict[str, object]:
     ]
     month_weeks = calendar.Calendar(firstweekday=0).monthdatescalendar(month_start.year, month_start.month)
     with SessionLocal() as session:
+        ready_to_schedule = _ready_to_schedule_entries(session)
         schedule_rows = session.execute(
             select(PublicationSchedule, Job, TopicRequest, Script)
             .join(Job, Job.job_id == PublicationSchedule.job_id)
@@ -683,6 +688,11 @@ def _calendar_context(month: str | None) -> dict[str, object]:
         "weeks": weeks,
         "scheduled_count": scheduled_count,
         "published_count": published_count,
+        "ready_to_schedule": ready_to_schedule,
+        "common_schedule_timezones": COMMON_SCHEDULE_TIMEZONES,
+        "default_schedule_timezone": "America/Sao_Paulo",
+        "default_schedule_time": "15:00",
+        "default_youtube_visibility": "public" if settings.youtube_publish_mode == "api" else "private",
     }
 
 
@@ -899,6 +909,37 @@ def publication_calendar(request: Request, month: str | None = Query(default=Non
             "settings": settings,
         },
     )
+
+
+@app.post("/calendar/schedule")
+def schedule_publication_from_calendar(
+    job_id: str = Form(...),
+    scheduled_date: str = Form(...),
+    scheduled_time: str = Form(default="15:00"),
+    timezone: str = Form(default="America/Sao_Paulo"),
+    youtube_visibility: str = Form(default="private"),
+    notes: str | None = Form(default=None),
+    month: str | None = Form(default=None),
+):
+    try:
+        scheduled_day = date.fromisoformat(scheduled_date)
+        payload = PublicationSchedulePayload(
+            scheduled_for_local=f"{scheduled_day.isoformat()}T{scheduled_time}",
+            timezone=timezone,
+            youtube_visibility=youtube_visibility,
+            notes=notes,
+        )
+        orchestrator.schedule_publication(job_id, payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="scheduled_date must use YYYY-MM-DD") from exc
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="job not found") from exc
+    except FatalStepError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    target_month = month or scheduled_day.strftime("%Y-%m")
+    return RedirectResponse(url=f"/calendar?{urlencode({'month': target_month})}", status_code=303)
 
 
 @app.post("/jobs")

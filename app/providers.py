@@ -1518,39 +1518,137 @@ class LocalSemanticImageProvider:
 class MinimaxImageProvider:
     def __init__(self) -> None:
         settings = get_settings()
-        api_key = settings.resolved_minimax_image_api_key
-        if not api_key:
-            raise ProviderFailure("minimax_image", "missing minimax image api key")
+        primary_key = settings.resolved_minimax_text_api_key
+        dedicated_key = getattr(settings, "minimax_image_api_key", None)
+        if not primary_key and settings.resolved_minimax_image_api_key:
+            dedicated_key = settings.resolved_minimax_image_api_key
+        if not primary_key and not dedicated_key:
+            raise ProviderFailure("minimax_image", "missing minimax text or image api key")
         self.url = settings.minimax_image_base_url
-        self.key = api_key
+        self.primary_key = primary_key
+        self.dedicated_key = dedicated_key if dedicated_key != primary_key else None
+        self.key = primary_key or dedicated_key
+        self._exhausted_primary_jobs: set[str] = set()
+        self._key_lock = threading.Lock()
+
+    def begin_job(self, job_id: str) -> None:
+        with self._key_lock:
+            self._exhausted_primary_jobs.discard(job_id)
+
+    def _primary_exhausted_for_job(self, job_id: str | None) -> bool:
+        return bool(job_id and job_id in self._exhausted_primary_jobs)
+
+    def _mark_primary_exhausted(self, job_id: str | None) -> None:
+        if not job_id:
+            return
+        with self._key_lock:
+            self._exhausted_primary_jobs.add(job_id)
+
+    def _key_attempts(self, job_id: str | None, *, skip_primary: bool = False) -> list[tuple[str, str]]:
+        attempts: list[tuple[str, str]] = []
+        if self.primary_key and not skip_primary and not self._primary_exhausted_for_job(job_id):
+            attempts.append(("text_primary", self.primary_key))
+        if self.dedicated_key:
+            attempts.append(("image_dedicated", self.dedicated_key))
+        return attempts
+
+    def _is_provider_limit_error(self, response: httpx.Response | None, message: str) -> bool:
+        if response is not None and response.status_code == 429:
+            return True
+        normalized = message.lower()
+        return any(
+            marker in normalized
+            for marker in [
+                "quota",
+                "rate limit",
+                "rate_limit",
+                "too many requests",
+                "insufficient",
+                "balance",
+                "credit",
+                "credits",
+                "limit exceeded",
+                "exceed limit",
+                "exceeded limit",
+            ]
+        )
 
     def generate(self, scene: dict[str, Any], output_path: Path) -> dict[str, Any]:
+        job_id = str(scene.get("job_id") or "").strip() or None
+        key_attempts = self._key_attempts(job_id, skip_primary=bool(scene.get("_skip_text_primary")))
+        if not key_attempts:
+            raise ProviderFailure("minimax_image", "missing available minimax image credential")
         last_error: Exception | None = None
-        for attempt in range(1, 4):
+        credential_role = key_attempts[-1][0]
+        fallback_from_text_key = False
+        exhausted_text_key = self._primary_exhausted_for_job(job_id)
+        for credential_role, api_key in key_attempts:
+            response: httpx.Response | None = None
             try:
-                response = httpx.post(
-                    self.url,
-                    headers={"Authorization": f"Bearer {self.key}"},
-                    json={
-                        "model": "image-01",
-                        "prompt": scene["image_prompt"],
-                        "aspect_ratio": "2:3",
-                        "response_format": "base64",
-                    },
-                    timeout=httpx.Timeout(45.0, connect=15.0),
-                )
-                response.raise_for_status()
+                for attempt in range(1, 4):
+                    try:
+                        response = httpx.post(
+                            self.url,
+                            headers={"Authorization": f"Bearer {api_key}"},
+                            json={
+                                "model": "image-01",
+                                "prompt": scene["image_prompt"],
+                                "aspect_ratio": "2:3",
+                                "response_format": "base64",
+                            },
+                            timeout=httpx.Timeout(45.0, connect=15.0),
+                        )
+                        response.raise_for_status()
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        response = exc.response
+                        message = exc.response.text or str(exc)
+                        if credential_role == "text_primary" and self._is_provider_limit_error(exc.response, message) and self.dedicated_key:
+                            self._mark_primary_exhausted(job_id)
+                            fallback_from_text_key = True
+                            exhausted_text_key = True
+                            last_error = ProviderFailure(
+                                "minimax_image",
+                                "minimax text key reached provider limit for image generation",
+                                {"credential_role": credential_role, "status_code": exc.response.status_code},
+                            )
+                            break
+                        raise
+                    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+                        last_error = exc
+                        if attempt == 3:
+                            raise ProviderFailure("minimax_image", f"connection failed after {attempt} attempts: {exc}") from exc
+                        time.sleep(1.5 * attempt)
+                else:
+                    raise ProviderFailure("minimax_image", f"connection failed: {last_error}")
+                if response is None or response.is_error:
+                    continue
                 break
-            except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
-                last_error = exc
-                if attempt == 3:
-                    raise ProviderFailure("minimax_image", f"connection failed after {attempt} attempts: {exc}") from exc
-                time.sleep(1.5 * attempt)
+            except httpx.HTTPStatusError:
+                raise
         else:
             raise ProviderFailure("minimax_image", f"connection failed: {last_error}")
         payload = response.json()
         if payload.get("base_resp", {}).get("status_code", 0) not in (0, None):
-            raise ProviderFailure("minimax_image", payload["base_resp"].get("status_msg", "minimax image error"))
+            status_msg = payload["base_resp"].get("status_msg", "minimax image error")
+            if credential_role == "text_primary" and self._is_provider_limit_error(response, status_msg) and self.dedicated_key:
+                self._mark_primary_exhausted(job_id)
+                fallback_scene = dict(scene)
+                fallback_scene["job_id"] = job_id
+                fallback_scene["_skip_text_primary"] = True
+                fallback_result = self.generate(fallback_scene, output_path)
+                fallback_metadata = dict(fallback_result.get("provider_metadata") or {})
+                fallback_metadata.update(
+                    {
+                        "credential_role": "image_dedicated",
+                        "fallback_from_text_key": True,
+                        "text_key_exhausted_for_job": True,
+                        "fallback_reason": "provider_limit",
+                    }
+                )
+                fallback_result["provider_metadata"] = fallback_metadata
+                return fallback_result
+            raise ProviderFailure("minimax_image", status_msg)
         image_base64 = payload["data"]["image_base64"][0]
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(base64.b64decode(image_base64))
@@ -1562,6 +1660,11 @@ class MinimaxImageProvider:
             "height": height,
             "prompt_snapshot": scene["image_prompt"],
             "uri": output_path.resolve().as_uri(),
+            "provider_metadata": {
+                "credential_role": credential_role,
+                "fallback_from_text_key": fallback_from_text_key,
+                "text_key_exhausted_for_job": exhausted_text_key,
+            },
         }
 
 

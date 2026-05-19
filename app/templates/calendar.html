@@ -4,11 +4,12 @@
   <div>
     <p class="eyebrow">Agenda</p>
     <h2>Calendário de publicação</h2>
-    <p>Use esta tela só para ver os horários. Para mudar uma publicação, abra o job.</p>
+    <p>Use o botão + em um dia para agendar um job aprovado e ainda não publicado.</p>
   </div>
   <div class="calendar-metrics">
     <span><strong>{{ scheduled_count }}</strong> programados</span>
     <span><strong>{{ published_count }}</strong> publicados</span>
+    <span><strong>{{ ready_to_schedule|length }}</strong> prontos para agendar</span>
   </div>
 </section>
 
@@ -29,6 +30,12 @@
     <span><span class="badge published">Publicado</span> concluído</span>
   </div>
 
+  <datalist id="calendar_timezones">
+    {% for timezone_name in common_schedule_timezones %}
+    <option value="{{ timezone_name }}"></option>
+    {% endfor %}
+  </datalist>
+
   <div class="calendar-grid">
     <div class="calendar-head">Seg</div>
     <div class="calendar-head">Ter</div>
@@ -41,12 +48,24 @@
       {% for day in week %}
       <article class="calendar-cell {% if not day.is_current_month %}muted{% endif %}">
         <header>
-          <span>{{ day.day_number }}</span>
-          {% if day.entries %}
-          <small>{{ day.entries|length }} item(ns)</small>
+          <div class="calendar-day-label">
+            <span>{{ day.day_number }}</span>
+            {% if day.entries %}
+            <small>{{ day.entries|length }} item(ns)</small>
+            {% endif %}
+          </div>
+          {% if day.is_current_month %}
+          <button
+            type="button"
+            class="calendar-add-button"
+            data-open-calendar-schedule
+            data-calendar-date="{{ day.iso_date }}"
+            data-calendar-label="{{ day.day_number }} de {{ month_label }}"
+            aria-label="Agendar job em {{ day.iso_date }}"
+          >+</button>
           {% endif %}
         </header>
-        <div class="calendar-items">
+        <div class="calendar-items" data-calendar-items>
           {% for entry in day.entries %}
           <a class="calendar-card" href="/jobs/{{ entry.job_id }}">
             <strong>{{ entry.title }}</strong>
@@ -62,5 +81,121 @@
       {% endfor %}
     {% endfor %}
   </div>
+
+  <dialog id="calendar-schedule-modal" class="schedule-picker-modal calendar-schedule-modal" aria-labelledby="calendar-schedule-title">
+    <div class="schedule-picker-card calendar-schedule-card">
+      <div class="schedule-picker-head">
+        <div>
+          <p class="eyebrow">Novo horário</p>
+          <h4 id="calendar-schedule-title">Agendar no calendário</h4>
+        </div>
+        <button type="button" class="ghost icon-button" data-close-calendar-schedule aria-label="Fechar modal">X</button>
+      </div>
+
+      <div class="calendar-schedule-layout">
+        <aside class="calendar-schedule-day">
+          <span>Dia escolhido</span>
+          <strong data-calendar-selected-label>{{ month_label }}</strong>
+          <small>Confira os horários já ocupados antes de salvar.</small>
+          <div class="calendar-schedule-existing" data-calendar-selected-items>
+            <p>Nenhuma publicação agendada neste dia.</p>
+          </div>
+        </aside>
+
+        <form method="post" action="/calendar/schedule" class="calendar-modal-form">
+          <input type="hidden" name="scheduled_date" data-calendar-selected-date>
+          <input type="hidden" name="month" value="{{ month_value }}">
+
+          <label for="calendar_modal_job">Job aprovado</label>
+          <select id="calendar_modal_job" name="job_id" required {% if not ready_to_schedule %}disabled{% endif %}>
+            {% if ready_to_schedule %}
+              {% for ready_job in ready_to_schedule %}
+              <option value="{{ ready_job.job_id }}">{{ ready_job.title }}</option>
+              {% endfor %}
+            {% else %}
+            <option value="">Nenhum job aprovado livre</option>
+            {% endif %}
+          </select>
+
+          <label>Atalhos de horário</label>
+          <div class="schedule-time-chips calendar-time-chips" data-calendar-time-chips></div>
+
+          <label for="calendar_modal_time">Hora</label>
+          <input id="calendar_modal_time" name="scheduled_time" type="text" inputmode="numeric" pattern="[0-9]{2}:[0-9]{2}" value="{{ default_schedule_time }}" required data-calendar-time>
+
+          <label for="calendar_modal_timezone">Timezone</label>
+          <input id="calendar_modal_timezone" name="timezone" value="{{ default_schedule_timezone }}" list="calendar_timezones" required>
+
+          <label for="calendar_modal_visibility">Visibilidade</label>
+          <select id="calendar_modal_visibility" name="youtube_visibility">
+            {% for visibility in ["private", "unlisted", "public"] %}
+            <option value="{{ visibility }}" {% if visibility == default_youtube_visibility %}selected{% endif %}>{{ visibility }}</option>
+            {% endfor %}
+          </select>
+
+          <div class="calendar-schedule-actions">
+            <button type="submit" {% if not ready_to_schedule %}disabled{% endif %}>Agendar neste dia</button>
+            <button type="button" class="ghost" data-close-calendar-schedule>Cancelar</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </dialog>
 </section>
+<script>
+  (function() {
+    const dialog = document.getElementById("calendar-schedule-modal");
+    if (!dialog) return;
+
+    const selectedDateInput = dialog.querySelector("[data-calendar-selected-date]");
+    const selectedLabel = dialog.querySelector("[data-calendar-selected-label]");
+    const selectedItems = dialog.querySelector("[data-calendar-selected-items]");
+    const timeInput = dialog.querySelector("[data-calendar-time]");
+    const chipsEl = dialog.querySelector("[data-calendar-time-chips]");
+    const quickTimes = ["09:00", "11:00", "13:00", "15:00", "18:00", "20:00", "22:00"];
+
+    const renderTimeChips = () => {
+      if (!chipsEl || !timeInput) return;
+      chipsEl.innerHTML = "";
+      quickTimes.forEach((time) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = time;
+        button.className = timeInput.value === time ? "selected" : "";
+        button.addEventListener("click", () => {
+          timeInput.value = time;
+          renderTimeChips();
+        });
+        chipsEl.append(button);
+      });
+    };
+
+    document.querySelectorAll("[data-open-calendar-schedule]").forEach((button) => {
+      button.addEventListener("click", () => {
+        selectedDateInput.value = button.dataset.calendarDate || "";
+        selectedLabel.textContent = button.dataset.calendarLabel || selectedDateInput.value;
+
+        const items = button.closest(".calendar-cell")?.querySelector("[data-calendar-items]");
+        selectedItems.innerHTML = "";
+        if (items && items.children.length) {
+          items.querySelectorAll(".calendar-card").forEach((card) => {
+            selectedItems.append(card.cloneNode(true));
+          });
+        } else {
+          const empty = document.createElement("p");
+          empty.textContent = "Nenhuma publicação agendada neste dia.";
+          selectedItems.append(empty);
+        }
+
+        renderTimeChips();
+        dialog.showModal();
+      });
+    });
+
+    timeInput?.addEventListener("input", renderTimeChips);
+    dialog.querySelectorAll("[data-close-calendar-schedule]").forEach((button) => {
+      button.addEventListener("click", () => dialog.close());
+    });
+  })();
+</script>
 {% endblock %}

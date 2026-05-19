@@ -63,8 +63,33 @@ curl http://127.0.0.1:8080/healthz
 4. O revisor abre `/jobs/{job_id}`, assiste ao video, confere checklist e aprova ou rejeita.
 5. Job aprovado vira `approved_for_publish`.
 6. O operador pode salvar metadados de upload, agendar data e hora, publicar imediatamente, ou reabrir para republicacao depois de um publish errado.
-7. Quando o modo YouTube esta em `api`, o worker consome agendas vencidas e faz o upload automaticamente.
-8. Quando o modo esta em `manual`, o hub continua util para aprovacao, agenda local e registro de publicacao manual.
+7. O calendario tambem permite escolher um dia e agendar um job aprovado que ainda nao esteja publicado nem tenha agenda ativa.
+8. Quando o modo YouTube esta em `api`, o worker consome agendas vencidas e faz o upload automaticamente.
+9. Quando o modo esta em `manual`, o hub continua util para aprovacao, agenda local e registro de publicacao manual.
+
+## Entradas do hub
+
+O formulario principal aceita tres modos:
+
+- `Tema`: assunto bruto. Se ficar vazio, o app tenta buscar tendencia real automaticamente e registra a origem no job.
+- `Titulo completo`: promessa editorial fornecida pelo operador, que o app usa como direcao central.
+- `Roteiro pronto`: texto rotulado fornecido por uma pessoa e preservado como fonte editorial.
+
+O formato canonico de `Roteiro pronto` e:
+
+```text
+Titulo: ...
+Hook: ...
+Loop: ...
+Beats:
+- ...
+- ...
+Payoff: ...
+Fechamento: ...
+Hashtags: #opcional #opcional
+```
+
+Nesse modo, `Titulo` vira metadado, a narracao usa `Hook`, `Loop`, `Beats`, `Payoff` e `Fechamento`, e o app exige confirmacao humana de factualidade antes de aceitar o job. `Loop` e tensao narrativa, nao claim factual a ser mapeada como fonte.
 
 ## Estados principais
 
@@ -114,6 +139,17 @@ Defaults atuais importantes:
 - `YTS_LLM_FALLBACK_PROVIDER=deepseek`
 - `YTS_YOUTUBE_PUBLISH_MODE=manual`
 - `YTS_YOUTUBE_API_ENABLED=false`
+
+### MiniMax para imagens
+
+A geracao de imagens usa a mesma chave resolvida de texto MiniMax como credencial primaria:
+
+```env
+YTS_MINIMAX_TEXT_API_KEY=...
+YTS_MINIMAX_IMAGE_API_KEY=...
+```
+
+`YTS_MINIMAX_IMAGE_API_KEY` e a **Chave Dedicada de Imagem**. Ela so e usada quando a chave de texto retorna limite de provedor, como quota, saldo, credito ou rate limit. Timeout, erro de conexao e `5xx` nao disparam troca de chave. Se nao houver chave de texto configurada, a chave dedicada de imagem e usada diretamente.
 
 ## YouTube e OAuth
 
@@ -170,7 +206,7 @@ Rotas principais:
 
 - `/`: home do hub com formulario, resumo do fluxo e jobs
 - `/publication-hub`: centro de publicacao
-- `/calendar`: calendario de slots programados e publicados
+- `/calendar`: calendario de slots programados e publicados, com atalho para agendar jobs aprovados livres
 - `/jobs/{job_id}`: detalhe do job, revisao, agenda, metadados e performance
 - `/youtube/connect`: inicio do OAuth
 - `/healthz`: healthcheck

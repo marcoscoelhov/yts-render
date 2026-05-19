@@ -180,6 +180,8 @@ class AssetPipeline(BasePipeline):
 
     def step_assets(self, session: Session, job: Job, attempt: int) -> list[str]:
         self._remove_stale_quality_report(job.job_id, "asset_quality_report.json")
+        if hasattr(self.providers.image, "begin_job"):
+            self.providers.image.begin_job(job.job_id)
         scene_plan = session.scalar(select(ScenePlan).where(ScenePlan.job_id == job.job_id))
         assert scene_plan
         session.execute(delete(SceneAsset).where(SceneAsset.job_id == job.job_id))
@@ -231,7 +233,7 @@ class AssetPipeline(BasePipeline):
                 variant_cursor += 1
                 ai_path = scene_dir / ("ai.png" if variant_cursor == 1 else f"ai-{variant_cursor}.png")
                 try:
-                    ai_asset = self.image_assets.generate_primary_asset(variant_scene, ai_path)
+                    ai_asset = self.image_assets.generate_primary_asset(job_id, variant_scene, ai_path)
                     ai_asset = self.image_assets.normalize_asset_uri_extension(ai_asset)
                     ai_scores = self.image_assets.score_asset(variant_scene, ai_asset)
                     candidates.append((ai_asset, ai_scores))
@@ -684,12 +686,13 @@ class AssetPipeline(BasePipeline):
             outputs.extend(["audio/sound_design.wav", "sound_design.json"])
         return outputs
 
-    def _generate_primary_asset(self, scene: dict[str, Any], output_path: Path) -> dict[str, Any]:
+    def _generate_primary_asset(self, job_id: str, scene: dict[str, Any], output_path: Path) -> dict[str, Any]:
         result_queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=1)
+        scene_for_provider = {**scene, "job_id": job_id}
 
         def run() -> None:
             try:
-                result_queue.put(("ok", self.providers.image.generate(scene, output_path)), block=False)
+                result_queue.put(("ok", self.providers.image.generate(scene_for_provider, output_path)), block=False)
             except BaseException as exc:  # noqa: BLE001
                 result_queue.put(("error", exc), block=False)
 

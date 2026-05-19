@@ -1366,6 +1366,124 @@ pre {
   justify-content: space-between;
   gap: 0.5rem;
   margin-bottom: 0.75rem;
+  position: relative;
+  align-items: start;
+}
+
+.calendar-day-label {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.calendar-add-button {
+  width: 1.75rem;
+  height: 1.75rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.95rem;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--muted);
+}
+
+.calendar-add-button:hover,
+.calendar-add-button:focus-visible {
+  background: rgba(198, 89, 42, 0.12);
+  border-color: rgba(198, 89, 42, 0.2);
+  color: var(--ink);
+}
+
+.calendar-schedule-modal {
+  width: min(860px, calc(100vw - 2rem));
+  max-height: calc(100dvh - 2rem);
+}
+
+.calendar-schedule-card {
+  gap: 1.1rem;
+  max-height: calc(100dvh - 2rem);
+  overflow-y: auto;
+}
+
+.calendar-schedule-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.2fr);
+  gap: 1rem;
+}
+
+.calendar-schedule-day,
+.calendar-modal-form {
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.calendar-schedule-day {
+  align-content: start;
+  padding: 0.9rem;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.62);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.calendar-schedule-day span,
+.calendar-schedule-day small,
+.calendar-modal-form label {
+  color: var(--muted);
+}
+
+.calendar-schedule-day strong {
+  font-size: 1.3rem;
+}
+
+.calendar-schedule-existing {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.calendar-schedule-existing p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.calendar-schedule-existing .calendar-card {
+  background: rgba(248, 250, 252, 0.08);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.calendar-modal-form input,
+.calendar-modal-form select {
+  min-width: 0;
+  width: 100%;
+}
+
+.calendar-modal-form input:disabled,
+.calendar-modal-form select:disabled,
+.calendar-modal-form button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+
+.calendar-modal-form button:disabled {
+  color: var(--muted);
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.2);
+}
+
+.calendar-time-chips {
+  margin: 0;
+}
+
+.calendar-schedule-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.25rem;
 }
 
 .calendar-items {
@@ -1687,7 +1805,17 @@ a:focus-visible {
     grid-template-columns: 1fr;
   }
 
-  .calendar-grid {
+  .calendar-grid,
+  .calendar-schedule-layout {
     grid-template-columns: 1fr;
+  }
+
+  .calendar-head {
+    display: none;
+  }
+
+  .calendar-schedule-modal,
+  .calendar-schedule-card {
+    max-height: calc(100dvh - 1rem);
   }
 }

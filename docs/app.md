@@ -29,9 +29,39 @@ Persistencia local padrao:
 5. Ao fim, o status do job vira `monetization_review`, `blocked_for_monetization` ou `ready_for_upload`.
 6. O revisor abre `/jobs/{job_id}`, assiste ao video, revisa checklist e aprova ou rejeita.
 7. Ao aprovar, o job vira `approved_for_publish`.
-8. A partir disso, o operador pode salvar metadados de upload, agendar, publicar imediatamente ou reabrir para republicacao.
+8. A partir disso, o operador pode salvar metadados de upload, agendar pela pagina do job ou pelo calendario, publicar imediatamente ou reabrir para republicacao.
 9. Em `YTS_YOUTUBE_PUBLISH_MODE=api` com OAuth conectado, o worker processa slots vencidos e sobe o video no YouTube automaticamente.
 10. Em `manual`, o hub continua servindo para aprovacao, agenda local e registro de publish manual.
+
+## Modos de entrada
+
+`POST /jobs` recebe tres modos operacionais pelo campo `input_mode`:
+
+- `theme`: assunto bruto. Quando `seed_theme` vem vazio, o hub tenta resolver um tema automatico por tendencias e registra fallback quando nao encontra candidato vivo.
+- `title`: titulo completo fornecido pelo operador. O app preserva a promessa central e ainda passa pelo fluxo normal de pauta, roteiro e gates.
+- `script`: **Roteiro Pronto** em texto rotulado. O app preserva o texto como fonte editorial e nao chama LLM para gerar outro roteiro.
+
+O `Roteiro Pronto` exige estes rotulos:
+
+```text
+Titulo: ...
+Hook: ...
+Loop: ...
+Beats:
+- ...
+Payoff: ...
+Fechamento: ...
+Hashtags: #opcional
+```
+
+Regras importantes desse modo:
+
+- `ready_script_fact_check_confirmed=true` e obrigatorio no hub/API.
+- `Titulo` vira metadado, nao narracao.
+- a narracao e montada com `Hook`, `Loop`, `Beats`, `Payoff` e `Fechamento`.
+- `Loop` e tratado como tensao narrativa, nao como fato declarado.
+- fatos declarados entram a partir de `Beats` e `Payoff` sob responsabilidade da confirmacao humana.
+- desvios grandes de formato ou duracao bloqueiam antes de midia; o app nao reescreve automaticamente hook, beats, payoff ou fechamento.
 
 ## Estados
 
@@ -118,7 +148,8 @@ O contexto de integracao exposto no hub usa:
 | `GET` | `/youtube/connect` | Inicia OAuth do YouTube. |
 | `GET` | `/youtube/oauth/callback` | Conclui OAuth do YouTube. |
 | `POST` | `/youtube/disconnect` | Remove token OAuth local. |
-| `GET` | `/calendar` | Calendario mensal de programados e publicados. |
+| `GET` | `/calendar` | Calendario mensal de programados, publicados e jobs aprovados livres para agendar. |
+| `POST` | `/calendar/schedule` | Agenda um job aprovado a partir do dia escolhido no calendario. |
 | `POST` | `/jobs` | Cria novo job. |
 | `GET` | `/api/jobs/{job_id}` | JSON compacto com status e render. |
 | `GET` | `/jobs/{job_id}` | Detalhe do job com revisao, agenda e metadados. |
@@ -159,6 +190,16 @@ Blocos relevantes de configuracao:
 - YouTube: `YTS_YOUTUBE_*`
 - direitos: `YTS_*COMMERCIAL_RIGHTS*`, `YTS_CONSERVATIVE_SYNTHETIC_DISCLOSURE`, `YTS_ALLOW_SYNTHETIC_VISUALS_FOR_MONETIZATION`
 - worker e retencao: `YTS_WORKER_POLL_SECONDS`, `YTS_JOB_LEASE_SECONDS`, `YTS_ARTIFACT_RETENTION_*`
+
+Credenciais MiniMax por midia:
+
+- texto usa `YTS_MINIMAX_TEXT_API_KEY` ou `YTS_MINIMAX_API_KEY`
+- imagem tenta primeiro a chave resolvida de texto
+- imagem usa `YTS_MINIMAX_IMAGE_API_KEY` so depois de limite ou quota na chave de texto, e marca essa chave como esgotada para o job atual
+- se nao houver chave de texto, imagem usa diretamente `YTS_MINIMAX_IMAGE_API_KEY`
+- musica usa `YTS_MINIMAX_MUSIC_API_KEY` ou a chave resolvida de texto
+
+Limite de provedor para troca de chave de imagem significa quota, saldo, credito ou rate limit. Timeout, erro de conexao, resposta invalida e `5xx` continuam sendo falhas transientes da chamada atual.
 
 ## Persistencia e artefatos
 
@@ -242,6 +283,8 @@ A job page atual e deliberadamente centrada em decisao:
 3. agendar ou publicar
 
 Conteudo tecnico, erros e artefatos ficam colapsados em paines secundarios.
+
+O calendario e uma superficie operacional secundaria. Ele mostra slots programados e publicados, mas tambem abre um modal de agenda pelo botao `+` de cada dia do mes atual. Esse modal lista apenas jobs em `approved_for_publish` que ainda nao estejam publicados nem tenham agenda ativa.
 
 ## Testes
 

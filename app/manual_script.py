@@ -65,7 +65,7 @@ def extract_ready_script_from_notes(notes: str | None) -> ReadyScript | None:
 
 def parse_ready_script(raw_text: str, *, fact_check_confirmed: bool) -> ReadyScript:
     fields = _parse_labeled_text(raw_text)
-    missing = [label for label in ["title", "hook", "beats", "payoff", "closing"] if not fields.get(label)]
+    missing = [label for label in ["title", "hook", "loop", "beats", "payoff", "closing"] if not fields.get(label)]
     if missing:
         raise ValueError(f"roteiro pronto sem campos obrigatorios: {', '.join(missing)}")
 
@@ -75,11 +75,13 @@ def parse_ready_script(raw_text: str, *, fact_check_confirmed: bool) -> ReadyScr
     payoff = _clean_sentence(fields["payoff"])
     closing = _clean_sentence(fields["closing"])
     hook = _clean_sentence(fields["hook"])
+    loop = _clean_sentence(fields["loop"])
     title = _clean_title(fields["title"])
     hashtags = _parse_hashtags(fields.get("hashtags", ""))
 
-    narration_parts = [hook, *beats, payoff, closing]
+    narration_parts = [hook, loop, *beats, payoff, closing]
     full_narration = " ".join(_ensure_sentence(part) for part in narration_parts if part).strip()
+    # Loop is an editorial tension question, not a factual claim to audit/ground.
     key_facts = [*beats, payoff]
     source_fact_ids = [f"D{index}" for index in range(1, len(key_facts) + 1)] if fact_check_confirmed else []
     claim_trace = [

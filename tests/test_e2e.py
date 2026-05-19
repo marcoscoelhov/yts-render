@@ -238,6 +238,8 @@ def test_full_pipeline_reaches_monetization_review() -> None:
 
 def test_artifact_url_maps_file_uri_to_static_route() -> None:
     artifact_path = Path(os.environ["YTS_DATA_DIR"]).resolve() / "artifacts" / "job-1" / "render" / "final.mp4"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_bytes(b"video")
     assert artifact_url(artifact_path.as_uri()) == "/artifacts/job-1/render/final.mp4"
 
 
@@ -258,6 +260,8 @@ def test_hub_auth_token_protects_pages_and_artifacts(monkeypatch) -> None:
 def test_artifact_url_does_not_embed_hub_auth_token(monkeypatch) -> None:
     monkeypatch.setattr(main_module.settings, "hub_auth_token", "secret-token")
     artifact_path = Path(os.environ["YTS_DATA_DIR"]).resolve() / "artifacts" / "job-1" / "render" / "final.mp4"
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_bytes(b"video")
 
     assert artifact_url(artifact_path.as_uri()) == "/artifacts/job-1/render/final.mp4"
 
@@ -1035,7 +1039,7 @@ def test_minimax_scene_prompt_keeps_image_prompt_english_exception(monkeypatch) 
     assert "image_prompt MUST be written in English only" in prompt
 
 
-def test_minimax_text_and_image_providers_use_dedicated_keys(monkeypatch) -> None:
+def test_minimax_image_provider_prefers_text_key_before_dedicated_key(monkeypatch) -> None:
     captured: dict[str, str] = {}
 
     def fake_openai(**kwargs):
@@ -1045,6 +1049,7 @@ def test_minimax_text_and_image_providers_use_dedicated_keys(monkeypatch) -> Non
 
     settings = SimpleNamespace(
         resolved_minimax_text_api_key="text-key",
+        minimax_image_api_key="image-key",
         resolved_minimax_image_api_key="image-key",
         minimax_text_base_url="https://text.example/v1",
         minimax_image_base_url="https://image.example/v1/image_generation",
@@ -1062,8 +1067,75 @@ def test_minimax_text_and_image_providers_use_dedicated_keys(monkeypatch) -> Non
         "text_api_key": "text-key",
         "text_base_url": "https://text.example/v1",
     }
-    assert image.key == "image-key"
+    assert image.key == "text-key"
+    assert image.primary_key == "text-key"
+    assert image.dedicated_key == "image-key"
     assert image.url == "https://image.example/v1/image_generation"
+
+
+def test_minimax_image_provider_falls_back_to_dedicated_key_on_quota(monkeypatch, tmp_path) -> None:
+    settings = SimpleNamespace(
+        resolved_minimax_text_api_key="text-key",
+        minimax_image_api_key="image-key",
+        resolved_minimax_image_api_key="image-key",
+        minimax_image_base_url="https://image.example/v1/image_generation",
+    )
+    request = httpx.Request("POST", settings.minimax_image_base_url)
+    tiny_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lCw3GQAAAABJRU5ErkJggg=="
+    calls: list[str] = []
+
+    def fake_post(url, headers, json, timeout):  # noqa: ANN001
+        calls.append(headers["Authorization"])
+        if len(calls) == 1:
+            return httpx.Response(429, request=request, text="quota exceeded")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"base_resp": {"status_code": 0}, "data": {"image_base64": [tiny_png]}},
+        )
+
+    monkeypatch.setattr("app.providers.get_settings", lambda: settings)
+    monkeypatch.setattr("app.providers.httpx.post", fake_post)
+
+    provider = MinimaxImageProvider()
+    scene = {"job_id": "job-quota", "image_prompt": "vertical science image"}
+    result = provider.generate(scene, tmp_path / "first.png")
+    second = provider.generate(scene, tmp_path / "second.png")
+
+    assert calls == [
+        "Bearer text-key",
+        "Bearer image-key",
+        "Bearer image-key",
+    ]
+    assert result["provider_metadata"]["credential_role"] == "image_dedicated"
+    assert result["provider_metadata"]["fallback_from_text_key"] is True
+    assert result["provider_metadata"]["text_key_exhausted_for_job"] is True
+    assert second["provider_metadata"]["credential_role"] == "image_dedicated"
+
+
+def test_minimax_image_provider_does_not_use_dedicated_key_for_timeout(monkeypatch, tmp_path) -> None:
+    settings = SimpleNamespace(
+        resolved_minimax_text_api_key="text-key",
+        minimax_image_api_key="image-key",
+        resolved_minimax_image_api_key="image-key",
+        minimax_image_base_url="https://image.example/v1/image_generation",
+    )
+    calls: list[str] = []
+
+    def fake_post(url, headers, json, timeout):  # noqa: ANN001
+        calls.append(headers["Authorization"])
+        raise httpx.ReadTimeout("slow")
+
+    monkeypatch.setattr("app.providers.get_settings", lambda: settings)
+    monkeypatch.setattr("app.providers.httpx.post", fake_post)
+    monkeypatch.setattr("app.providers.time.sleep", lambda _: None)
+
+    provider = MinimaxImageProvider()
+    with pytest.raises(ProviderFailure, match="connection failed after 3 attempts"):
+        provider.generate({"job_id": "job-timeout", "image_prompt": "vertical science image"}, tmp_path / "timeout.png")
+
+    assert calls == ["Bearer text-key", "Bearer text-key", "Bearer text-key"]
+    assert provider._primary_exhausted_for_job("job-timeout") is False
 
 
 def test_script_metrics_normalize_zero_to_ten_provider_scores() -> None:
@@ -1862,6 +1934,76 @@ def test_schedule_publication_persists_row_and_appears_in_calendar() -> None:
     assert calendar_page.status_code == 200
     assert "Lago Natron parece impossível" in calendar_page.text
     assert "14:30" in calendar_page.text
+
+
+def test_calendar_quick_add_lists_only_unscheduled_approved_jobs() -> None:
+    client = TestClient(app)
+    ready_job_id = "calendar-quick-ready"
+    published_job_id = "calendar-quick-published"
+    scheduled_job_id = "calendar-quick-scheduled"
+    with SessionLocal() as session:
+        _create_basic_job(session, job_id=ready_job_id, status="approved_for_publish", seed_theme="Job pronto para o calendário")
+        _create_basic_job(session, job_id=published_job_id, status="published", seed_theme="Job publicado fora da lista")
+        _create_basic_job(session, job_id=scheduled_job_id, status="approved_for_publish", seed_theme="Job já agendado fora da lista")
+        session.add(
+            PublicationSchedule(
+                schedule_id=f"{scheduled_job_id}-schedule",
+                job_id=scheduled_job_id,
+                schema_version="1.0.0",
+                content_hash=f"{scheduled_job_id}-schedule-hash",
+                scheduled_for_utc=datetime(2100, 1, 10, 18, 0, tzinfo=UTC),
+                timezone="UTC",
+                youtube_visibility="private",
+                status="scheduled",
+            )
+        )
+        session.commit()
+
+    response = client.get("/calendar?month=2099-07")
+
+    assert response.status_code == 200
+    assert 'action="/calendar/schedule"' in response.text
+    assert 'id="calendar-schedule-modal"' in response.text
+    assert 'data-open-calendar-schedule' in response.text
+    assert 'data-calendar-date="2099-07-01"' in response.text
+    assert "Job pronto para o calendário" in response.text
+    assert "Job publicado fora da lista" not in response.text
+    assert "Job já agendado fora da lista" not in response.text
+
+
+def test_calendar_quick_add_schedules_job_on_selected_day() -> None:
+    client = TestClient(app)
+    job_id = "calendar-quick-post"
+    with SessionLocal() as session:
+        _create_basic_job(session, job_id=job_id, status="approved_for_publish", seed_theme="Publicação rápida")
+        session.commit()
+
+    response = client.post(
+        "/calendar/schedule",
+        data={
+            "job_id": job_id,
+            "scheduled_date": "2099-08-15",
+            "scheduled_time": "16:45",
+            "timezone": "America/Sao_Paulo",
+            "youtube_visibility": "private",
+            "month": "2099-08",
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/calendar?month=2099-08"
+    with SessionLocal() as session:
+        schedule = session.query(PublicationSchedule).filter_by(job_id=job_id).one()
+        job = session.get(Job, job_id)
+
+    assert schedule.status == "scheduled"
+    assert schedule.timezone == "America/Sao_Paulo"
+    assert schedule.youtube_visibility == "private"
+    assert job and job.artifact_index["publication_schedule"] == "publication_schedule.json"
+    artifact = json.loads((Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id / "publication_schedule.json").read_text(encoding="utf-8"))
+    assert artifact["local_date"] == "2099-08-15"
+    assert artifact["local_time"] == "16:45"
 
 
 def test_clear_publication_schedule_marks_entry_cancelled() -> None:
@@ -2922,7 +3064,7 @@ def test_youtube_build_flow_enables_pkce(monkeypatch, tmp_path) -> None:
         return FakeFlow()
 
     flow_module = SimpleNamespace(Flow=SimpleNamespace(from_client_config=fake_from_client_config))
-    monkeypatch.setitem(__import__("sys").modules, "google_auth_oauthlib.flow", flow_module)
+    monkeypatch.setattr(publisher, "_google_flow_dependency", lambda: flow_module)
 
     flow = publisher._build_flow("https://example.test/youtube/oauth/callback", state="state-123")
 
@@ -4505,6 +4647,7 @@ Fechamento: Em Venus, aniversário chega antes do pôr do sol."""
     assert metrics["script_quality_gate_pass"] is True
     assert "script_quality_gate_warnings" in metrics
     assert "243 dias para girar" in script["full_narration"]
+    assert "Como um planeta pode" in script["full_narration"]
     assert "“" not in script["full_narration"]
     assert script["claim_trace"]
 
