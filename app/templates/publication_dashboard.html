@@ -9,6 +9,7 @@
       <span><strong>{{ metrics.unscheduled_approved_count }}</strong> aprovados sem agenda</span>
       <span><strong>{{ metrics.scheduled_count }}</strong> programados</span>
       <span><strong>{{ metrics.published_count }}</strong> publicados</span>
+      <span><strong>{{ metrics.tiktok_scheduled_count }}</strong> TikTok pendentes</span>
     </div>
   </section>
 
@@ -90,6 +91,32 @@
       <h4>O que falta</h4>
       <div class="publication-list">
         {% for item in integration.missing_items %}
+        <div class="publication-item">
+          <strong>Pendente</strong>
+          <p>{{ item }}</p>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </article>
+
+    <article class="panel publication-panel">
+      <p class="eyebrow">TikTok</p>
+      <h3>Publicação cruzada</h3>
+      <div class="stats-grid compact">
+        <div><strong>Automação</strong><span>{% if tiktok_integration.enabled %}ligada{% else %}pausada{% endif %}</span></div>
+        <div><strong>Token</strong><span>{% if tiktok_integration.token_configured %}configurado{% else %}ausente{% endif %}</span></div>
+        <div><strong>Privacidade</strong><span>{{ tiktok_integration.privacy_level }}</span></div>
+        <div><strong>Backlog/dia</strong><span>{{ tiktok_integration.retropost_daily_limit }}</span></div>
+      </div>
+      <div class="publication-metrics compact">
+        <span><strong>{{ metrics.tiktok_scheduled_count }}</strong> pendentes</span>
+        <span><strong>{{ metrics.tiktok_published_count }}</strong> publicados</span>
+        <span><strong>{{ metrics.tiktok_failed_count }}</strong> falhas</span>
+      </div>
+      {% if tiktok_integration.missing_items %}
+      <div class="publication-list">
+        {% for item in tiktok_integration.missing_items %}
         <div class="publication-item">
           <strong>Pendente</strong>
           <p>{{ item }}</p>

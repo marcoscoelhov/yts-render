@@ -40,6 +40,34 @@ _Avoid_: duplicidade de env, patch manual, estado invisivel
 A area persistente do **Console Operacional** que aparece em todas as telas e concentra identidade, navegacao principal, conexao e configuracoes operacionais recorrentes.
 _Avoid_: sidebar do workbench, painel de criacao, bloco de publicacao
 
+**Barra de Navegacao Mobile do Hub**:
+A apresentacao compacta da navegacao principal do **Console Operacional** em telas pequenas, preservando a fila como foco inicial e movendo controles recorrentes para acionadores leves.
+_Avoid_: sidebar empilhada, menu completo acima da fila, formulario inline no topo
+
+**Busca Recolhida do Hub**:
+A apresentacao compacta da busca do **Hub de Revisao** quando a tela pequena precisa preservar o foco na fila; a busca aparece como acionador e expande apenas quando uma pessoa vai filtrar **Jobs de Video**.
+_Avoid_: campo de busca sempre aberto no mobile, formulario de filtros ocupando a primeira dobra
+
+**Acao Global de Criacao de Job**:
+O acionador persistente para iniciar um **Job de Video** a partir do **Hub de Revisao**, apresentado como comando leve e abrindo uma superficie focada de criacao.
+_Avoid_: formulario inline permanente, painel escondido no fim da fila, criacao misturada com filtros
+
+**Filtro Rapido da Fila**:
+Um recorte recorrente e visivel da fila do **Hub de Revisao** usado para alternar rapidamente entre estados comuns de **Jobs de Video**.
+_Avoid_: filtro avancado, ordenacao, formulario completo de busca
+
+**Filtro de Agenda Ativa**:
+Um **Filtro Rapido da Fila** que mostra apenas **Jobs de Video** com **Horario de Publicacao** ativo ou tentativa de publicacao associada, incluindo estados programado, publicando e falha de upload.
+_Avoid_: aprovado sem agenda, pronto para aprovar, qualquer job aprovado
+
+**Filtro de Aprovados Sem Agenda**:
+Um **Filtro Rapido da Fila** que mostra **Jobs de Video** aprovados para publicar, mas ainda sem **Horario de Publicacao** ativo.
+_Avoid_: agendado, publicado, publicando
+
+**Filtro Avancado da Fila**:
+A superficie recolhida para refinar busca, status, fallback, revisao e ordenacao da fila quando os **Filtros Rapidos da Fila** nao bastam.
+_Avoid_: chips principais, navegacao global, painel sempre aberto
+
 **Fluxo de Decisao**:
 A ordem de tela que prioriza a proxima acao humana sobre diagnosticos e configuracoes.
 _Avoid_: dashboard generico, tela de dados, painel tecnico
@@ -180,6 +208,38 @@ _Avoid_: publicar na hora do cron, depender do worker as 11h, agenda apenas loca
 A evidencia posterior de que o YouTube tornou o video publico no horario agendado.
 _Avoid_: upload agendado, publishAt configurado, agenda local
 
+**Canal de Publicacao**:
+Uma plataforma de destino onde um **Job de Video** pode ser publicado com estado proprio, como YouTube Shorts ou TikTok.
+_Avoid_: destino implicito, espelho invisivel, tag geral unica
+
+**Confirmacao de Publicacao por Canal**:
+A evidencia de que um **Canal de Publicacao** tornou o **Arquivo de Video Final** publico ou programado conforme a regra daquele canal.
+_Avoid_: sucesso em outro canal, presuncao por horario, status global sem origem
+
+**Agendamento por Canal**:
+O horario planejado para publicar um **Job de Video** em um **Canal de Publicacao**, podendo ser sincronizado com outro canal sem depender da confirmacao posterior dele.
+_Avoid_: copiar status do YouTube, publicar depois da confirmacao de outro canal, horario sem canal
+
+**Retropostagem Controlada**:
+A inclusao de **Jobs de Video** ja publicados ou programados em um **Canal de Publicacao** numa fila limitada para publicar em outro canal sem disparar todos de uma vez.
+_Avoid_: repostar tudo imediatamente, duplicar tentativa sem registro, ignorar limite diario
+
+**Limite Diario de Retropostagem**:
+A quantidade maxima de **Jobs de Video** antigos que a **Retropostagem Controlada** pode enviar para um novo **Canal de Publicacao** em um dia.
+_Avoid_: backlog sem limite, lote imediato, consumo invisivel de quota
+
+**Elegibilidade para Publicacao Cruzada**:
+A condicao de um **Job de Video** que ja entrou em agendamento ou publicacao em um **Canal de Publicacao** principal e pode ser publicado tambem em outro canal.
+_Avoid_: pronto para upload, aprovado sem agenda, candidato ainda sem horario
+
+**Aguardando Confirmacao de Publicacao**:
+O estado operacional de um **Job de Video** cujo **Horario de Publicacao** ja venceu, mas ainda nao existe **Confirmacao de Publicacao no YouTube**.
+_Avoid_: publicado presumido, falha confirmada, agenda futura
+
+**Estado Operacional de Publicacao**:
+A leitura exibida no **Hub de Revisao** que combina a aprovacao do **Job de Video** com sua agenda e confirmacao de publicacao para indicar a proxima acao real, como aprovado sem agenda, programado, publicando, falha de upload ou publicado.
+_Avoid_: status bruto do job, status bruto da agenda, tag visual ambigua
+
 **Sincronizacao Posterior de Publicacao**:
 A verificacao automatica futura do estado real de publicacao no YouTube depois do horario agendado.
 _Avoid_: requisito da primeira versao, marcar publicado por publishAt, avaliacao manual no Studio
@@ -231,6 +291,14 @@ _Avoid_: chave invalida, provider offline, timeout, bloqueio diario global autom
 **Chave Dedicada de Imagem**:
 Uma chave MiniMax separada para geracao de imagens, usada quando a chave primaria encontra **Limite de Provedor**.
 _Avoid_: provider editorial diferente, fallback local, banco de imagens
+
+**Planejador de Cenas**:
+Um provider LLM que transforma o roteiro aprovado em plano textual de cenas, intencao visual e prompts para imagem.
+_Avoid_: gerador de imagens, provider de asset visual, renderizador
+
+**Gerador de Imagens**:
+O provider que produz ou seleciona os assets visuais a partir dos prompts do **Planejador de Cenas**. Hoje, em execucao real, e MiniMax.
+_Avoid_: planejador de cenas, LLM de roteiro, chave dedicada de imagem
 
 **Trilha Aprovada**:
 Uma musica de fundo previamente aceita para uso em **Jobs de Video**, com origem e licenca conhecidas.

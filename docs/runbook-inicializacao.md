@@ -74,8 +74,10 @@ scripts/install_systemd_service.sh
 O servico fixa o hub em `127.0.0.1:8080` e executa um port guard antes do
 start. O guard libera a porta somente quando o processo ocupando `8080`
 parece ser uma instancia anterior do proprio YTS Render; processos de outro
-app fazem o start falhar em vez de serem mortos silenciosamente. A unit
-versionada em `deploy/systemd/yts-render-hub.service.in` e renderizada pelo
+app fazem o start falhar em vez de serem mortos silenciosamente. O instalador
+tambem habilita `yts-render-hub-reload.path`, que observa `app/`, `scripts/`,
+`deploy/systemd/`, `.env` e `pyproject.toml` e reinicia o hub quando esses
+arquivos mudam. As units versionadas em `deploy/systemd/` sao renderizadas pelo
 instalador com o caminho real do checkout.
 
 Para operacao manual sem systemd:

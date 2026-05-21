@@ -20,7 +20,7 @@ from app.automation import AutomationService
 from app.config import get_settings
 from app.db import SessionLocal, init_db
 from app.manual_script import build_ready_script_notes, parse_ready_script
-from app.models import FallbackEvent, Job, PublicationSchedule, RenderOutput, SceneAsset, Script, TopicRequest
+from app.models import ChannelPublication, FallbackEvent, Job, PublicationSchedule, RenderOutput, SceneAsset, Script, TopicRequest
 from app.operational_settings import (
     apply_operational_settings,
     build_operational_settings_context,
@@ -52,6 +52,12 @@ def _shared_template_context(request: Request) -> dict[str, object]:
         "automation": automation_service.dashboard_context(),
         "viral_prompt_template": _viral_prompt_template(),
         "return_to": _request_path_with_query(request),
+        "hub_defaults": {
+            "niche_id": HUB_DEFAULT_NICHE,
+            "seed_theme": "",
+            "suggested_seed_theme": _default_seed_theme(),
+            "target_duration_sec": HUB_RETENTION_OPTIMIZED_DURATION_SEC,
+        },
     }
 
 
@@ -148,6 +154,10 @@ JOB_STATUS_LABELS = {
     "blocked_for_monetization": "Bloqueado para publicar",
     "ready_for_upload": "Pronto para aprovar",
     "approved_for_publish": "Aprovado para publicar",
+    "unscheduled_approved": "Aprovado sem agenda",
+    "scheduled_publication": "Programado",
+    "awaiting_confirmation": "Aguardando confirmação",
+    "publication_failed": "Falha de publicação",
     "published": "Publicado",
     "approved": "Aprovado",
     "rejected": "Rejeitado",
@@ -175,6 +185,8 @@ def _job_flow_stage(job_status: str | None, schedule_status: str | None = None) 
     normalized = str(job_status or "")
     if schedule_status == "published" or normalized == "published":
         return "Publicado"
+    if schedule_status == "awaiting_confirmation":
+        return "Confirmação"
     if schedule_status in {"scheduled", "publishing", "publish_failed"} or normalized == "approved_for_publish":
         return "Programação"
     if normalized in {"monetization_review", "ready_for_upload"}:
@@ -192,6 +204,8 @@ def _job_next_action(job_status: str | None, schedule_status: str | None = None)
     normalized = str(job_status or "")
     if schedule_status == "published" or normalized == "published":
         return "Registrar métricas do vídeo e seguir para o próximo."
+    if schedule_status == "awaiting_confirmation":
+        return "Aguardar confirmação real do YouTube antes de marcar como publicado."
     if schedule_status == "publish_failed":
         return "Abrir o job, revisar o erro e repetir a publicação."
     if schedule_status == "publishing":
@@ -211,6 +225,37 @@ def _job_next_action(job_status: str | None, schedule_status: str | None = None)
     if normalized == "running":
         return "Aguardar a geração terminar."
     return "Aguardar a próxima etapa automática."
+
+
+def _publication_operational_status(job: Job, schedule: PublicationSchedule | None = None) -> dict[str, str]:
+    schedule_status = str(schedule.status or "") if schedule else ""
+    scheduled_for_utc = None
+    if schedule and schedule.scheduled_for_utc:
+        scheduled_for_utc = schedule.scheduled_for_utc if schedule.scheduled_for_utc.tzinfo else schedule.scheduled_for_utc.replace(tzinfo=UTC)
+    if schedule_status == "published" or job.status == "published":
+        status = "published"
+    elif schedule_status == "publish_failed":
+        status = "publish_failed"
+    elif schedule_status == "publishing":
+        status = "publishing"
+    elif schedule_status == "scheduled" and scheduled_for_utc and scheduled_for_utc <= datetime.now(UTC) and schedule.youtube_video_id:
+        status = "awaiting_confirmation"
+    elif schedule_status == "scheduled":
+        status = "scheduled_publication"
+    elif job.status == "approved_for_publish":
+        status = "unscheduled_approved"
+    else:
+        status = str(job.status or "")
+    schedule_for_helper = status if status in {"published", "publish_failed", "publishing", "scheduled", "awaiting_confirmation"} else None
+    if status == "scheduled_publication":
+        schedule_for_helper = "scheduled"
+    return {
+        "status": status,
+        "class_name": status,
+        "label": _job_status_label(status) if status not in SCHEDULE_STATUS_LABELS else _schedule_status_label(status),
+        "stage": _job_flow_stage(job.status, schedule_for_helper),
+        "next_action": _job_next_action(job.status, schedule_for_helper),
+    }
 
 
 def _job_progress_snapshot(job: Job) -> dict[str, object]:
@@ -294,6 +339,7 @@ templates.env.globals["job_status_label"] = _job_status_label
 templates.env.globals["schedule_status_label"] = _schedule_status_label
 templates.env.globals["job_flow_stage"] = _job_flow_stage
 templates.env.globals["job_next_action"] = _job_next_action
+templates.env.globals["publication_operational_status"] = _publication_operational_status
 templates.env.globals["job_progress_snapshot"] = _job_progress_snapshot
 
 
@@ -374,15 +420,35 @@ def _query_jobs(status: str | None, search: str | None, fallback: str | None, re
                 RenderOutput.duration_ms,
                 func.coalesce(fallback_count.c.fallback_count, 0),
                 func.coalesce(final_asset.c.asset_count, 0),
+                PublicationSchedule,
             )
             .join(TopicRequest, TopicRequest.job_id == Job.job_id)
             .join(RenderOutput, RenderOutput.job_id == Job.job_id, isouter=True)
             .join(fallback_count, fallback_count.c.job_id == Job.job_id, isouter=True)
             .join(final_asset, final_asset.c.job_id == Job.job_id, isouter=True)
+            .join(PublicationSchedule, PublicationSchedule.job_id == Job.job_id, isouter=True)
             .order_by(Job.created_at.desc())
         )
         if status:
-            stmt = stmt.where(Job.status == status)
+            now = datetime.now(UTC)
+            if status == "unscheduled_approved":
+                stmt = stmt.where(Job.status == "approved_for_publish").where(
+                    or_(PublicationSchedule.schedule_id.is_(None), PublicationSchedule.status == "cancelled")
+                )
+            elif status == "scheduled_publication":
+                stmt = stmt.where(PublicationSchedule.status.in_(["scheduled", "publishing", "publish_failed"]))
+            elif status == "awaiting_confirmation":
+                stmt = stmt.where(PublicationSchedule.status == "scheduled").where(PublicationSchedule.youtube_video_id.is_not(None)).where(
+                    PublicationSchedule.scheduled_for_utc <= now
+                )
+            elif status == "publication_failed":
+                stmt = stmt.where(PublicationSchedule.status == "publish_failed")
+            elif status == "published":
+                stmt = stmt.where(or_(Job.status == "published", PublicationSchedule.status == "published"))
+            elif status == "failed":
+                stmt = stmt.where(or_(Job.status == "failed", Job.status.like("%_failed"), PublicationSchedule.status == "publish_failed"))
+            else:
+                stmt = stmt.where(Job.status == status)
         if search:
             pattern = f"%{search}%"
             stmt = stmt.where(or_(Job.job_id.like(pattern), TopicRequest.seed_theme.like(pattern), Job.topic_summary.like(pattern)))
@@ -531,6 +597,18 @@ def _youtube_integration_context(request: Request) -> dict[str, object]:
     }
 
 
+def _tiktok_integration_context() -> dict[str, object]:
+    status = orchestrator.tiktok.connection_status()
+    return {
+        "enabled": status.enabled,
+        "token_configured": status.token_configured,
+        "ready": status.ready,
+        "missing_items": status.missing_items,
+        "privacy_level": settings.tiktok_privacy_level,
+        "retropost_daily_limit": settings.tiktok_retropost_daily_limit,
+    }
+
+
 def _publication_dashboard_context(request: Request, limit: int = 6) -> dict[str, object]:
     with SessionLocal() as session:
         ready_to_schedule = _ready_to_schedule_entries(session, limit=limit)
@@ -576,6 +654,18 @@ def _publication_dashboard_context(request: Request, limit: int = 6) -> dict[str
         published_count = session.scalar(
             select(func.count()).select_from(PublicationSchedule).where(PublicationSchedule.status == "published")
         ) or 0
+        tiktok_scheduled_count = session.scalar(
+            select(func.count())
+            .select_from(ChannelPublication)
+            .where(ChannelPublication.channel == "tiktok")
+            .where(ChannelPublication.status.in_(["scheduled", "publishing", "processing"]))
+        ) or 0
+        tiktok_published_count = session.scalar(
+            select(func.count()).select_from(ChannelPublication).where(ChannelPublication.channel == "tiktok").where(ChannelPublication.status == "published")
+        ) or 0
+        tiktok_failed_count = session.scalar(
+            select(func.count()).select_from(ChannelPublication).where(ChannelPublication.channel == "tiktok").where(ChannelPublication.status == "publish_failed")
+        ) or 0
 
     upcoming_schedule = [
         {
@@ -601,6 +691,7 @@ def _publication_dashboard_context(request: Request, limit: int = 6) -> dict[str
 
     return {
         "integration": _youtube_integration_context(request),
+        "tiktok_integration": _tiktok_integration_context(),
         "automation": automation_service.dashboard_context(),
         "ready_to_schedule": ready_to_schedule,
         "upcoming_schedule": upcoming_schedule,
@@ -612,6 +703,9 @@ def _publication_dashboard_context(request: Request, limit: int = 6) -> dict[str
             "failed_count": failed_count,
             "published_count": published_count,
             "awaiting_approval_count": awaiting_approval_count,
+            "tiktok_scheduled_count": tiktok_scheduled_count,
+            "tiktok_published_count": tiktok_published_count,
+            "tiktok_failed_count": tiktok_failed_count,
         },
     }
 

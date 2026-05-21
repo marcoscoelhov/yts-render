@@ -35,6 +35,7 @@ from app.editorial.repetition import build_channel_repetition_report
 from app.editorial.topic_mode import resolve_editorial_mode
 from app.models import (
     BackgroundMusicAsset,
+    ChannelPublication,
     ErrorLog,
     FallbackEvent,
     Job,
@@ -83,6 +84,7 @@ from app.utils import (
     write_json,
 )
 from app.youtube_api import YouTubeIntegrationError, YouTubePublisher
+from app.tiktok_api import TikTokIntegrationError, TikTokPublisher
 
 
 def normalize_script_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
@@ -279,6 +281,7 @@ class JobOrchestrator:
         self.storage = StorageManager()
         self.providers = ProviderRegistry()
         self.youtube = YouTubePublisher(self.settings)
+        self.tiktok = TikTokPublisher(self.settings)
         self._last_retention_sweep_at = 0.0
         from app.pipelines.asset_pipeline import AssetPipeline
         from app.pipelines.monetization_pipeline import MonetizationPipeline
@@ -657,6 +660,9 @@ class JobOrchestrator:
     def _youtube_api_mode_enabled(self) -> bool:
         return bool(self.settings.youtube_api_enabled and self.settings.youtube_publish_mode == "api")
 
+    def _tiktok_auto_publish_enabled(self) -> bool:
+        return bool(self.settings.tiktok_auto_publish_enabled)
+
     def _ensure_youtube_api_ready(self) -> None:
         status = self.youtube.connection_status()
         blockers = [
@@ -667,6 +673,314 @@ class JobOrchestrator:
         ]
         if blockers:
             raise FatalStepError("integração YouTube indisponível: " + ", ".join(blockers))
+
+    def _channel_publication_payload(self, publication: ChannelPublication) -> dict[str, Any]:
+        scheduled_for_utc = publication.scheduled_for_utc if publication.scheduled_for_utc.tzinfo else publication.scheduled_for_utc.replace(tzinfo=UTC)
+        published_at = publication.published_at if publication.published_at and publication.published_at.tzinfo else (
+            publication.published_at.replace(tzinfo=UTC) if publication.published_at else None
+        )
+        local_dt = scheduled_for_utc.astimezone(ZoneInfo(publication.timezone))
+        return {
+            "schema_version": self.settings.schema_version,
+            "publication_id": publication.publication_id,
+            "job_id": publication.job_id,
+            "channel": publication.channel,
+            "status": publication.status,
+            "source": publication.source,
+            "scheduled_for_utc": scheduled_for_utc.isoformat(),
+            "scheduled_for_local": local_dt.isoformat(),
+            "local_date": local_dt.date().isoformat(),
+            "local_time": local_dt.strftime("%H:%M"),
+            "timezone": publication.timezone,
+            "privacy_level": publication.privacy_level,
+            "external_id": publication.external_id,
+            "external_url": publication.external_url,
+            "published_at": published_at.isoformat() if published_at else None,
+            "attempt_count": publication.attempt_count,
+            "last_attempt_at": publication.last_attempt_at.isoformat() if publication.last_attempt_at else None,
+            "last_error": publication.last_error,
+            "channel_metadata": publication.channel_metadata or {},
+        }
+
+    def _persist_channel_publication_artifact(self, job: Job, publication: ChannelPublication) -> None:
+        payload = self._channel_publication_payload(publication)
+        artifact_name = f"{publication.channel}_publication.json"
+        self.storage.persist_json(job.job_id, artifact_name, self._serialize_for_json(payload))
+        artifact_index = dict(job.artifact_index or {})
+        artifact_index[f"{publication.channel}_publication"] = artifact_name
+        job.artifact_index = artifact_index
+        quality_summary = dict(job.quality_summary or {})
+        channel_summary = dict(quality_summary.get("channel_publications") or {})
+        channel_summary[publication.channel] = {
+            "status": publication.status,
+            "source": publication.source,
+            "scheduled_for_utc": payload["scheduled_for_utc"],
+            "external_id": publication.external_id,
+            "external_url": publication.external_url,
+            "last_error": publication.last_error,
+        }
+        quality_summary["channel_publications"] = channel_summary
+        job.quality_summary = quality_summary
+
+    def _refresh_channel_publication_hash(self, publication: ChannelPublication) -> None:
+        publication.content_hash = stable_hash(
+            {
+                "job_id": publication.job_id,
+                "channel": publication.channel,
+                "status": publication.status,
+                "source": publication.source,
+                "scheduled_for_utc": publication.scheduled_for_utc.isoformat(),
+                "timezone": publication.timezone,
+                "privacy_level": publication.privacy_level,
+                "external_id": publication.external_id,
+                "external_url": publication.external_url,
+                "published_at": publication.published_at.isoformat() if publication.published_at else None,
+                "attempt_count": publication.attempt_count,
+                "last_error": publication.last_error,
+            }
+        )
+
+    def _tiktok_caption(self, package: dict[str, Any]) -> str:
+        title = str(package.get("title") or "").strip()
+        hashtags = [str(tag).strip() for tag in list(package.get("hashtags") or []) if str(tag).strip()]
+        suffix = " ".join(tag if tag.startswith("#") else f"#{tag}" for tag in hashtags[:8])
+        caption = " ".join(part for part in [title, suffix] if part)
+        return caption[:2200]
+
+    def _ensure_tiktok_publication_for_schedule(
+        self,
+        session: Session,
+        job: Job,
+        schedule: PublicationSchedule,
+        *,
+        source: str,
+        scheduled_for_utc: datetime | None = None,
+    ) -> ChannelPublication | None:
+        if not self._tiktok_auto_publish_enabled():
+            return None
+        if schedule.status not in {"scheduled", "published"}:
+            return None
+        existing = session.scalar(
+            select(ChannelPublication).where(
+                ChannelPublication.job_id == job.job_id,
+                ChannelPublication.channel == "tiktok",
+            )
+        )
+        if existing:
+            return existing
+        target_utc = scheduled_for_utc or schedule.scheduled_for_utc
+        target_utc = target_utc if target_utc.tzinfo else target_utc.replace(tzinfo=UTC)
+        publication = ChannelPublication(
+            publication_id=new_id(),
+            job_id=job.job_id,
+            channel="tiktok",
+            schema_version=self.settings.schema_version,
+            content_hash="",
+            scheduled_for_utc=target_utc,
+            timezone=schedule.timezone,
+            status="scheduled",
+            source=source,
+            privacy_level=self.settings.tiktok_privacy_level,
+        )
+        self._refresh_channel_publication_hash(publication)
+        session.add(publication)
+        session.flush()
+        self._persist_channel_publication_artifact(job, publication)
+        self._append_event(
+            job.job_id,
+            "tiktok.publication_scheduled",
+            "succeeded",
+            {"publication_id": publication.publication_id, "source": source, "scheduled_for_utc": target_utc.isoformat()},
+        )
+        return publication
+
+    def _retropost_day_bounds(self) -> tuple[datetime, datetime]:
+        local_tz = ZoneInfo(self.settings.automation_daily_timezone)
+        local_today = utcnow().astimezone(local_tz).date()
+        start = datetime.combine(local_today, datetime.min.time(), tzinfo=local_tz).astimezone(UTC)
+        end = start + timedelta(days=1)
+        return start, end
+
+    def _sync_tiktok_crosspost_queue(self) -> int:
+        if not self._tiktok_auto_publish_enabled():
+            return 0
+        queued = 0
+        now = utcnow()
+        start, end = self._retropost_day_bounds()
+        with session_scope() as session:
+            scheduled_rows = session.execute(
+                select(Job, PublicationSchedule)
+                .join(PublicationSchedule, PublicationSchedule.job_id == Job.job_id)
+                .where(PublicationSchedule.status == "scheduled")
+                .where(
+                    ~select(ChannelPublication.publication_id)
+                    .where(ChannelPublication.job_id == Job.job_id)
+                    .where(ChannelPublication.channel == "tiktok")
+                    .exists()
+                )
+                .order_by(PublicationSchedule.scheduled_for_utc)
+            ).all()
+            for job, schedule in scheduled_rows:
+                if self._ensure_tiktok_publication_for_schedule(session, job, schedule, source="youtube_schedule"):
+                    queued += 1
+
+            retropost_limit = max(0, int(self.settings.tiktok_retropost_daily_limit))
+            retroposts_today = session.scalar(
+                select(func.count())
+                .select_from(ChannelPublication)
+                .where(ChannelPublication.channel == "tiktok")
+                .where(ChannelPublication.source == "retropost")
+                .where(ChannelPublication.created_at >= start)
+                .where(ChannelPublication.created_at < end)
+            ) or 0
+            remaining = max(0, retropost_limit - int(retroposts_today))
+            if remaining:
+                published_rows = session.execute(
+                    select(Job, PublicationSchedule)
+                    .join(PublicationSchedule, PublicationSchedule.job_id == Job.job_id)
+                    .where(PublicationSchedule.status == "published")
+                    .where(
+                        ~select(ChannelPublication.publication_id)
+                        .where(ChannelPublication.job_id == Job.job_id)
+                        .where(ChannelPublication.channel == "tiktok")
+                        .exists()
+                    )
+                    .order_by(PublicationSchedule.published_at.asc(), PublicationSchedule.updated_at.asc())
+                    .limit(remaining)
+                ).all()
+                for job, schedule in published_rows:
+                    if self._ensure_tiktok_publication_for_schedule(session, job, schedule, source="retropost", scheduled_for_utc=now):
+                        queued += 1
+        return queued
+
+    def _claim_due_tiktok_publication(self) -> str | None:
+        if not self._tiktok_auto_publish_enabled():
+            return None
+        now = utcnow()
+        with session_scope() as session:
+            claimable_id = (
+                select(ChannelPublication.publication_id)
+                .where(ChannelPublication.channel == "tiktok")
+                .where(ChannelPublication.status == "scheduled")
+                .where(ChannelPublication.scheduled_for_utc <= now)
+                .order_by(ChannelPublication.scheduled_for_utc)
+                .limit(1)
+                .scalar_subquery()
+            )
+            claim = (
+                update(ChannelPublication)
+                .where(ChannelPublication.publication_id == claimable_id)
+                .where(ChannelPublication.status == "scheduled")
+                .values(status="publishing", updated_at=utcnow(), last_attempt_at=utcnow())
+                .returning(ChannelPublication.publication_id)
+            )
+            publication_id = session.execute(claim).scalar_one_or_none()
+            if not publication_id:
+                return None
+            publication = session.get(ChannelPublication, publication_id)
+            job = session.get(Job, publication.job_id) if publication else None
+            if job and publication:
+                self._refresh_channel_publication_hash(publication)
+                self._persist_channel_publication_artifact(job, publication)
+            return publication_id
+
+    def _publish_tiktok_channel_publication(self, publication_id: str) -> None:
+        with session_scope() as session:
+            publication = session.get(ChannelPublication, publication_id)
+            if not publication:
+                raise KeyError(publication_id)
+            job = session.get(Job, publication.job_id)
+            if not job:
+                raise KeyError(publication.job_id)
+            job_id = job.job_id
+            package = self._build_publish_package(session, job)
+            video_uri = str(package.get("video_uri") or "")
+            video_path = path_from_uri(video_uri)
+            privacy_level = publication.privacy_level or self.settings.tiktok_privacy_level
+            publication.attempt_count = int(publication.attempt_count or 0) + 1
+            publication.last_attempt_at = utcnow()
+        try:
+            result = self.tiktok.direct_post_video(
+                video_path=video_path,
+                title=self._tiktok_caption(package),
+                privacy_level=privacy_level,
+                is_aigc=bool(package.get("altered_or_synthetic")),
+                disable_comment=bool(self.settings.tiktok_disable_comment),
+                disable_duet=bool(self.settings.tiktok_disable_duet),
+                disable_stitch=bool(self.settings.tiktok_disable_stitch),
+            )
+        except (TikTokIntegrationError, httpx.HTTPError, OSError, FatalStepError) as exc:
+            with session_scope() as session:
+                publication = session.get(ChannelPublication, publication_id)
+                job = session.get(Job, publication.job_id) if publication else None
+                if publication:
+                    publication.status = "publish_failed"
+                    publication.last_error = str(exc)
+                    publication.channel_metadata = {"error": str(exc)}
+                    self._refresh_channel_publication_hash(publication)
+                    if job:
+                        self._persist_channel_publication_artifact(job, publication)
+            self._append_event(job_id, "tiktok.publish_failed", "failed", {"publication_id": publication_id, "error": str(exc)})
+            return
+        with session_scope() as session:
+            publication = session.get(ChannelPublication, publication_id)
+            job = session.get(Job, publication.job_id) if publication else None
+            if not publication:
+                return
+            publication.status = "processing"
+            publication.external_id = str(result.get("publish_id") or "").strip() or None
+            publication.last_error = None
+            publication.channel_metadata = self._serialize_for_json(result)
+            self._refresh_channel_publication_hash(publication)
+            if job:
+                self._persist_channel_publication_artifact(job, publication)
+        self._append_event(job_id, "tiktok.publish_started", "succeeded", {"publication_id": publication_id, "publish_id": result.get("publish_id")})
+
+    def _sync_tiktok_publication_statuses(self) -> int:
+        if not self._tiktok_auto_publish_enabled() or not self.settings.tiktok_access_token:
+            return 0
+        with session_scope() as session:
+            rows = session.execute(
+                select(ChannelPublication.publication_id, ChannelPublication.external_id)
+                .where(ChannelPublication.channel == "tiktok")
+                .where(ChannelPublication.status == "processing")
+                .where(ChannelPublication.external_id.is_not(None))
+                .order_by(ChannelPublication.updated_at)
+                .limit(10)
+            ).all()
+        synced = 0
+        for publication_id, publish_id in rows:
+            try:
+                payload = self.tiktok.fetch_post_status(str(publish_id or ""))
+            except (TikTokIntegrationError, httpx.HTTPError):
+                continue
+            status = str(payload.get("status") or "").upper()
+            public_ids = payload.get("publicaly_available_post_id") or payload.get("publicly_available_post_id") or []
+            final_status: str | None = None
+            if status == "FAILED":
+                final_status = "publish_failed"
+            elif public_ids or status in {"PUBLISH_COMPLETE", "PUBLICLY_AVAILABLE", "SUCCESS"}:
+                final_status = "published"
+            if final_status is None:
+                continue
+            with session_scope() as session:
+                publication = session.get(ChannelPublication, publication_id)
+                job = session.get(Job, publication.job_id) if publication else None
+                if not publication:
+                    continue
+                publication.status = final_status
+                publication.channel_metadata = self._serialize_for_json(payload)
+                if final_status == "published":
+                    publication.published_at = utcnow()
+                    publication.external_url = None
+                    publication.last_error = None
+                else:
+                    publication.last_error = str(payload.get("fail_reason") or "TikTok publication failed")
+                self._refresh_channel_publication_hash(publication)
+                if job:
+                    self._persist_channel_publication_artifact(job, publication)
+            synced += 1
+        return synced
 
     def _update_publication_artifact_index(self, job: Job) -> None:
         artifact_index = dict(job.artifact_index or {})
@@ -1017,6 +1331,7 @@ class JobOrchestrator:
                 quality_summary["youtube"] = payload
                 job.quality_summary = quality_summary
                 self._update_publication_artifact_index(job)
+                self._ensure_tiktok_publication_for_schedule(session, job, schedule, source="youtube_schedule")
                 self._refresh_retention_state(session, job, schedule)
             self._append_publication_attempt(
                 job_id,
@@ -1309,6 +1624,7 @@ class JobOrchestrator:
             }
             job.quality_summary = quality_summary
             self._update_publication_artifact_index(job)
+            self._ensure_tiktok_publication_for_schedule(session, job, schedule, source="youtube_publish")
             self._refresh_retention_state(session, job, schedule)
         self._append_publication_attempt(
             job_id,
@@ -1470,6 +1786,7 @@ class JobOrchestrator:
                     quality_summary["youtube"] = youtube_schedule_payload
                 job.quality_summary = quality_summary
                 self._update_publication_artifact_index(job)
+            self._ensure_tiktok_publication_for_schedule(session, job, schedule, source="youtube_schedule")
             self._refresh_retention_state(session, job, schedule)
         self._append_event(
             job_id,
@@ -1519,6 +1836,14 @@ class JobOrchestrator:
                 }
             )
             self._persist_publication_schedule_artifact(job, schedule)
+            channel_publication = session.scalar(
+                select(ChannelPublication).where(ChannelPublication.job_id == job_id, ChannelPublication.channel == "tiktok")
+            )
+            if channel_publication and channel_publication.status in {"scheduled", "publishing", "processing", "publish_failed"}:
+                channel_publication.status = "cancelled"
+                channel_publication.last_error = None
+                self._refresh_channel_publication_hash(channel_publication)
+                self._persist_channel_publication_artifact(job, channel_publication)
             self._refresh_retention_state(session, job, schedule)
         self._append_event(job_id, "youtube.schedule.cleared", "succeeded", {"youtube_video_id": youtube_video_id})
 
@@ -2663,6 +2988,9 @@ class JobOrchestrator:
                     self._run_retention_sweep()
             if self._youtube_api_mode_enabled():
                 self._sync_native_scheduled_publications()
+            if self._tiktok_auto_publish_enabled():
+                self._sync_tiktok_publication_statuses()
+                self._sync_tiktok_crosspost_queue()
             with session_scope() as session:
                 claimed_job_id = self._claim_next_job(session)
             if claimed_job_id:
@@ -2671,6 +2999,10 @@ class JobOrchestrator:
             claimed_publication_job_id = self._claim_due_publication_schedule()
             if claimed_publication_job_id:
                 self.publish_job(claimed_publication_job_id, trigger="schedule_worker")
+                continue
+            claimed_tiktok_publication_id = self._claim_due_tiktok_publication()
+            if claimed_tiktok_publication_id:
+                self._publish_tiktok_channel_publication(claimed_tiktok_publication_id)
                 continue
             time.sleep(self.settings.worker_poll_seconds)
 

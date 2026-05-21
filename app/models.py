@@ -240,6 +240,31 @@ class PublicationSchedule(Base):
     youtube_url: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class ChannelPublication(Base):
+    __tablename__ = "channel_publications"
+    __table_args__ = (UniqueConstraint("job_id", "channel", name="uq_channel_publication_job_channel"),)
+
+    publication_id: Mapped[str] = mapped_column(String, primary_key=True)
+    job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id"), index=True)
+    channel: Mapped[str] = mapped_column(String, index=True)
+    schema_version: Mapped[str] = mapped_column(String, default="1.0.0")
+    content_hash: Mapped[str] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    scheduled_for_utc: Mapped[datetime] = mapped_column(DateTime)
+    timezone: Mapped[str] = mapped_column(String, default="UTC")
+    status: Mapped[str] = mapped_column(String, default="scheduled", index=True)
+    source: Mapped[str] = mapped_column(String, default="crosspost")
+    privacy_level: Mapped[str | None] = mapped_column(String, nullable=True)
+    external_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    external_url: Mapped[str | None] = mapped_column(String, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_metadata: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
 class PerformanceMetric(Base):
     __tablename__ = "performance_metrics"
 

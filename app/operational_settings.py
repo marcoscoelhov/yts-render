@@ -22,6 +22,16 @@ class OperationalSettingSpec:
     min_value: float | None = None
     max_value: float | None = None
     step: str | None = None
+    description: str | None = None
+
+
+@dataclass(frozen=True)
+class OperationalInfoSpec:
+    key: str
+    label: str
+    group: str
+    value: str
+    description: str | None = None
 
 
 PROVIDER_OPTIONS = (
@@ -35,7 +45,14 @@ OPERATIONAL_SETTING_SPECS = (
     OperationalSettingSpec("llm_fallback_provider", "LLM fallback", "LLM", "select", PROVIDER_OPTIONS),
     OperationalSettingSpec("llm_script_draft_provider", "Rascunho de roteiro", "LLM", "select", PROVIDER_OPTIONS),
     OperationalSettingSpec("llm_repair_provider", "Reparo", "LLM", "select", PROVIDER_OPTIONS),
-    OperationalSettingSpec("llm_scene_provider", "Cenas", "LLM", "select", PROVIDER_OPTIONS),
+    OperationalSettingSpec(
+        "llm_scene_provider",
+        "Planejador de cenas (LLM)",
+        "LLM",
+        "select",
+        PROVIDER_OPTIONS,
+        description="Cria o plano textual de cenas e prompts; nao gera imagens.",
+    ),
     OperationalSettingSpec("llm_enable_fallback", "Fallback ativo", "LLM", "checkbox"),
     OperationalSettingSpec(
         "background_music_provider",
@@ -50,6 +67,21 @@ OPERATIONAL_SETTING_SPECS = (
     OperationalSettingSpec("youtube_publish_mode", "Modo YouTube", "Publicacao", "select", (("manual", "Manual"), ("api", "API"))),
     OperationalSettingSpec("youtube_api_enabled", "API YouTube ativa", "Publicacao", "checkbox"),
     OperationalSettingSpec("youtube_notify_subscribers", "Notificar inscritos", "Publicacao", "checkbox"),
+    OperationalSettingSpec("tiktok_auto_publish_enabled", "Publicar no TikTok", "Publicacao", "checkbox"),
+    OperationalSettingSpec(
+        "tiktok_privacy_level",
+        "Privacidade TikTok",
+        "Publicacao",
+        "select",
+        (
+            ("PUBLIC_TO_EVERYONE", "Publico"),
+            ("MUTUAL_FOLLOW_FRIENDS", "Amigos mutuos"),
+            ("FOLLOWER_OF_CREATOR", "Seguidores"),
+            ("SELF_ONLY", "Privado"),
+        ),
+        description="A API oficial exige que o valor exista nas opcoes retornadas pela conta conectada.",
+    ),
+    OperationalSettingSpec("tiktok_retropost_daily_limit", "Retroposts TikTok/dia", "Publicacao", "number", min_value=0, max_value=10, step="1"),
     OperationalSettingSpec("automation_daily_timezone", "Fuso da automacao", "Automacao", "text"),
     OperationalSettingSpec("automation_daily_run_time", "Horario do ciclo", "Automacao", "time"),
     OperationalSettingSpec("automation_publish_time", "Horario de publicacao", "Automacao", "time"),
@@ -57,6 +89,16 @@ OPERATIONAL_SETTING_SPECS = (
     OperationalSettingSpec("automation_max_generation_attempts", "Tentativas de geracao", "Automacao", "number", min_value=1, max_value=10, step="1"),
     OperationalSettingSpec("automation_max_publish_attempts_per_job", "Tentativas de upload", "Automacao", "number", min_value=1, max_value=10, step="1"),
     OperationalSettingSpec("automation_score_threshold", "Score minimo", "Automacao", "number", min_value=0, max_value=1, step="0.01"),
+)
+
+OPERATIONAL_INFO_SPECS = (
+    OperationalInfoSpec(
+        "image_generation_provider",
+        "Gerador de imagens",
+        "Imagem",
+        "MiniMax",
+        "Gera os assets visuais no passo Imagens. Hoje nao ha outro provider real selecionavel.",
+    ),
 )
 
 OPERATIONAL_SETTING_KEYS = {spec.key for spec in OPERATIONAL_SETTING_SPECS}
@@ -81,7 +123,7 @@ def build_operational_settings_context(settings: Settings) -> dict[str, Any]:
     with SessionLocal() as session:
         saved_keys = set(load_operational_settings(session))
     groups: list[dict[str, Any]] = []
-    for group_name in ("LLM", "Musica", "Publicacao", "Automacao"):
+    for group_name in ("LLM", "Imagem", "Musica", "Publicacao", "Automacao"):
         fields = []
         for spec in OPERATIONAL_SETTING_SPECS:
             if spec.group != group_name:
@@ -99,8 +141,29 @@ def build_operational_settings_context(settings: Settings) -> dict[str, Any]:
                     "max": spec.max_value,
                     "step": spec.step,
                     "saved": spec.key in saved_keys,
+                    "description": spec.description,
                 }
             )
+        for spec in OPERATIONAL_INFO_SPECS:
+            if spec.group != group_name:
+                continue
+            fields.append(
+                {
+                    "key": spec.key,
+                    "label": spec.label,
+                    "input_type": "readonly",
+                    "value": "Mock local" if settings.use_mock_providers and spec.key == "image_generation_provider" else spec.value,
+                    "checked": False,
+                    "options": [],
+                    "min": None,
+                    "max": None,
+                    "step": None,
+                    "saved": False,
+                    "description": spec.description,
+                }
+            )
+        if not fields:
+            continue
         groups.append({"name": group_name, "fields": fields})
     return {"groups": groups, "saved_count": len(saved_keys)}
 
@@ -147,7 +210,7 @@ def parse_operational_form_values(form_values: dict[str, Any]) -> dict[str, Any]
             continue
         raw_value = form_values.get(spec.key)
         if raw_value is None:
-            raise ValueError(f"{spec.label} ausente")
+            continue
         parsed[spec.key] = str(raw_value).strip()
     return parsed
 

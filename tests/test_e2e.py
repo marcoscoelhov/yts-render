@@ -33,7 +33,7 @@ from app.db import SessionLocal, engine, init_db  # noqa: E402
 from app.editorial.retention import EDITORIAL_PROMPT_VERSION, build_retention_map  # noqa: E402
 from app.editorial.repetition import build_channel_repetition_report  # noqa: E402
 from app.main import app, artifact_url  # noqa: E402
-from app.models import AutomationAttempt, AutomationRun, ReadyScriptItem, BackgroundMusicAsset, Job, NarrationAsset, OperationalSetting, PerformanceMetric, PublicationSchedule, RenderOutput, SceneAsset, Script, SubtitleTrack, TopicPlan, TopicRegistry, TopicRequest  # noqa: E402
+from app.models import AutomationAttempt, AutomationRun, ReadyScriptItem, BackgroundMusicAsset, ChannelPublication, Job, NarrationAsset, OperationalSetting, PerformanceMetric, PublicationSchedule, RenderOutput, SceneAsset, Script, SubtitleTrack, TopicPlan, TopicRegistry, TopicRequest  # noqa: E402
 from app.music_bank import import_minimax_music_artifacts, populate_builtin_music_bank  # noqa: E402
 from app.orchestrator import JobOrchestrator, RecoverableStepError, StepDefinition, normalize_script_metrics, orchestrator  # noqa: E402
 from app.providers import DeepSeekCreativeProvider, LLMProviderRegistry, LocalMusicBankProvider, LocalSpeechFallbackProvider, MiniMaxBackgroundMusicProvider, MinimaxCreativeProvider, MinimaxImageProvider, MockCreativeProvider, OpenAICreativeProvider, ProviderFailure, ResilientCreativeProvider, ResilientMusicProvider  # noqa: E402
@@ -53,6 +53,10 @@ def isolate_youtube_settings(monkeypatch):
     monkeypatch.setattr(main_module.settings, "youtube_api_enabled", False)
     monkeypatch.setattr(orchestrator.settings, "youtube_publish_mode", "manual")
     monkeypatch.setattr(orchestrator.settings, "youtube_api_enabled", False)
+    monkeypatch.setattr(main_module.settings, "tiktok_auto_publish_enabled", False)
+    monkeypatch.setattr(orchestrator.settings, "tiktok_auto_publish_enabled", False)
+    monkeypatch.setattr(main_module.settings, "tiktok_access_token", None)
+    monkeypatch.setattr(orchestrator.settings, "tiktok_access_token", None)
 
 
 def wait_for_status(job_id: str, expected: str, timeout: float = 90.0) -> None:
@@ -473,6 +477,22 @@ def test_operational_settings_route_saves_allowlisted_overrides() -> None:
 
     reset = client.post("/operations/settings", data={"return_to": "/", "action": "reset"}, follow_redirects=False)
     assert reset.status_code == 303
+
+
+def test_operational_settings_context_separates_scene_planner_from_image_generator(monkeypatch) -> None:
+    from app.operational_settings import build_operational_settings_context
+
+    monkeypatch.setattr(main_module.settings, "use_mock_providers", False)
+    context = build_operational_settings_context(main_module.settings)
+    fields = {field["key"]: field for group in context["groups"] for field in group["fields"]}
+    group_names = {group["name"] for group in context["groups"]}
+
+    assert fields["llm_scene_provider"]["label"] == "Planejador de cenas (LLM)"
+    assert "nao gera imagens" in fields["llm_scene_provider"]["description"]
+    assert "Imagem" in group_names
+    assert fields["image_generation_provider"]["label"] == "Gerador de imagens"
+    assert fields["image_generation_provider"]["input_type"] == "readonly"
+    assert fields["image_generation_provider"]["value"] == "MiniMax"
 
 
 def test_operational_settings_rejects_secret_fields() -> None:
@@ -2270,6 +2290,40 @@ def test_hub_jobs_table_supports_pagination_for_older_jobs() -> None:
     assert "Página 2 de 2" in second_page.text
 
 
+def test_jobs_queue_uses_publication_schedule_for_operational_state() -> None:
+    client = TestClient(app)
+    unscheduled_job_id = "queue-unscheduled-approved"
+    scheduled_job_id = "queue-scheduled-approved"
+    with SessionLocal() as session:
+        _create_basic_job(session, job_id=unscheduled_job_id, status="approved_for_publish", seed_theme="Job aprovado sem agenda")
+        _create_basic_job(session, job_id=scheduled_job_id, status="approved_for_publish", seed_theme="Job programado real")
+        session.add(
+            PublicationSchedule(
+                schedule_id=f"{scheduled_job_id}-schedule",
+                job_id=scheduled_job_id,
+                schema_version="1.0.0",
+                content_hash=f"{scheduled_job_id}-schedule-hash",
+                scheduled_for_utc=datetime(2099, 7, 1, 14, 0, tzinfo=UTC),
+                timezone="America/Sao_Paulo",
+                youtube_visibility="public",
+                status="scheduled",
+            )
+        )
+        session.commit()
+
+    scheduled_response = client.get("/jobs?status=scheduled_publication")
+    assert scheduled_response.status_code == 200
+    assert "Job programado real" in scheduled_response.text
+    assert "Job aprovado sem agenda" not in scheduled_response.text
+    assert "Programado" in scheduled_response.text
+
+    unscheduled_response = client.get("/jobs?status=unscheduled_approved")
+    assert unscheduled_response.status_code == 200
+    assert "Job aprovado sem agenda" in unscheduled_response.text
+    assert "Job programado real" not in unscheduled_response.text
+    assert "Aprovado sem agenda" in unscheduled_response.text
+
+
 def test_job_detail_accepts_unique_short_job_prefix() -> None:
     client = TestClient(app)
     job_id = "prefix-open-job-123456789"
@@ -2570,6 +2624,124 @@ def test_schedule_publication_persists_row_and_appears_in_calendar() -> None:
     assert calendar_page.status_code == 200
     assert "Lago Natron parece impossível" in calendar_page.text
     assert "14:30" in calendar_page.text
+
+
+def test_schedule_publication_queues_tiktok_crosspost_when_enabled(monkeypatch) -> None:
+    job_id = "scheduled-tiktok-crosspost"
+    monkeypatch.setattr(orchestrator.settings, "tiktok_auto_publish_enabled", True)
+    monkeypatch.setattr(orchestrator.settings, "tiktok_privacy_level", "PUBLIC_TO_EVERYONE")
+    with SessionLocal() as session:
+        _create_basic_job(session, job_id=job_id, status="approved_for_publish", seed_theme="TikTok agenda")
+        session.commit()
+
+    orchestrator.schedule_publication(
+        job_id,
+        {
+            "scheduled_for_local": "2099-06-10T14:30",
+            "timezone": "America/Sao_Paulo",
+            "youtube_visibility": "private",
+            "notes": "",
+        },
+    )
+
+    with SessionLocal() as session:
+        publication = session.query(ChannelPublication).filter_by(job_id=job_id, channel="tiktok").one()
+
+    assert publication.status == "scheduled"
+    assert publication.source == "youtube_schedule"
+    assert publication.privacy_level == "PUBLIC_TO_EVERYONE"
+    scheduled_for_utc = publication.scheduled_for_utc if publication.scheduled_for_utc.tzinfo else publication.scheduled_for_utc.replace(tzinfo=UTC)
+    assert scheduled_for_utc == datetime(2099, 6, 10, 17, 30, tzinfo=UTC)
+
+
+def test_tiktok_retropost_queue_respects_daily_limit(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.settings, "tiktok_auto_publish_enabled", True)
+    monkeypatch.setattr(orchestrator.settings, "tiktok_retropost_daily_limit", 1)
+    old_time = utcnow() - timedelta(days=5)
+    with SessionLocal() as session:
+        for index in range(2):
+            job_id = f"tiktok-retropost-{index}"
+            _create_basic_job(session, job_id=job_id, status="published", seed_theme=f"Publicado antigo {index}")
+            session.add(
+                PublicationSchedule(
+                    schedule_id=f"{job_id}-schedule",
+                    job_id=job_id,
+                    schema_version="1.0.0",
+                    content_hash=f"{job_id}-schedule-hash",
+                    scheduled_for_utc=old_time,
+                    timezone="America/Sao_Paulo",
+                    youtube_visibility="public",
+                    status="published",
+                    published_at=old_time,
+                )
+            )
+        session.commit()
+
+    queued = orchestrator._sync_tiktok_crosspost_queue()
+
+    with SessionLocal() as session:
+        publications = session.query(ChannelPublication).filter_by(channel="tiktok", source="retropost").all()
+
+    assert queued >= 1
+    assert len(publications) == 1
+    assert publications[0].status == "scheduled"
+
+
+def test_due_tiktok_publication_uses_real_publisher_and_persists_processing(monkeypatch, tmp_path) -> None:
+    job_id = "due-tiktok-publish"
+    video_path = tmp_path / "final.mp4"
+    video_path.write_bytes(b"fake mp4")
+    monkeypatch.setattr(orchestrator.settings, "tiktok_auto_publish_enabled", True)
+    monkeypatch.setattr(orchestrator.settings, "tiktok_access_token", "token")
+    monkeypatch.setattr(
+        orchestrator,
+        "_build_publish_package",
+        lambda session, job: {
+            "title": "Titulo TikTok",
+            "hashtags": ["curiosidades"],
+            "video_uri": str(video_path),
+            "altered_or_synthetic": True,
+        },
+    )
+    calls: list[dict] = []
+
+    def fake_direct_post_video(**payload):
+        calls.append(payload)
+        return {"publish_id": "tt-publish-123", "status": "processing"}
+
+    monkeypatch.setattr(orchestrator.tiktok, "direct_post_video", fake_direct_post_video)
+    with SessionLocal() as session:
+        _create_basic_job(session, job_id=job_id, status="approved_for_publish", seed_theme="TikTok devido")
+        session.add(
+            ChannelPublication(
+                publication_id="due-tiktok-publication-row",
+                job_id=job_id,
+                channel="tiktok",
+                schema_version="1.0.0",
+                content_hash="due-tiktok-publication-row",
+                scheduled_for_utc=utcnow() - timedelta(minutes=1),
+                timezone="America/Sao_Paulo",
+                status="scheduled",
+                source="youtube_schedule",
+                privacy_level="PUBLIC_TO_EVERYONE",
+            )
+        )
+        session.commit()
+
+    claimed = orchestrator._claim_due_tiktok_publication()
+    assert claimed == "due-tiktok-publication-row"
+    orchestrator._publish_tiktok_channel_publication(claimed)
+
+    with SessionLocal() as session:
+        publication = session.get(ChannelPublication, "due-tiktok-publication-row")
+
+    assert calls
+    assert calls[0]["video_path"] == video_path
+    assert calls[0]["title"] == "Titulo TikTok #curiosidades"
+    assert calls[0]["is_aigc"] is True
+    assert publication.status == "processing"
+    assert publication.external_id == "tt-publish-123"
+    assert publication.attempt_count == 1
 
 
 def test_calendar_quick_add_lists_only_unscheduled_approved_jobs() -> None:

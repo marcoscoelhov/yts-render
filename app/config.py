@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     youtube_client_secret: str | None = None
     youtube_oauth_redirect_uri: str | None = None
     youtube_notify_subscribers: bool = False
+    tiktok_auto_publish_enabled: bool = False
+    tiktok_access_token: str | None = None
+    tiktok_base_url: str = "https://open.tiktokapis.com"
+    tiktok_privacy_level: str = "PUBLIC_TO_EVERYONE"
+    tiktok_retropost_daily_limit: int = 1
+    tiktok_disable_comment: bool = False
+    tiktok_disable_duet: bool = False
+    tiktok_disable_stitch: bool = False
     automation_enabled: bool = False
     automation_daily_timezone: str = "America/Sao_Paulo"
     automation_daily_run_time: str = "02:00"
@@ -217,6 +225,22 @@ class Settings(BaseSettings):
     def validate_automation_score_threshold(cls, value: float) -> float:
         if not 0 <= value <= 1:
             raise ValueError("automation_score_threshold must be between 0 and 1")
+        return value
+
+    @field_validator("tiktok_privacy_level")
+    @classmethod
+    def validate_tiktok_privacy_level(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        allowed = {"PUBLIC_TO_EVERYONE", "MUTUAL_FOLLOW_FRIENDS", "FOLLOWER_OF_CREATOR", "SELF_ONLY"}
+        if normalized not in allowed:
+            raise ValueError("tiktok_privacy_level must be a valid TikTok privacy level")
+        return normalized
+
+    @field_validator("tiktok_retropost_daily_limit")
+    @classmethod
+    def validate_tiktok_retropost_daily_limit(cls, value: int) -> int:
+        if not 0 <= value <= 10:
+            raise ValueError("tiktok_retropost_daily_limit must be between 0 and 10")
         return value
 
     @property

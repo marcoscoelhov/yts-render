@@ -9,8 +9,9 @@
     <span>Data de criação</span>
   </div>
   {% endif %}
-  {% for job, seed_theme, duration_ms, fallback_count, asset_count in rows %}
+  {% for job, seed_theme, duration_ms, fallback_count, asset_count, publication_schedule in rows %}
   {% set row_progress = job_progress_snapshot(job) %}
+  {% set publication_state = publication_operational_status(job, publication_schedule) %}
   {% set created_text = job.created_at|string %}
   <article class="job-row-card jobs-grid-row">
     <a class="job-thumb" href="/jobs/{{ job.job_id }}" aria-label="Abrir job {{ job.job_id }}">
@@ -26,8 +27,8 @@
       </div>
     </div>
     <div class="job-status-cell">
-      <span class="badge {{ job.status }}">{{ job_status_label(job.status) }}</span>
-      <small>{{ job_flow_stage(job.status) }}</small>
+      <span class="badge {{ publication_state.class_name }}">{{ publication_state.label }}</span>
+      <small>{{ publication_state.stage }}</small>
     </div>
     <div class="job-progress-compact" aria-label="Progresso do job">
       <div>
@@ -37,7 +38,7 @@
       <div class="job-progress-bar compact" aria-hidden="true">
         <span class="job-progress-fill {{ row_progress.state }}" style="width: {{ row_progress.percent }}%"></span>
       </div>
-      <p class="job-row-next">{{ job_next_action(job.status) }}</p>
+      <p class="job-row-next">{{ publication_state.next_action }}</p>
     </div>
     <div class="job-date-cell">
       <time datetime="{{ created_text }}">{{ created_text[:10] }}</time>

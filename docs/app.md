@@ -128,6 +128,12 @@ Fluxo OAuth:
 - `GET /youtube/oauth/callback` troca `code` por token e salva `youtube_oauth_token.json`.
 - `POST /youtube/disconnect` remove token e state locais.
 
+## Publicacao cruzada no TikTok
+
+Quando `YTS_TIKTOK_AUTO_PUBLISH_ENABLED=true`, jobs que ja entraram na agenda ou publicacao do YouTube ganham um registro em `ChannelPublication` para o canal `tiktok`. Jobs com agenda futura seguem o mesmo horario planejado; jobs ja publicados entram em retropostagem controlada, limitada por `YTS_TIKTOK_RETROPOST_DAILY_LIMIT` (padrao 1 por dia).
+
+O envio usa a Content Posting API oficial do TikTok com `YTS_TIKTOK_ACCESS_TOKEN` e escopo `video.publish`. A API exige consulta de creator info, privacidade compativel com a conta e pode restringir clientes nao auditados a publicacoes privadas; essas recusas ficam registradas como `publish_failed` no canal TikTok.
+
 O contexto de integracao exposto no hub usa:
 
 - `publish_mode`
@@ -190,11 +196,16 @@ Defaults importantes:
 
 Camadas de configuracao:
 
-- `.env`: boot, infraestrutura e segredos. Inclui `YTS_APP_URL`, `YTS_HUB_AUTH_TOKEN`, `YTS_DATABASE_URL`, chaves de provedores, OAuth do YouTube e exposicao Tailnet.
-- Hub de Revisao: ajustes operacionais nao secretos. Inclui LLM ativo, fallback de LLM, fonte de musica, autopopulacao do banco local, modo de publicacao, API do YouTube, horario do ciclo diario, horario padrao de publicacao, janela da agenda e score minimo.
+- `.env`: boot, infraestrutura e segredos. Inclui `YTS_APP_URL`, `YTS_HUB_AUTH_TOKEN`, `YTS_DATABASE_URL`, chaves de provedores, OAuth do YouTube, token do TikTok e exposicao Tailnet.
+- Hub de Revisao: ajustes operacionais nao secretos. Inclui LLM ativo, fallback de LLM, planejador de cenas, fonte de musica, autopopulacao do banco local, modo de publicacao, API do YouTube, publicacao cruzada no TikTok, horario do ciclo diario, horario padrao de publicacao, janela da agenda e score minimo. O gerador de imagens aparece como informacao operacional; hoje, em execucao real, ele e MiniMax.
 - defaults do codigo: valores seguros usados quando nem `.env` nem Hub definem uma sobreposicao.
 
 As sobreposicoes do Hub ficam na tabela `operational_settings`. Elas sao aplicadas no startup do FastAPI e no comando `yts-render automation-run`. Segredos nunca devem ser adicionados a essa tabela; novos campos editaveis precisam entrar pela allowlist em `app/operational_settings.py`.
+
+Terminologia do painel:
+
+- **Planejador de cenas (LLM)**: escolhe o LLM que cria `scene_plan.json`, com cenas, intencao visual e prompts. Ele nao gera imagens.
+- **Gerador de imagens**: provider que gera ou seleciona os assets visuais no passo `asset_generation`. Hoje, em execucao real, e MiniMax; por isso aparece como leitura operacional, nao como seletor editavel.
 
 Musica de fundo:
 
@@ -233,6 +244,7 @@ Modelos principais:
 - `BackgroundMusicAsset`
 - `RenderOutput`
 - `PublicationSchedule`
+- `ChannelPublication`
 - `ReviewRecord`
 - `PerformanceMetric`
 - `FallbackEvent`

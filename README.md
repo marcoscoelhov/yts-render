@@ -40,10 +40,11 @@ Para subir o app:
 scripts/install_systemd_service.sh
 ```
 
-O servico systemd fixa o hub em `127.0.0.1:8080`, reinicia em falhas e roda um
-port guard antes do start para liberar instancias antigas do proprio YTS
-Render. O instalador renderiza a unit de `deploy/systemd/yts-render-hub.service.in`
-com o caminho real do checkout. Para desenvolvimento manual sem systemd:
+O servico systemd fixa o hub em `127.0.0.1:8080`, reinicia em falhas, roda um
+port guard antes do start e habilita `yts-render-hub-reload.path` para reiniciar
+o hub quando arquivos versionados do app mudarem. O instalador renderiza as
+units de `deploy/systemd/` com o caminho real do checkout. Para desenvolvimento
+manual sem systemd:
 
 ```bash
 uvicorn app.main:app --host 127.0.0.1 --port 8080
@@ -125,9 +126,10 @@ O `.env.example` e intencionalmente pequeno. Ele deve guardar boot, infraestrutu
 
 Ajustes operacionais nao secretos ficam no Hub de Revisao, em Configurações:
 
-- LLM principal, fallback, reparo, cenas e rascunho.
+- LLM principal, fallback, reparo, planejador de cenas e rascunho.
+- gerador de imagens visivel como leitura operacional; hoje, em execucao real, e MiniMax.
 - musica de fundo, banco local e fallback para API.
-- modo de publicacao, API do YouTube e notificacao de inscritos.
+- modo de publicacao, API do YouTube, notificacao de inscritos, publicacao cruzada no TikTok e limite diario de retropostagem.
 - horario do ciclo diario, horario padrao de publicacao, janela da agenda, tentativas e score minimo.
 
 O Hub persiste esses valores como sobreposicoes operacionais no banco. Use `Restaurar .env` no modal para limpar as sobreposicoes e voltar aos defaults do ambiente/codigo.

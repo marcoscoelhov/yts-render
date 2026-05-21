@@ -1,0 +1,7 @@
+[Unit]
+Description=Restart YTS Render review hub after repository changes
+After=yts-render-hub.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl try-restart yts-render-hub.service

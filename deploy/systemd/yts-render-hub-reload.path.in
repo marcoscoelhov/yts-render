@@ -1,0 +1,20 @@
+[Unit]
+Description=Watch YTS Render repository changes and restart the review hub
+
+[Path]
+PathModified=__REPO_ROOT__/app
+PathModified=__REPO_ROOT__/app/audio
+PathModified=__REPO_ROOT__/app/compliance
+PathModified=__REPO_ROOT__/app/editorial
+PathModified=__REPO_ROOT__/app/pipelines
+PathModified=__REPO_ROOT__/app/quality
+PathModified=__REPO_ROOT__/app/static
+PathModified=__REPO_ROOT__/app/templates
+PathModified=__REPO_ROOT__/scripts
+PathModified=__REPO_ROOT__/deploy/systemd
+PathChanged=__REPO_ROOT__/pyproject.toml
+PathChanged=__REPO_ROOT__/.env
+Unit=yts-render-hub-reload.service
+
+[Install]
+WantedBy=multi-user.target

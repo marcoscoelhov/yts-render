@@ -31,14 +31,11 @@
           <input name="search" value="{{ filters.search if filters is defined else '' }}" placeholder="Buscar jobs por título...">
         </form>
         <div class="topbar-actions" aria-label="Ações rápidas">
+          <button type="button" class="topbar-icon topbar-search-trigger" data-open-search aria-label="Buscar jobs">
+            <span class="material-symbols-outlined" aria-hidden="true">search</span>
+          </button>
           <button type="button" class="topbar-icon sidebar-toggle" data-toggle-sidebar aria-label="Colapsar sidebar" aria-pressed="false">
             <span class="material-symbols-outlined" aria-hidden="true">left_panel_close</span>
-          </button>
-          <button type="button" class="topbar-icon" data-open-ready-script-bank aria-label="Abrir banco de roteiros">
-            <span class="material-symbols-outlined" aria-hidden="true">bolt</span>
-          </button>
-          <button type="button" class="topbar-icon" data-open-ready-script-bank aria-label="Abrir banco de roteiros">
-            <span class="material-symbols-outlined" aria-hidden="true">notifications</span>
           </button>
           <button type="button" class="topbar-icon" data-open-operational-settings aria-label="Abrir configurações">
             <span class="material-symbols-outlined" aria-hidden="true">settings</span>
@@ -132,10 +129,118 @@
           </div>
         </div>
       </aside>
+      <nav class="mobile-bottom-nav" aria-label="Navegação mobile">
+        <a href="/" class="active">
+          <span class="material-symbols-outlined" aria-hidden="true">video_camera_back</span>
+          <span>Fila</span>
+        </a>
+        <button type="button" data-open-ready-script-bank>
+          <span class="material-symbols-outlined" aria-hidden="true">video_library</span>
+          <span>Biblioteca</span>
+        </button>
+        <button type="button" class="mobile-create-action" data-open-create-job>
+          <span class="material-symbols-outlined" aria-hidden="true">add</span>
+          <span>Criar</span>
+        </button>
+        <a href="/calendar">
+          <span class="material-symbols-outlined" aria-hidden="true">event_upcoming</span>
+          <span>Agenda</span>
+        </a>
+        <button type="button" data-open-operational-settings>
+          <span class="material-symbols-outlined" aria-hidden="true">settings</span>
+          <span>Ajustes</span>
+        </button>
+      </nav>
       <main class="page-shell">
         {% block content %}{% endblock %}
       </main>
     </div>
+    <dialog id="hub-search-modal" class="schedule-picker-modal hub-search-modal" aria-labelledby="hub-search-title">
+      <form class="schedule-picker-card hub-search-card" action="/" method="get">
+        <div class="schedule-picker-head">
+          <div>
+            <p class="eyebrow">Busca</p>
+            <h4 id="hub-search-title">Buscar jobs</h4>
+          </div>
+          <button type="button" class="ghost icon-button" data-close-search aria-label="Fechar busca">X</button>
+        </div>
+        <div class="field full">
+          <label for="hub_search_query">Título, tema ou job_id</label>
+          <input id="hub_search_query" name="search" value="{{ filters.search if filters is defined else '' }}" placeholder="Buscar na fila">
+        </div>
+        {% if pagination is defined %}
+        <input type="hidden" name="per_page" value="{{ pagination.per_page }}">
+        {% endif %}
+        <button type="submit">Buscar</button>
+      </form>
+    </dialog>
+    <dialog id="create-job-modal" class="schedule-picker-modal create-job-modal" aria-labelledby="create-job-title">
+      <form method="post" action="/jobs" class="schedule-picker-card create-job-card job-form">
+        <div class="schedule-picker-head">
+          <div>
+            <p class="eyebrow">Entrada</p>
+            <h4 id="create-job-title">Criar job</h4>
+          </div>
+          <button type="button" class="ghost icon-button" data-close-create-job aria-label="Fechar criação">X</button>
+        </div>
+        <input type="hidden" name="niche_id" value="{{ hub_defaults.niche_id }}">
+        <div class="field full">
+          <label for="input_mode">Entrada</label>
+          <select id="input_mode" name="input_mode">
+            <option value="theme" selected>Tema</option>
+            <option value="title">Título completo</option>
+            <option value="script">Roteiro pronto</option>
+          </select>
+          <p class="field-help" data-mode-help="theme">Vazio = pesquisar tendências reais automaticamente.</p>
+          <p class="field-help hidden" data-mode-help="title">Cole um título completo; o app preserva a promessa.</p>
+          <p class="field-help hidden" data-mode-help="script">Cole o texto rotulado; o app não gera outro roteiro.</p>
+        </div>
+        <div class="field wide" data-mode-section="theme title">
+          <label for="seed_theme">Tema ou título</label>
+          <input id="seed_theme" name="seed_theme" value="{{ hub_defaults.seed_theme }}" placeholder="Ex.: Danakil, polvos, cafeína. Vazio = tendência real.">
+        </div>
+        <div class="field wide hidden" data-mode-section="script">
+          <label for="ready_script_text">Roteiro pronto em texto rotulado</label>
+          <textarea id="ready_script_text" name="ready_script_text" rows="10" placeholder="Título: ...&#10;Hook: ...&#10;Loop: ...&#10;Beats: ...&#10;Payoff: ...&#10;Fechamento: ..."></textarea>
+          <label class="checkbox-line">
+            <input type="checkbox" name="ready_script_fact_check_confirmed" value="true">
+            Confirmo que os fatos deste roteiro pronto já foram revisados antes do envio.
+          </label>
+        </div>
+        <div class="field">
+          <label for="target_duration_sec">Duração</label>
+          <input id="target_duration_sec" name="target_duration_sec" type="number" min="35" max="55" value="{{ hub_defaults.target_duration_sec }}">
+        </div>
+        <div class="field" data-mode-section="theme title">
+          <label for="tone">Tom</label>
+          <select id="tone" name="tone">
+            <option value="intrigante_direto" selected>Intrigante direto</option>
+            <option value="surpresa_cientifica">Surpresa científica</option>
+            <option value="mito_vs_realidade">Mito vs realidade</option>
+            <option value="urgente_curioso">Urgente curioso</option>
+            <option value="narrativo_misterioso">Narrativo misterioso</option>
+            <option value="lista_viral">Lista viral</option>
+          </select>
+        </div>
+        <div class="field" data-mode-section="theme title">
+          <label for="requested_angle">Ângulo</label>
+          <select id="requested_angle" name="requested_angle">
+            <option value="auto" selected>Automático</option>
+            <option value="habilidade biologica impossivel">Habilidade biológica impossível</option>
+            <option value="mecanismo oculto">Mecanismo oculto</option>
+            <option value="comparacao inesperada">Comparação inesperada</option>
+            <option value="mito vs realidade">Mito vs realidade</option>
+            <option value="erro comum">Erro comum</option>
+            <option value="ranking/lista">Ranking ou lista</option>
+          </select>
+        </div>
+        <div class="field wide" data-mode-section="theme title">
+          <label for="custom_angle">Ângulo customizado</label>
+          <input id="custom_angle" name="custom_angle" placeholder="Opcional; substitui o seletor.">
+        </div>
+        <button type="submit">Criar job</button>
+      </form>
+    </dialog>
     <dialog id="ready-script-bank-modal" class="schedule-picker-modal ready-script-bank-modal" aria-labelledby="ready-script-bank-title">
       <div class="schedule-picker-card ready-script-bank-card">
         <div class="schedule-picker-head">
@@ -221,12 +326,19 @@
                   <option value="{{ option.value }}" {% if option.value == field.value %}selected{% endif %}>{{ option.label }}</option>
                   {% endfor %}
                 </select>
+                {% if field.description %}<small>{{ field.description }}</small>{% endif %}
               </div>
               {% elif field.input_type == "checkbox" %}
               <label class="checkbox-line operational-checkbox" for="ops_{{ field.key }}">
                 <input id="ops_{{ field.key }}" type="checkbox" name="{{ field.key }}" value="true" {% if field.checked %}checked{% endif %}>
                 {{ field.label }}
               </label>
+              {% elif field.input_type == "readonly" %}
+              <div class="field operational-readonly">
+                <span>{{ field.label }}</span>
+                <strong>{{ field.value }}</strong>
+                {% if field.description %}<small>{{ field.description }}</small>{% endif %}
+              </div>
               {% else %}
               <div class="field">
                 <label for="ops_{{ field.key }}">{{ field.label }}</label>
@@ -239,6 +351,7 @@
                   {% if field.max is not none %}max="{{ field.max }}"{% endif %}
                   {% if field.step %}step="{{ field.step }}"{% endif %}
                 >
+                {% if field.description %}<small>{{ field.description }}</small>{% endif %}
               </div>
               {% endif %}
               {% endfor %}
@@ -289,6 +402,36 @@
         });
       })();
       (() => {
+        const dialog = document.getElementById("hub-search-modal");
+        if (!dialog) return;
+        const input = dialog.querySelector("input[name='search']");
+        document.querySelectorAll("[data-open-search]").forEach((button) => {
+          button.addEventListener("click", () => {
+            dialog.showModal();
+            window.setTimeout(() => input && input.focus(), 40);
+          });
+        });
+        dialog.querySelectorAll("[data-close-search]").forEach((button) => {
+          button.addEventListener("click", () => dialog.close());
+        });
+        dialog.addEventListener("click", (event) => {
+          if (event.target === dialog) dialog.close();
+        });
+      })();
+      (() => {
+        const dialog = document.getElementById("create-job-modal");
+        if (!dialog) return;
+        document.querySelectorAll("[data-open-create-job]").forEach((button) => {
+          button.addEventListener("click", () => dialog.showModal());
+        });
+        dialog.querySelectorAll("[data-close-create-job]").forEach((button) => {
+          button.addEventListener("click", () => dialog.close());
+        });
+        dialog.addEventListener("click", (event) => {
+          if (event.target === dialog) dialog.close();
+        });
+      })();
+      (() => {
         const dialog = document.getElementById("operational-settings-modal");
         if (!dialog) return;
         document.querySelectorAll("[data-open-operational-settings]").forEach((button) => {
@@ -300,6 +443,20 @@
         dialog.addEventListener("click", (event) => {
           if (event.target === dialog) dialog.close();
         });
+      })();
+      (() => {
+        const mode = document.querySelector("#input_mode");
+        if (!mode) return;
+        const sync = () => {
+          document.querySelectorAll("[data-mode-section]").forEach((item) => {
+            item.classList.toggle("hidden", !item.dataset.modeSection.split(" ").includes(mode.value));
+          });
+          document.querySelectorAll("[data-mode-help]").forEach((item) => {
+            item.classList.toggle("hidden", item.dataset.modeHelp !== mode.value);
+          });
+        };
+        mode.addEventListener("change", sync);
+        sync();
       })();
     </script>
   </body>
