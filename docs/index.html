@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>YTS Render</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #15191f;
+        --muted: #596272;
+        --line: #d9dee7;
+        --panel: #ffffff;
+        --bg: #f6f8fb;
+        --accent: #0f766e;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font-family: Arial, Helvetica, sans-serif;
+        line-height: 1.55;
+      }
+
+      main {
+        width: min(920px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 48px 0;
+      }
+
+      header,
+      section {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 28px;
+        margin-bottom: 18px;
+      }
+
+      h1,
+      h2 {
+        margin: 0 0 12px;
+        line-height: 1.2;
+      }
+
+      p {
+        margin: 0 0 12px;
+      }
+
+      ul {
+        margin: 0;
+        padding-left: 20px;
+      }
+
+      a {
+        color: var(--accent);
+        font-weight: 700;
+      }
+
+      .meta {
+        color: var(--muted);
+        font-size: 0.95rem;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>YTS Render</h1>
+        <p class="meta">Private short-form video publishing workflow</p>
+        <p>
+          YTS Render is an internal tool used by its operator to prepare, review,
+          schedule, and publish approved short-form videos to the operator's own
+          creator channels.
+        </p>
+      </header>
+
+      <section>
+        <h2>TikTok integration</h2>
+        <p>
+          The TikTok integration is used only after the TikTok account owner
+          authorizes the application. It publishes videos that were already
+          approved and scheduled inside the private YTS Render workflow.
+        </p>
+        <ul>
+          <li>No public user registration is offered.</li>
+          <li>No third-party creator accounts are managed.</li>
+          <li>No TikTok data is sold, rented, or used for advertising.</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Legal</h2>
+        <p><a href="./tiktok-terms.html">Terms of Service</a></p>
+        <p><a href="./tiktok-privacy.html">Privacy Policy</a></p>
+      </section>
+    </main>
+  </body>
+</html>
