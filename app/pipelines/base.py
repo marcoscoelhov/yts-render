@@ -52,7 +52,7 @@ class BasePipeline:
         return self.owner._serialize_for_json(payload)
 
     def _recent_topic_history(self, *args: Any, **kwargs: Any) -> Any:
-        return self.owner._recent_topic_history(*args, **kwargs)
+        return self.owner.topic_pipeline.recent_topic_history(*args, **kwargs)
 
     def _channel_learning_brief(self, *args: Any, **kwargs: Any) -> Any:
-        return self.owner._channel_learning_brief(*args, **kwargs)
+        return self.owner.topic_pipeline.channel_learning_brief(*args, **kwargs)

@@ -2,7 +2,7 @@
 
 ## Current Pipeline
 
-The runtime pipeline is implemented by `JobOrchestrator._steps()`:
+The runtime pipeline is orchestrated by `JobOrchestrator._steps()`, but domain behavior now lives in pipeline and operation modules:
 
 1. `input_gate`
 2. `topic_plan`
@@ -11,8 +11,10 @@ The runtime pipeline is implemented by `JobOrchestrator._steps()`:
 5. `asset_generation`
 6. `tts`
 7. `subtitle_alignment`
-8. `render`
-9. `publish_to_review_hub`
+8. `background_music`
+9. `render`
+10. `monetization_readiness_gate`
+11. `publish_to_review_hub`
 
 Artifacts are persisted under `data/artifacts/<job_id>/` through `StorageManager`.
 Database state is stored in the SQLAlchemy models in `app/models.py`.
@@ -22,8 +24,9 @@ Database state is stored in the SQLAlchemy models in `app/models.py`.
 - LLM generation currently happens through `ProviderRegistry.creative`.
 - Topic planning, script generation, and scene planning are the LLM-owned stages.
 - The script stage is the first high-leverage quality gate, because bad text later contaminates scenes, TTS, subtitles, and render.
-- Asset selection already has scoring, but current behavior can still continue with low semantic scores in production.
-- Render validation is currently mostly implicit through successful ffmpeg execution.
+- Asset selection has semantic scoring and production thresholds.
+- Subtitle, background music and render have explicit quality gates or validation reports.
+- Review, scheduling, publish tracking, retention and channel sync live in `app/publication_ops.py`.
 
 ## Failures Observed In Exported Jobs
 
@@ -37,10 +40,11 @@ Database state is stored in the SQLAlchemy models in `app/models.py`.
 
 ## Sprint 1 Scope Closed
 
-This sprint establishes the implementation map and defines where Sprint 2 and Sprint 3 should patch the code:
+This sprint established the implementation map. The current codebase has now applied the modularization:
 
-- Provider abstraction belongs in `app/providers.py`.
-- Script validation belongs in `app/quality/script_gate.py`.
-- The script gate must be called from `JobOrchestrator._step_script()` before persistence and before scene generation.
+- Provider abstraction belongs in `app/providers/`, with `app.providers` kept as the compatibility facade.
+- Script validation belongs in `app/quality/script_gate.py`, called by `app/pipelines/script_repair.py` through `ScriptPipeline`.
+- `JobOrchestrator` should delegate domain behavior to pipeline/operation modules instead of owning step internals.
 - Fallback should be provider-level, but quality validation must be deterministic app code.
 
+For current ownership boundaries, use `docs/app.md` and `docs/modularization-plan.md`.

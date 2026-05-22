@@ -11,6 +11,8 @@ O produto atual nao termina em "video pronto". Ele cobre criacao do job, pipelin
 - Banco padrao em SQLite e artefatos em `data/artifacts/<job_id>/`.
 - Integracao real com YouTube disponivel por OAuth e upload via API quando o modo API esta ligado no Hub.
 - Politica de retencao automatica para artefatos temporarios: jobs continuam visiveis no hub mesmo depois da limpeza dos arquivos pesados.
+- Arquitetura modularizada para manutencao local: `JobOrchestrator` coordena lifecycle, lease, retry, eventos e worker; pipelines, providers, contexto do hub e publicacao ficam em modulos donos.
+- Testes divididos por dominio para reduzir o custo de regressao e evitar depender de uma suite e2e monolitica para mudancas locais.
 
 ## Comeco rapido
 
@@ -209,10 +211,20 @@ Rotas principais:
 Suite principal:
 
 ```bash
-pytest -q
+.venv/bin/python -m pytest -q
 ```
 
-A cobertura mais importante hoje esta em `tests/test_e2e.py` e inclui:
+A suite esta dividida por dominio. Use a suite completa antes de commit/push e rode fatias focadas durante manutencao:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_pipeline_script.py
+.venv/bin/python -m pytest -q tests/test_pipeline_assets.py
+.venv/bin/python -m pytest -q tests/test_hub_publication.py
+.venv/bin/python -m pytest -q tests/test_orchestrator_flow.py
+.venv/bin/python -m pytest -q tests/test_providers_integrations.py
+```
+
+`tests/test_e2e.py` fica como ancora de compatibilidade. A cobertura principal inclui:
 
 - pipeline completo ate review
 - UI do hub
@@ -220,6 +232,14 @@ A cobertura mais importante hoje esta em `tests/test_e2e.py` e inclui:
 - publish manual e via API
 - OAuth do YouTube
 - retencao de artefatos
+
+## Arquitetura e manutencao por IA
+
+A documentacao de arquitetura fica em:
+
+- [docs/app.md](docs/app.md): mapa tecnico de modulos, estados, rotas, persistencia e operacao.
+- [docs/modularization-plan.md](docs/modularization-plan.md): status da modularizacao forte, contratos preservados e proximos cortes nao bloqueantes.
+- [docs/adr/0004-ai-friendly-modular-orchestrator-boundaries.md](docs/adr/0004-ai-friendly-modular-orchestrator-boundaries.md): decisao de manter o orquestrador como casca compatível e delegar dominios para modulos donos.
 
 ## Exposicao por Tailscale
 

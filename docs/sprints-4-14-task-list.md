@@ -84,6 +84,5 @@
 - [x] Keep `.env.example` aligned with new settings.
 - [x] Keep secrets out of git through existing `.gitignore`.
 - [x] Validate the full mock pipeline with all gates enabled.
+- [x] Real YouTube API upload is implemented behind explicit API mode, OAuth connection and hub settings.
 - [ ] PostgreSQL deployment and migration hardening remain a separate deployment task.
-- [ ] Real YouTube API upload remains behind `YTS_YOUTUBE_API_ENABLED=false` and should be implemented only after OAuth credentials are available.
-

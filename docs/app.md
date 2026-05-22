@@ -6,12 +6,39 @@ YTS Render e um app FastAPI para gerar Shorts verticais em pt-BR, revisar o resu
 
 Blocos principais:
 
-- `app/main.py`: rotas FastAPI, SSR com Jinja2, formularios do hub, dashboard de publicacao, calendario e OAuth do YouTube.
-- `app/orchestrator.py`: worker, maquina de estados do job, retries, publicacao, agenda e sweep de retencao de artefatos.
+- `app/main.py`: rotas FastAPI, SSR com Jinja2, formularios do hub, calendario e OAuth do YouTube.
+- `app/hub_context.py`: builders de contexto do hub, listas de jobs, dashboard de publicacao, calendario e status operacional.
+- `app/orchestrator.py`: worker, maquina de estados do job, retries, lease, eventos e delegacao de steps.
+- `app/publication_ops.py`: review, publicacao, agenda por canal, sync YouTube/TikTok e sweep de retencao de artefatos.
 - `app/pipelines/`: etapas especializadas do pipeline.
-- `app/providers.py`: providers de texto, imagem, TTS, musica e fallback.
+- `app/providers/`: providers de texto, imagem, TTS, musica e fallback, com `app.providers` como fachada publica de compatibilidade.
+- `app/routes/`: routers isolados, hoje com `/healthz`.
 - `app/youtube_api.py`: integracao OAuth e upload real via YouTube Data API.
 - `app/models.py`: persistencia SQLAlchemy de jobs, agenda, review, erros, retries, telemetria e artefatos logicos.
+
+## Fronteiras de manutencao IA-friendly
+
+O app foi modularizado para que uma mudanca comum exija contexto de poucos arquivos e preserve contratos publicos. O ponto de entrada continua sendo `JobOrchestrator`, mas ele deve ser tratado como casca de lifecycle: criar job, reivindicar trabalho, renovar lease, executar retry, registrar eventos, montar progresso e acionar publicacao agendada.
+
+Mapa de ownership para novas mudancas:
+
+| Area | Comece por | Evite comecar por |
+| --- | --- | --- |
+| Pauta, tendencia, learning brief e registry | `app/pipelines/topic_pipeline.py` | `app/orchestrator.py` |
+| Roteiro, fact pack, auditoria textual e repair | `app/pipelines/script_pipeline.py`, `script_fact_pack.py`, `script_audit.py`, `script_repair.py` | `app/orchestrator.py` |
+| Cenas | `app/pipelines/scene_pipeline.py` | `app/orchestrator.py` |
+| Imagens, TTS, legendas e musica | `app/pipelines/asset_pipeline.py`, `image_assets.py`, `tts_assets.py`, `subtitle_assets.py`, `music_assets.py` | `app/orchestrator.py` |
+| Render | `app/pipelines/render_pipeline.py` | `app/orchestrator.py` |
+| Monetizacao e pacote de publish | `app/pipelines/monetization_pipeline.py` | `app/main.py` |
+| Revisao, agenda, publish, performance, retencao e canais | `app/publication_ops.py` | `app/main.py` |
+| Listas, calendario, status operacional e contexto SSR | `app/hub_context.py` | queries inline em templates |
+| Providers | `app/providers/llm.py`, `image.py`, `music.py`, `tts.py`, `registry.py` | recriar `app/providers.py` |
+
+`app.providers` e uma fachada de compatibilidade importavel. Novas implementacoes devem entrar no modulo dono dentro de `app/providers/`.
+
+`app/main.py` ainda concentra rotas SSR principais. Para manter o contexto pequeno, novas regras de consulta, agregacao ou apresentacao de estado devem ir para `HubContext` ou para `PublicationOperations`; a rota deve apenas validar formulario, chamar o dono e redirecionar.
+
+`tests/test_e2e.py` e ancora de compatibilidade. Testes novos devem preferir a suite de dominio correspondente: `test_pipeline_script.py`, `test_pipeline_assets.py`, `test_hub_publication.py`, `test_orchestrator_flow.py`, `test_providers_integrations.py` ou `test_deep_modules_unit.py`.
 
 Persistencia local padrao:
 
@@ -112,6 +139,8 @@ Etapas atuais de `JobOrchestrator._steps()`:
 | `publish_to_review_hub` | 0 | Persiste o pacote de publicacao e leva o job ao hub. |
 
 Cada etapa grava `StepExecution`, eventos em `events.jsonl` e artefatos JSON ou midia no diretorio do job.
+
+Os nomes de etapa, artefatos e chaves principais de `quality_summary` sao contratos publicos do app. Refatoracoes internas podem trocar classes ou helpers, mas nao devem renomear esses contratos sem migracao e teste dedicado.
 
 ## Publicacao e YouTube
 
@@ -330,21 +359,19 @@ Um job so entra em publicacao automatizada se terminar em `ready_for_upload`, pa
 
 ## Testes
 
-O foco principal esta em `tests/test_e2e.py`. A suite cobre:
+A suite principal foi dividida por dominio. `tests/test_e2e.py` fica apenas como ancora de compatibilidade; os testes reais vivem em:
 
-- pipeline ate review
-- tabela e detalhe de jobs
-- agenda e calendario
-- publish manual e via API
-- automacao diaria e banco de roteiros prontos
-- OAuth do YouTube
-- retencao de artefatos
-- gates de qualidade
+- `tests/test_hub_publication.py`: hub, calendario, agenda, publish, OAuth e automacao.
+- `tests/test_orchestrator_flow.py`: lifecycle, worker, estados, retries e fluxo completo.
+- `tests/test_pipeline_assets.py`: cenas, assets, TTS, legendas, musica e render.
+- `tests/test_pipeline_script.py`: roteiro, fact pack, auditoria textual, repair e monetizacao textual.
+- `tests/test_providers_integrations.py`: providers e registries.
+- `tests/e2e_support.py` e `tests/conftest.py`: fixtures e helpers compartilhados.
 
 Comando padrao:
 
 ```bash
-pytest -q
+.venv/bin/python -m pytest -q
 ```
 
 ## Onde alterar
@@ -352,12 +379,13 @@ pytest -q
 Para mudar UX do hub:
 
 - `app/main.py`
+- `app/hub_context.py`
 - `app/templates/*.html`
 - `app/static/styles.css`
 
 Para mudar publicacao e YouTube:
 
-- `app/orchestrator.py`
+- `app/publication_ops.py`
 - `app/youtube_api.py`
 - `app/schemas.py`
 
@@ -371,5 +399,5 @@ Para mudar automacao diaria:
 Para mudar regras de retencao:
 
 - `app/config.py`
-- `app/orchestrator.py`
+- `app/publication_ops.py`
 - `app/storage.py`

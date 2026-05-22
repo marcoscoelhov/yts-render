@@ -184,6 +184,26 @@ Se o objetivo for upload real via API:
 
 Se `YTS_YOUTUBE_OAUTH_REDIRECT_URI` estiver vazio, o app usa a URL atual do hub como callback.
 
+Importante: o token OAuth fica dentro de `YTS_DATA_DIR`. Se voce subir uma validacao isolada com outro diretorio, por exemplo `YTS_DATA_DIR=data-real-validation`, esse ambiente nao vai enxergar `data/youtube_oauth_token.json` e o hub vai reportar "Canal ainda nao conectado por OAuth". Isso nao significa que o token principal foi perdido.
+
+Validacao segura do token principal, sem publicar video:
+
+```bash
+.venv/bin/python - <<'PY'
+from app.config import get_settings
+from app.youtube_api import YouTubePublisher
+
+settings = get_settings()
+youtube = YouTubePublisher(settings)
+credentials = youtube._load_credentials(refresh=True)
+status = youtube.connection_status()
+print("token_file_exists", settings.youtube_token_path.exists())
+print("credentials_valid", bool(getattr(credentials, "valid", False)))
+print("connected", status.connected)
+print("missing_items", status.missing_items)
+PY
+```
+
 ## 10. Agendar ou publicar
 
 Voce pode agendar por dois caminhos:
@@ -246,10 +266,20 @@ Se um job antigo abrir sem video local, isso pode ser retencao normal, nao corru
 Suite completa:
 
 ```bash
-pytest -q
+.venv/bin/python -m pytest -q
 ```
 
-Se mexer em hub, agenda, publicacao ou retencao, prefira ao menos uma fatia focada de `tests/test_e2e.py`.
+Fatiamento recomendado:
+
+```bash
+.venv/bin/python -m pytest -q tests/test_pipeline_script.py
+.venv/bin/python -m pytest -q tests/test_pipeline_assets.py
+.venv/bin/python -m pytest -q tests/test_hub_publication.py
+.venv/bin/python -m pytest -q tests/test_orchestrator_flow.py
+.venv/bin/python -m pytest -q tests/test_providers_integrations.py
+```
+
+Se mexer em hub, agenda, publicacao ou retencao, rode `tests/test_hub_publication.py` e a suite completa antes de commit. `tests/test_e2e.py` fica como ancora de compatibilidade, nao como unico lugar para novos testes.
 
 ## 14. Expor via Tailscale
 

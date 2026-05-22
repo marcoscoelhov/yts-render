@@ -143,7 +143,7 @@ class ScenePipeline(BasePipeline):
             for query in scene.get("fallback_queries", [topic_text, f"{topic_text} astronomia", f"{topic_text} espaco"])
         ]
         normalized["fallback_queries"] = self.fallback_query_variants(topic_text, base_queries)
-        normalized["image_prompt"] = self.owner.asset_pipeline._semantic_english_image_prompt(scene, topic_text, primary_subject)
+        normalized["image_prompt"] = self.owner.asset_pipeline.image_assets.semantic_english_image_prompt(scene, topic_text, primary_subject)
         return normalized
 
     def fallback_query_variants(self, topic_text: str, base_queries: list[str]) -> list[str]:

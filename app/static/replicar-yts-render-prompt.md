@@ -37,12 +37,20 @@ Crie algo semelhante a:
 ```text
 app/
   main.py
+  hub_context.py
+  publication_ops.py
   config.py
   db.py
   models.py
   schemas.py
   orchestrator.py
-  providers.py
+  providers/
+    __init__.py
+    llm.py
+    image.py
+    music.py
+    tts.py
+    registry.py
   templates/
     base.html
     jobs.html
@@ -54,10 +62,21 @@ app/
     styles.css
   pipelines/
     script_pipeline.py
+    script_fact_pack.py
+    script_audit.py
+    script_repair.py
+    script_metrics.py
+    topic_pipeline.py
     scene_pipeline.py
     asset_pipeline.py
+    image_assets.py
+    tts_assets.py
+    subtitle_assets.py
+    music_assets.py
     render_pipeline.py
     monetization_pipeline.py
+  routes/
+    health.py
   quality/
     script_gate.py
     scene_gate.py

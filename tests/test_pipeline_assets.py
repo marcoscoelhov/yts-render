@@ -1,0 +1,1384 @@
+from tests.e2e_support import *  # noqa: F403
+
+
+def test_operational_settings_context_separates_scene_planner_from_image_generator(monkeypatch) -> None:
+    from app.operational_settings import build_operational_settings_context
+
+    monkeypatch.setattr(main_module.settings, "use_mock_providers", False)
+    context = build_operational_settings_context(main_module.settings)
+    fields = {field["key"]: field for group in context["groups"] for field in group["fields"]}
+    group_names = {group["name"] for group in context["groups"]}
+
+    assert fields["llm_scene_provider"]["label"] == "Planejador de cenas (LLM)"
+    assert "nao gera imagens" in fields["llm_scene_provider"]["description"]
+    assert "Imagem" in group_names
+    assert fields["image_generation_provider"]["label"] == "Gerador de imagens"
+    assert fields["image_generation_provider"]["input_type"] == "readonly"
+    assert fields["image_generation_provider"]["value"] == "MiniMax"
+
+def test_llm_registry_uses_deepseek_for_repair_and_scene_defaults(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.providers.llm.get_settings",
+        lambda: SimpleNamespace(
+            use_mock_providers=False,
+            llm_primary_provider="minimax",
+            llm_fallback_provider="deepseek",
+            llm_script_draft_provider="deepseek",
+            llm_repair_provider="deepseek",
+            llm_scene_provider="deepseek",
+            real_run_allow_mock_fallback=False,
+            resolved_minimax_text_api_key="minimax-key",
+            minimax_text_base_url="https://api.minimax.io/v1",
+            minimax_text_timeout_sec=150,
+            deepseek_api_key="deepseek-key",
+            deepseek_base_url="https://api.deepseek.com",
+            deepseek_model="deepseek-v4-flash",
+            deepseek_timeout_sec=90,
+        ),
+    )
+
+    registry = LLMProviderRegistry()
+
+    assert registry.repair_provider().provider_name == "deepseek"
+    assert registry.scene_provider().provider_name == "deepseek"
+
+def test_scene_plan_gate_rejects_generic_prompt_without_no_text_constraint() -> None:
+    result = ScenePlanGate().validate(
+        [
+            {
+                "scene_id": "scene-1",
+                "order": 1,
+                "narration_text": "O polvo usa os braços para explorar o ambiente.",
+                "token_start": 0,
+                "token_end": 8,
+                "primary_subject": "polvo",
+                "image_prompt": "vertical cinematic scientific image",
+            }
+        ],
+        expected_scene_count=1,
+    )
+    assert not result.passed
+    assert any("missing_no_text_constraint" in reason for reason in result.reasons)
+
+def test_asset_gate_rejects_low_semantic_scene_asset() -> None:
+    result = AssetGate().validate_selected(
+        [
+            {
+                "scene_id": "scene-1",
+                "semantic_match": 0.45,
+                "total_score": 0.5,
+                "text_or_watermark_penalty": 0.0,
+                "artifact_penalty": 0.0,
+            }
+        ]
+    )
+    assert not result.passed
+    assert "scene-1:semantic_match_below_threshold" in result.reasons
+
+def test_subtitle_gate_blocks_markup_leakage() -> None:
+    result = SubtitleGate().validate(
+        [{"idx": 1, "start_ms": 0, "end_ms": 1000, "text": "Texto bom </prosody"}],
+        coverage_ratio=1.0,
+    )
+    assert not result.passed
+    assert "1:markup_or_ssml_leaked" in result.reasons
+
+def test_subtitle_gate_rejects_large_timing_drift() -> None:
+    result = SubtitleGate().validate(
+        [{"idx": 1, "start_ms": 0, "end_ms": 1000, "text": "Texto bom"}],
+        coverage_ratio=1.0,
+        p95_drift_ms=1200,
+        max_drift_ms=2200,
+    )
+    assert not result.passed
+    assert "p95_timing_drift_too_high" in result.reasons
+    assert "max_timing_drift_too_high" in result.reasons
+
+def test_estimate_subtitle_timing_drift_reports_boundary_changes() -> None:
+    cues = [{"idx": 1, "start_ms": 0, "end_ms": 1000, "text": "um dois tres quatro"}]
+    items = [
+        {"idx": "1.1", "start_ms": 0, "end_ms": 650, "text": "um dois tres", "token_start": 0, "token_end": 2},
+        {"idx": "1.2", "start_ms": 650, "end_ms": 1000, "text": "quatro", "token_start": 3, "token_end": 3},
+    ]
+
+    report = orchestrator.asset_pipeline.subtitles.estimate_subtitle_timing_drift(cues, items)
+
+    assert report["timing_basis"] == "raw_srt_proportional_split"
+    assert report["drift_item_count"] == 2
+    assert report["p95_drift_ms"] > 0
+    assert report["max_drift_ms"] >= report["p95_drift_ms"]
+
+def test_background_music_gate_rejects_inaudible_bed(tmp_path: Path) -> None:
+    narration_path = tmp_path / "narration.wav"
+    music_path = tmp_path / "music.wav"
+    mixed_path = tmp_path / "mixed.wav"
+
+    def write_wave(path: Path, amplitude: int, freq_hz: float) -> None:
+        sample_rate = 24_000
+        frame_count = sample_rate
+        with wave.open(str(path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            frames = bytearray()
+            for idx in range(frame_count):
+                sample = int(amplitude * math.sin(2 * math.pi * freq_hz * (idx / sample_rate)))
+                frames.extend(sample.to_bytes(2, "little", signed=True))
+            wav_file.writeframes(frames)
+
+    write_wave(narration_path, amplitude=4000, freq_hz=220.0)
+    write_wave(music_path, amplitude=0, freq_hz=110.0)
+    shutil.copyfile(narration_path, mixed_path)
+
+    result = BackgroundMusicGate().validate(
+        narration_path=narration_path,
+        music_path=music_path,
+        mixed_audio_path=mixed_path,
+        expected_duration_ms=1000,
+        gain_db=-17.0,
+    )
+
+    assert not result.passed
+    assert "music_source_too_quiet" in result.reasons
+    assert "music_bed_inaudible" in result.reasons
+
+def test_render_gate_rejects_missing_file(tmp_path: Path) -> None:
+    result = RenderGate().validate(tmp_path / "missing.mp4", expected_duration_ms=30_000)
+    assert not result.passed
+    assert "missing_render_file" in result.reasons
+
+def test_minimax_scene_prompt_keeps_image_prompt_english_exception(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_json_completion(self, prompt: str) -> list[dict[str, object]]:
+        captured["prompt"] = prompt
+        return [
+            {
+                "scene_id": "scene-1",
+                "order": 1,
+                "narration_text": "Cena em pt-BR.",
+                "token_start": 0,
+                "token_end": 2,
+                "estimated_duration_sec": 5,
+                "visual_intent": "subject_closeup",
+                "primary_subject": "animal real",
+                "image_prompt": "vertical cinematic image of a real animal, no readable text anywhere",
+                "fallback_queries": ["animal real"],
+            }
+        ]
+
+    monkeypatch.setattr(MinimaxCreativeProvider, "_json_completion", fake_json_completion)
+    provider = object.__new__(MinimaxCreativeProvider)
+    provider.plan_scenes(
+        {"title": "Teste", "full_narration": "Cena em pt-BR.", "estimated_duration_sec": 5},
+        1,
+    )
+    prompt = captured["prompt"]
+    assert "Todos os campos textuais devem estar em portugues do Brasil" in prompt
+    assert "exceto image_prompt" in prompt
+    assert "image_prompt MUST be written in English only" in prompt
+
+def test_minimax_image_provider_prefers_text_key_before_dedicated_key(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_openai(**kwargs):
+        captured["text_api_key"] = kwargs["api_key"]
+        captured["text_base_url"] = kwargs["base_url"]
+        return object()
+
+    settings = SimpleNamespace(
+        resolved_minimax_text_api_key="text-key",
+        minimax_image_api_key="image-key",
+        resolved_minimax_image_api_key="image-key",
+        minimax_text_base_url="https://text.example/v1",
+        minimax_image_base_url="https://image.example/v1/image_generation",
+        minimax_text_timeout_sec=30,
+    )
+
+    monkeypatch.setattr("app.providers.llm.get_settings", lambda: settings)
+    monkeypatch.setattr("app.providers.image.get_settings", lambda: settings)
+    monkeypatch.setattr("app.providers.llm.OpenAI", fake_openai)
+
+    creative = MinimaxCreativeProvider()
+    image = MinimaxImageProvider()
+
+    assert creative.client is not None
+    assert captured == {
+        "text_api_key": "text-key",
+        "text_base_url": "https://text.example/v1",
+    }
+    assert image.key == "text-key"
+    assert image.primary_key == "text-key"
+    assert image.dedicated_key == "image-key"
+    assert image.url == "https://image.example/v1/image_generation"
+
+def test_minimax_image_provider_falls_back_to_dedicated_key_on_quota(monkeypatch, tmp_path) -> None:
+    settings = SimpleNamespace(
+        resolved_minimax_text_api_key="text-key",
+        minimax_image_api_key="image-key",
+        resolved_minimax_image_api_key="image-key",
+        minimax_image_base_url="https://image.example/v1/image_generation",
+    )
+    request = httpx.Request("POST", settings.minimax_image_base_url)
+    tiny_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lCw3GQAAAABJRU5ErkJggg=="
+    calls: list[str] = []
+
+    def fake_post(url, headers, json, timeout):  # noqa: ANN001
+        calls.append(headers["Authorization"])
+        if len(calls) == 1:
+            return httpx.Response(429, request=request, text="quota exceeded")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"base_resp": {"status_code": 0}, "data": {"image_base64": [tiny_png]}},
+        )
+
+    monkeypatch.setattr("app.providers.image.get_settings", lambda: settings)
+    monkeypatch.setattr("app.providers.music.httpx.post", fake_post)
+
+    provider = MinimaxImageProvider()
+    scene = {"job_id": "job-quota", "image_prompt": "vertical science image"}
+    result = provider.generate(scene, tmp_path / "first.png")
+    second = provider.generate(scene, tmp_path / "second.png")
+
+    assert calls == [
+        "Bearer text-key",
+        "Bearer image-key",
+        "Bearer image-key",
+    ]
+    assert result["provider_metadata"]["credential_role"] == "image_dedicated"
+    assert result["provider_metadata"]["fallback_from_text_key"] is True
+    assert result["provider_metadata"]["text_key_exhausted_for_job"] is True
+    assert second["provider_metadata"]["credential_role"] == "image_dedicated"
+
+def test_minimax_image_provider_does_not_use_dedicated_key_for_timeout(monkeypatch, tmp_path) -> None:
+    settings = SimpleNamespace(
+        resolved_minimax_text_api_key="text-key",
+        minimax_image_api_key="image-key",
+        resolved_minimax_image_api_key="image-key",
+        minimax_image_base_url="https://image.example/v1/image_generation",
+    )
+    calls: list[str] = []
+
+    def fake_post(url, headers, json, timeout):  # noqa: ANN001
+        calls.append(headers["Authorization"])
+        raise httpx.ReadTimeout("slow")
+
+    monkeypatch.setattr("app.providers.image.get_settings", lambda: settings)
+    monkeypatch.setattr("app.providers.image.httpx.post", fake_post)
+    monkeypatch.setattr("app.providers.image.time.sleep", lambda _: None)
+
+    provider = MinimaxImageProvider()
+    with pytest.raises(ProviderFailure, match="connection failed after 3 attempts"):
+        provider.generate({"job_id": "job-timeout", "image_prompt": "vertical science image"}, tmp_path / "timeout.png")
+
+    assert calls == ["Bearer text-key", "Bearer text-key", "Bearer text-key"]
+    assert provider._primary_exhausted_for_job("job-timeout") is False
+
+def test_resilient_creative_provider_scene_uses_role_timeout() -> None:
+    provider = object.__new__(ResilientCreativeProvider)
+    provider.settings = SimpleNamespace(llm_scene_plan_timeout_sec=0.01, minimax_scene_plan_timeout_sec=30)
+    provider.strict_minimax_validation = False
+
+    class SlowPrimary:
+        def plan_scenes(self, *args, **kwargs):
+            time.sleep(0.05)
+            return []
+
+    class SceneFallback:
+        def plan_scenes(self, *args, **kwargs):
+            return [{"scene_id": "scene-1", "narration_text": "fallback"}]
+
+    provider.primary = SlowPrimary()
+    provider.fallback = SceneFallback()
+    provider.scene_provider = SceneFallback()
+
+    scenes = provider.plan_scenes({"full_narration": "x"}, 1)
+
+    assert scenes[0]["scene_id"] == "scene-1"
+    assert "timed out after 0.01s" in scenes[0]["provider_fallback_reason"]
+
+def test_resilient_music_provider_requires_minimax_success_in_real_mode(monkeypatch) -> None:
+    settings = SimpleNamespace(
+        use_mock_providers=False,
+        background_music_provider="minimax",
+        allow_music_api_fallback=False,
+        resolved_minimax_music_api_key="music-key",
+        strict_minimax_validation=False,
+    )
+
+    class FailingMusicProvider:
+        def select_track(self, *args, **kwargs):
+            raise RuntimeError("minimax music unavailable")
+
+    monkeypatch.setattr("app.providers.music.get_settings", lambda: settings)
+    monkeypatch.setattr("app.providers.music.MiniMaxBackgroundMusicProvider", lambda: FailingMusicProvider())
+
+    provider = ResilientMusicProvider()
+
+    try:
+        provider.select_track({}, {}, Path("/tmp/out.wav"), 30_000)
+    except ProviderFailure as exc:
+        assert "background music selection failed" in str(exc)
+        assert "minimax music unavailable" in str(exc)
+    else:
+        raise AssertionError("expected ProviderFailure")
+
+def test_local_music_bank_provider_selects_approved_track_and_records_license(monkeypatch, tmp_path: Path) -> None:
+    bank_dir = tmp_path / "music_bank"
+    track_path = bank_dir / "tracks" / "science.wav"
+    license_path = bank_dir / "licenses" / "science.txt"
+    _write_test_wave(track_path, duration_ms=700, amplitude=2600, freq_hz=110.0)
+    license_path.parent.mkdir(parents=True, exist_ok=True)
+    license_path.write_text("YouTube Audio Library license snapshot", encoding="utf-8")
+    (bank_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "tracks": [
+                    {
+                        "id": "blocked-track",
+                        "path": "tracks/blocked.wav",
+                        "title": "Blocked",
+                        "moods": ["technology"],
+                        "license": "Unknown",
+                        "source_url": "https://example.com/blocked",
+                        "approved_for_youtube": True,
+                        "content_id_registered": True,
+                    },
+                    {
+                        "id": "science-calm-01",
+                        "path": "tracks/science.wav",
+                        "title": "Science Calm",
+                        "artist": "Audio Library",
+                        "moods": ["technology", "documentary"],
+                        "tags": ["cafeina", "curiosidades"],
+                        "license": "YouTube Audio Library",
+                        "source_url": "https://youtube.com/audiolibrary",
+                        "license_file": "licenses/science.txt",
+                        "approved_for_youtube": True,
+                        "requires_attribution": False,
+                        "content_id_registered": False,
+                        "content_id_risk": "low",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.providers.music.get_settings", lambda: SimpleNamespace(music_bank_dir=bank_dir))
+
+    provider = LocalMusicBankProvider()
+    output_path = tmp_path / "out" / "background.wav"
+    result = provider.select_track(
+        {"canonical_topic": "cafeína", "angle": "tecnologia do cérebro"},
+        {"title": "Cafeína parece tecnologia", "hook": "Seu cérebro muda em minutos."},
+        output_path,
+        1500,
+    )
+
+    assert result["provider"] == "local_music_bank"
+    assert result["license_note"] == "YouTube Audio Library"
+    assert result["attribution"] is None
+    assert result["provider_metadata"]["track_id"] == "science-calm-01"
+    assert result["provider_metadata"]["license_file"] == str(license_path)
+    assert result["provider_metadata"]["content_id_registered"] is False
+    with wave.open(str(output_path), "rb") as wav_file:
+        assert wav_file.getframerate() == 24_000
+        assert wav_file.getnchannels() == 1
+        assert round(wav_file.getnframes() / wav_file.getframerate() * 1000) == 1500
+
+def test_resilient_music_provider_uses_local_bank_before_minimax(monkeypatch, tmp_path: Path) -> None:
+    bank_dir = tmp_path / "music_bank"
+    track_path = bank_dir / "tracks" / "doc.wav"
+    _write_test_wave(track_path)
+    (bank_dir / "manifest.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "doc-01",
+                    "path": "tracks/doc.wav",
+                    "moods": ["documentary"],
+                    "license": "YouTube Audio Library",
+                    "source_url": "https://youtube.com/audiolibrary",
+                    "approved_for_youtube": True,
+                    "content_id_registered": False,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    settings = SimpleNamespace(
+        use_mock_providers=False,
+        background_music_provider="local_bank",
+        allow_music_api_fallback=False,
+        resolved_minimax_music_api_key="music-key",
+        music_bank_dir=bank_dir,
+    )
+    monkeypatch.setattr("app.providers.music.get_settings", lambda: settings)
+
+    def fail_if_minimax_is_used():
+        raise AssertionError("MiniMax should not be used when local bank succeeds")
+
+    monkeypatch.setattr("app.providers.music.MiniMaxBackgroundMusicProvider", fail_if_minimax_is_used)
+
+    provider = ResilientMusicProvider()
+    result = provider.select_track({"canonical_topic": "polvos"}, {"title": "Polvos", "hook": "Polvos somem."}, tmp_path / "music.wav", 1000)
+
+    assert result["provider"] == "local_music_bank"
+    assert result["provider_metadata"]["track_id"] == "doc-01"
+
+def test_builtin_music_bank_population_creates_manifest_and_tracks(tmp_path: Path) -> None:
+    bank_dir = tmp_path / "music_bank"
+
+    result = populate_builtin_music_bank(bank_dir, duration_seconds=1)
+
+    manifest_path = bank_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert result["track_count"] >= 8
+    assert len(manifest["tracks"]) >= 8
+    first_track = manifest["tracks"][0]
+    assert first_track["approved_for_youtube"] is True
+    assert first_track["content_id_registered"] is False
+    assert first_track["license"] == "local_synthetic_project_owned"
+    assert (bank_dir / first_track["path"]).exists()
+    assert (bank_dir / first_track["license_file"]).exists()
+
+def test_local_music_bank_provider_auto_populates_when_manifest_is_missing(monkeypatch, tmp_path: Path) -> None:
+    bank_dir = tmp_path / "music_bank"
+    settings = SimpleNamespace(music_bank_dir=bank_dir, music_bank_auto_populate=True)
+    monkeypatch.setattr("app.providers.music.get_settings", lambda: settings)
+
+    def fast_populate(target_bank_dir: Path, *args, **kwargs):
+        return populate_builtin_music_bank(target_bank_dir, duration_seconds=1)
+
+    monkeypatch.setattr("app.providers.music.populate_builtin_music_bank", fast_populate)
+
+    provider = LocalMusicBankProvider()
+    output_path = tmp_path / "music.wav"
+    result = provider.select_track({"canonical_topic": "universo"}, {"title": "O universo", "hook": "Algo estranho acontece."}, output_path, 1000)
+
+    assert result["provider"] == "local_music_bank"
+    assert result["provider_metadata"]["track_id"].startswith("local-")
+    assert (bank_dir / "manifest.json").exists()
+    assert output_path.exists()
+
+def test_import_minimax_music_artifacts_preserves_evidence_and_strips_signed_url(tmp_path: Path) -> None:
+    artifacts_dir = tmp_path / "artifacts"
+    job_dir = artifacts_dir / "job-minimax-123456"
+    audio_path = job_dir / "audio" / "background_source.wav"
+    _write_test_wave(audio_path, duration_ms=1000)
+    (job_dir / "background_music.json").write_text(
+        json.dumps(
+            {
+                "provider": "minimax_music",
+                "mood": "cinematic",
+                "query": "universo curiosidade cinematic",
+                "source_url": "https://example.com/music.wav?Signature=secret&OSSAccessKeyId=key",
+                "audio_uri": audio_path.resolve().as_uri(),
+                "license_note": "Generated with MiniMax music_generation API.",
+                "provider_metadata": {
+                    "trace_id": "trace-123",
+                    "model": "music-2.6",
+                    "instrumental": True,
+                },
+                "duration_ms": 1000,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (job_dir / "background_music_quality_report.json").write_text(
+        json.dumps(
+            {
+                "passed": True,
+                "reasons": [],
+                "metrics": {
+                    "music_source": {
+                        "duration_ms": 1000,
+                        "rms_dbfs": -14.0,
+                        "peak_dbfs": -3.0,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    bank_dir = tmp_path / "music_bank"
+
+    result = import_minimax_music_artifacts(artifacts_dir, bank_dir)
+
+    assert result["imported_count"] == 1
+    manifest = json.loads((bank_dir / "manifest.json").read_text(encoding="utf-8"))
+    track = manifest["tracks"][0]
+    assert track["bank_source"] == "minimax_artifact"
+    assert track["quality_tier"] == "primary"
+    assert track["source_job_id"] == "job-minimax-123456"
+    assert track["trace_id"] == "trace-123"
+    assert track["source_url"] == "https://example.com/music.wav"
+    assert "Signature" not in json.dumps(track)
+    assert (bank_dir / track["path"]).exists()
+    assert (bank_dir / track["license_file"]).read_text(encoding="utf-8").find("trace-123") >= 0
+
+def test_local_music_bank_provider_prefers_imported_minimax_over_synthetic(monkeypatch, tmp_path: Path) -> None:
+    bank_dir = tmp_path / "music_bank"
+    populate_builtin_music_bank(bank_dir, duration_seconds=1)
+    artifacts_dir = tmp_path / "artifacts"
+    job_dir = artifacts_dir / "job-minimax-preferred"
+    audio_path = job_dir / "audio" / "background_source.wav"
+    _write_test_wave(audio_path, duration_ms=1000, freq_hz=180.0)
+    (job_dir / "background_music.json").write_text(
+        json.dumps(
+            {
+                "provider": "minimax_music",
+                "mood": "cinematic",
+                "query": "tema sem palavra de mood",
+                "audio_uri": audio_path.resolve().as_uri(),
+                "license_note": "Generated with MiniMax music_generation API.",
+                "provider_metadata": {"trace_id": "trace-preferred", "model": "music-2.6", "instrumental": True},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (job_dir / "background_music_quality_report.json").write_text(json.dumps({"passed": True, "metrics": {"music_source": {"duration_ms": 1000}}}), encoding="utf-8")
+    import_minimax_music_artifacts(artifacts_dir, bank_dir)
+    monkeypatch.setattr("app.providers.music.get_settings", lambda: SimpleNamespace(music_bank_dir=bank_dir, music_bank_auto_populate=False))
+
+    provider = LocalMusicBankProvider()
+    result = provider.select_track({"canonical_topic": "x"}, {"title": "x", "hook": "x"}, tmp_path / "selected.wav", 1000)
+
+    assert result["provider_metadata"]["track_id"].startswith("minimax-")
+    assert result["provider_metadata"]["track_id"] == "minimax-job-mini"
+
+def test_resilient_music_provider_allows_mock_only_in_mock_mode(monkeypatch, tmp_path: Path) -> None:
+    settings = SimpleNamespace(use_mock_providers=True, resolved_minimax_music_api_key=None, strict_minimax_validation=False)
+    monkeypatch.setattr("app.providers.music.get_settings", lambda: settings)
+
+    provider = ResilientMusicProvider()
+    result = provider.select_track({"canonical_topic": "polvos"}, {"title": "Polvos", "hook": "Polvos somem."}, tmp_path / "music.wav", 10_000)
+
+    assert result["provider"] == "mock_music"
+    assert result["provider_metadata"]["fallback_used"] is True
+
+def test_review_page_renders_dynamic_checklist_and_structured_reason_codes() -> None:
+    client = TestClient(app)
+    job_id = "review-page-dynamic-checklist"
+    topic_request_id = "review-page-dynamic-checklist-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="review-page",
+                status="monetization_review",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=35,
+                topic_request_id=topic_request_id,
+                artifact_index={},
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="request",
+                niche_id="curiosidades",
+                seed_theme="polvos",
+                language="pt-BR",
+                target_duration_sec=35,
+            )
+        )
+        session.commit()
+    orchestrator.storage.persist_json(
+        job_id,
+        "monetization_report.json",
+        {
+            "final_status": "monetization_review",
+            "passed": False,
+            "hard_blockers": [],
+            "manual_required": ["rights_confirmation_required"],
+            "human_review_checklist": {
+                "items": [
+                    {
+                        "code": "rights_confirmation_required",
+                        "confirmation_code": "rights_confirmed",
+                        "label": "Direitos comerciais confirmados",
+                        "required": True,
+                        "completed": False,
+                        "source": "rights_registry",
+                    },
+                    {
+                        "code": "youtube_ai_disclosure_toggle_required",
+                        "confirmation_code": "ai_disclosure_confirmed",
+                        "label": "Disclosure de IA marcado no YouTube",
+                        "required": True,
+                        "completed": True,
+                        "auto_completed": True,
+                        "source": "ai_disclosure",
+                    },
+                ],
+            },
+            "ai_disclosure": {"youtube_disclosure_required": True, "auto_confirmed": True},
+            "rights_registry": {
+                "entries": [
+                    {
+                        "asset_type": "image",
+                        "scene_id": "scene-1",
+                        "provider": "minimax",
+                        "commercial_use_allowed": False,
+                        "license_source": None,
+                        "evidence_required": False,
+                    }
+                ]
+            },
+            "fact_claims_report": {"claim_trace": [], "claim_sources": []},
+            "metadata_review": {"title": "Polvos", "suggested_hashtags": ["#shorts"], "reasons": []},
+            "channel_repetition_report": {"repetition_risk": "low"},
+        },
+    )
+
+    response = client.get(f"/jobs/{job_id}")
+
+    assert response.status_code == 200
+    assert 'name="confirmation_codes" value="rights_confirmed"' in response.text
+    assert 'name="ai_disclosure_confirmed"' not in response.text
+    assert 'name="reason_codes" value="visual_incoherence"' in response.text
+    assert "Disclosure de IA marcado no YouTube" in response.text
+    assert "automático" in response.text
+
+def test_pipelines_use_explicit_base_dependencies_and_asset_helpers() -> None:
+    test_orchestrator = JobOrchestrator()
+
+    assert not hasattr(test_orchestrator, "_build_fact_pack")
+    assert not hasattr(test_orchestrator, "_split_subtitle_cue")
+    assert not hasattr(test_orchestrator, "_publish_readiness_report")
+    assert not hasattr(test_orchestrator, "_step_topic_plan")
+    assert not hasattr(test_orchestrator, "_normalize_topic_plan_payload")
+    assert not hasattr(test_orchestrator, "_run_retention_sweep")
+    assert not hasattr(test_orchestrator, "_sync_native_scheduled_publications")
+    assert test_orchestrator.topic_pipeline.step_topic_plan.__self__ is test_orchestrator.topic_pipeline
+    assert test_orchestrator.topic_pipeline.normalize_topic_plan_payload.__self__ is test_orchestrator.topic_pipeline
+    assert test_orchestrator.publication_ops.schedule_publication.__self__ is test_orchestrator.publication_ops
+    assert test_orchestrator.publication_ops._run_retention_sweep.__self__ is test_orchestrator.publication_ops
+    assert "__getattr__" not in test_orchestrator.asset_pipeline.__class__.__mro__[1].__dict__
+    assert "_build_fact_pack" not in test_orchestrator.script_pipeline.__class__.__mro__[1].__dict__
+    assert "_normalize_scene_semantics" not in test_orchestrator.scene_pipeline.__class__.__mro__[1].__dict__
+    assert test_orchestrator.script_pipeline._build_fact_pack.__self__ is test_orchestrator.script_pipeline
+    assert test_orchestrator.script_pipeline._validate_or_repair_script.__self__ is test_orchestrator.script_pipeline
+    assert test_orchestrator.script_pipeline._persist_script_generation_debug.__self__ is test_orchestrator.script_pipeline
+    assert test_orchestrator.script_pipeline.fact_pack_domain._build_fact_pack.__self__ is test_orchestrator.script_pipeline.fact_pack_domain
+    assert test_orchestrator.script_pipeline.audit_domain._text_publish_audit.__self__ is test_orchestrator.script_pipeline.audit_domain
+    assert test_orchestrator.script_pipeline.repair_domain._validate_or_repair_script.__self__ is test_orchestrator.script_pipeline.repair_domain
+    assert test_orchestrator.scene_pipeline.normalize_scene_token_coverage.__self__ is test_orchestrator.scene_pipeline
+    assert test_orchestrator.scene_pipeline.normalize_scene_semantics.__self__ is test_orchestrator.scene_pipeline
+    assert test_orchestrator.scene_pipeline.fallback_query_variants.__self__ is test_orchestrator.scene_pipeline
+    assert not hasattr(test_orchestrator.asset_pipeline, "_fit_tts_duration")
+    assert test_orchestrator.asset_pipeline.tts.fit_tts_duration.__self__ is test_orchestrator.asset_pipeline.tts
+    assert not hasattr(test_orchestrator.asset_pipeline, "_mix_background_music_with_repair")
+    assert not hasattr(test_orchestrator.asset_pipeline, "_persist_background_music_debug")
+    assert not hasattr(test_orchestrator.asset_pipeline, "_generate_sound_design_track")
+    assert test_orchestrator.asset_pipeline.music.mix_background_music_with_repair.__self__ is test_orchestrator.asset_pipeline.music
+    assert not hasattr(test_orchestrator.asset_pipeline, "_split_subtitle_cue")
+    assert not hasattr(test_orchestrator.asset_pipeline, "_estimate_subtitle_timing_drift")
+    assert test_orchestrator.asset_pipeline.subtitles.split_subtitle_cue.__self__ is test_orchestrator.asset_pipeline.subtitles
+    assert test_orchestrator.asset_pipeline.subtitles.estimate_subtitle_timing_drift.__self__ is test_orchestrator.asset_pipeline.subtitles
+    assert not hasattr(test_orchestrator.asset_pipeline, "_generate_primary_asset")
+    assert not hasattr(test_orchestrator.asset_pipeline, "_normalize_asset_uri_extension")
+    assert not hasattr(test_orchestrator.asset_pipeline, "_image_prompt_variants")
+    assert test_orchestrator.asset_pipeline.image_assets.generate_primary_asset.__self__ is test_orchestrator.asset_pipeline.image_assets
+    assert test_orchestrator.asset_pipeline.image_assets.pipeline is test_orchestrator.asset_pipeline
+    assert test_orchestrator.asset_pipeline.tts.pipeline is test_orchestrator.asset_pipeline
+    assert test_orchestrator.asset_pipeline.subtitles.pipeline is test_orchestrator.asset_pipeline
+    assert test_orchestrator.asset_pipeline.music.pipeline is test_orchestrator.asset_pipeline
+    assert test_orchestrator.render_pipeline.render_with_repair.__self__ is test_orchestrator.render_pipeline
+    assert test_orchestrator.render_pipeline.mutate_render_command_for_repair.__self__ is test_orchestrator.render_pipeline
+    assert test_orchestrator.monetization_pipeline.step_publish.__self__ is test_orchestrator.monetization_pipeline
+    assert test_orchestrator.monetization_pipeline.build_monetization_report.__self__ is test_orchestrator.monetization_pipeline
+    assert test_orchestrator.monetization_pipeline.build_rights_registry.__self__ is test_orchestrator.monetization_pipeline
+    assert test_orchestrator.monetization_pipeline.build_fact_claims_report.__self__ is test_orchestrator.monetization_pipeline
+    assert test_orchestrator.monetization_pipeline.build_publish_package.__self__ is test_orchestrator.monetization_pipeline
+    assert test_orchestrator.monetization_pipeline.provider_publish_audit.__self__ is test_orchestrator.monetization_pipeline
+
+def test_scene_timings_fall_back_to_token_boundaries() -> None:
+    scenes = [
+        {"scene_id": "scene-1", "token_start": 0, "token_end": 9},
+        {"scene_id": "scene-2", "token_start": 10, "token_end": 19},
+        {"scene_id": "scene-3", "token_start": 20, "token_end": 29},
+    ]
+    normalized = normalize_scene_timings(scenes, 30_000)
+    assert [scene["actual_start_ms"] for scene in normalized] == [0, 10_000, 20_000]
+    assert [scene["actual_end_ms"] for scene in normalized] == [10_000, 20_000, 30_000]
+
+def test_scene_token_coverage_normalizes_numeric_scene_ids_to_strings() -> None:
+    narration = "polvos tem tres coracoes e sangue azul no oceano profundo"
+    scenes = [
+        {"scene_id": 1, "order": 1, "narration_text": "polvos tem tres coracoes"},
+        {"scene_id": 2, "order": 2, "narration_text": "e sangue azul no oceano profundo"},
+    ]
+
+    normalized = orchestrator.scene_pipeline.normalize_scene_token_coverage(scenes, narration)
+
+    assert [scene["scene_id"] for scene in normalized] == ["1", "2"]
+    assert normalized[0]["token_start"] == 0
+    assert normalized[-1]["token_end"] == len(word_tokens(narration)) - 1
+
+def test_subtitle_chunks_fit_two_lines_without_losing_words() -> None:
+    text = "Cada coração bombeia hemocianina, o pigmento que colore seu sangue azul durante a circulação."
+    chunks = split_caption_chunks(text, max_chars=28, max_lines=2)
+    assert " ".join(chunks) == text
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(wrap_caption(chunk, max_chars=28).splitlines()) <= 2
+
+def test_subtitle_cue_split_preserves_timing_and_token_coverage() -> None:
+    cue = {
+        "idx": 1,
+        "start_ms": 1000,
+        "end_ms": 5000,
+        "text": "Cada coração bombeia hemocianina, o pigmento que colore seu sangue azul durante a circulação.",
+    }
+    items = orchestrator.asset_pipeline.subtitles.split_subtitle_cue(cue, token_start=10, token_end=22)
+    assert items[0]["start_ms"] == 1000
+    assert items[-1]["end_ms"] == 5000
+    assert items[0]["token_start"] == 10
+    assert items[-1]["token_end"] == 22
+    assert " ".join(item["text"] for item in items) == cue["text"]
+    for item in items:
+        assert len(wrap_caption(item["text"], max_chars=42).splitlines()) <= 2
+
+def test_topic_plan_normalization_fills_missing_required_fields() -> None:
+    request = SimpleNamespace(seed_theme="buracos negros", requested_angle=None)
+    plan = {
+        "tema": "Buracos Negros",
+        "gancho": "o limite que muda tudo",
+        "titulos": ["Buracos negros: o limite que muda tudo"],
+    }
+
+    normalized = orchestrator.topic_pipeline.normalize_topic_plan_payload(plan, request)
+
+    assert normalized["canonical_topic"] == "Buracos Negros"
+    assert normalized["angle"]
+    assert normalized["hook_promise"] == "o limite que muda tudo"
+    assert normalized["entities"] == ["Buracos Negros"]
+    assert normalized["search_terms"]
+    assert normalized["research_brief"]["focus_topic"] == "Buracos Negros"
+    assert normalized["research_brief"]["primary_terms"]
+    assert normalized["quality_metrics"]["editorial_mode"] == "viral_curiosidades"
+    assert normalized["quality_metrics"]["topic_repair_used"] is True
+
+def test_scene_plan_normalization_accepts_dict_wrapped_scene_list() -> None:
+    from app.providers import MinimaxCreativeProvider
+
+    provider = MinimaxCreativeProvider.__new__(MinimaxCreativeProvider)
+    normalized = provider._normalize_scene_plan_payload({"scenes": [{"scene_id": "scene-1"}]})
+
+    assert isinstance(normalized, list)
+    assert normalized[0]["scene_id"] == "scene-1"
+
+def test_scene_plan_normalization_accepts_nested_scene_list() -> None:
+    from app.providers import MinimaxCreativeProvider
+
+    provider = MinimaxCreativeProvider.__new__(MinimaxCreativeProvider)
+    normalized = provider._normalize_scene_plan_payload({"data": {"plan": [{"scene_id": "scene-1", "narration_text": "abc"}]}})
+
+    assert isinstance(normalized, list)
+    assert normalized[0]["scene_id"] == "scene-1"
+
+def test_plan_scenes_prefers_json_array_completion_when_available(monkeypatch) -> None:
+    from app.providers import MinimaxCreativeProvider
+
+    provider = MinimaxCreativeProvider.__new__(MinimaxCreativeProvider)
+    calls: list[str] = []
+
+    def fake_array_completion(_prompt: str):
+        calls.append("array")
+        return [{"scene_id": "scene-1", "narration_text": "abc"}]
+
+    def fake_object_completion(_prompt: str):
+        calls.append("object")
+        return {"scenes": [{"scene_id": "scene-1", "narration_text": "abc"}]}
+
+    provider._json_array_completion = fake_array_completion  # type: ignore[attr-defined]
+    provider._json_completion = fake_object_completion  # type: ignore[method-assign]
+
+    scenes = provider.plan_scenes({"full_narration": "abc", "estimated_duration_sec": 35}, 6)
+
+    assert scenes[0]["scene_id"] == "scene-1"
+    assert calls == ["array"]
+
+def test_subtitle_split_enforces_word_limit_for_long_cues() -> None:
+    cue = {
+        "idx": 5,
+        "start_ms": 1000,
+        "end_ms": 5000,
+        "text": "Mesmo assim, o buraco negro age como um corpo negro ideal, absorvendo toda a luz.",
+    }
+
+    items = orchestrator.asset_pipeline.subtitles.split_subtitle_cue(cue, token_start=0, token_end=14)
+
+    assert len(items) > 1
+    assert " ".join(item["text"] for item in items) == cue["text"]
+    for item in items:
+        assert len(word_tokens(item["text"])) <= 14
+        assert len(wrap_caption(item["text"], max_chars=42).splitlines()) <= 2
+
+def test_subtitle_boundary_repair_moves_words_across_cues() -> None:
+    items = [
+        {"idx": 9, "start_ms": 20_000, "end_ms": 22_500, "text": "deixa oceanos profundos mais concreto para", "token_start": 40, "token_end": 45},
+        {"idx": 10, "start_ms": 22_500, "end_ms": 25_000, "text": "quem assiste. Assim cada cena sustenta a", "token_start": 46, "token_end": 52},
+        {"idx": 11, "start_ms": 25_000, "end_ms": 27_500, "text": "ideia sem inventar elemento aleatorio. Por", "token_start": 53, "token_end": 58},
+        {"idx": 12, "start_ms": 27_500, "end_ms": 30_000, "text": "isso oceanos profundos deixa de ser so", "token_start": 59, "token_end": 65},
+    ]
+
+    repaired = orchestrator.asset_pipeline.subtitles.repair_subtitle_item_boundaries(items)
+
+    assert repaired[0]["text"].endswith("para quem")
+    assert repaired[1]["text"].startswith("assiste.")
+    assert repaired[2]["text"].endswith("Por isso")
+    assert repaired[3]["text"].startswith("oceanos")
+    assert SubtitleGate().validate(repaired, 1.0).passed
+
+def test_subtitle_boundary_repair_can_push_weak_ending_into_next_chunk() -> None:
+    items = [
+        {"idx": "4.1", "start_ms": 8_002, "end_ms": 10_139, "text": "Isso significa que ele passa por qualquer fresta, se contorcendo ao máximo para", "token_start": 24, "token_end": 36},
+        {"idx": "4.2", "start_ms": 10_139, "end_ms": 12_276, "text": "caber.", "token_start": 37, "token_end": 37},
+    ]
+
+    repaired = orchestrator.asset_pipeline.subtitles.repair_subtitle_item_boundaries(items)
+
+    assert repaired[0]["text"].endswith("máximo")
+    assert repaired[1]["text"] == "para caber."
+    assert SubtitleGate().validate(repaired, 1.0).passed
+
+def test_subtitle_boundary_repair_can_pull_words_from_next_chunk() -> None:
+    items = [
+        {"idx": "6.2", "start_ms": 19_000, "end_ms": 20_500, "text": "predadores e muda de cor em", "token_start": 60, "token_end": 65},
+        {"idx": "6.3", "start_ms": 20_500, "end_ms": 22_142, "text": "segundos.", "token_start": 66, "token_end": 66},
+    ]
+
+    repaired = orchestrator.asset_pipeline.subtitles.repair_subtitle_item_boundaries(items)
+
+    assert repaired[0]["text"] == "predadores e muda de cor em segundos."
+    assert len(repaired) == 1
+    assert SubtitleGate().validate(repaired, 1.0).passed
+
+def test_tts_duration_fit_compresses_audio_and_subtitle_timings(tmp_path: Path) -> None:
+    audio_path = tmp_path / "voice.wav"
+    srt_path = tmp_path / "voice.srt"
+    sample_rate = 24_000
+    duration_sec = 58
+    with wave.open(str(audio_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        frames = bytearray()
+        for idx in range(sample_rate * duration_sec):
+            sample = int(1200 * math.sin(2 * math.pi * 220 * idx / sample_rate))
+            frames.extend(sample.to_bytes(2, "little", signed=True))
+        wav_file.writeframes(frames)
+    srt_path.write_text(
+        "1\n00:00:00,000 --> 00:00:29,000\nprimeira metade\n\n"
+        "2\n00:00:29,000 --> 00:00:58,000\nsegunda metade\n",
+        encoding="utf-8",
+    )
+
+    result = orchestrator.asset_pipeline.tts.fit_tts_duration(
+        audio_path,
+        srt_path,
+        {"duration_ms": 58_000, "provider_metadata": {"mode": "edge"}},
+    )
+    cues = parse_srt(srt_path.read_text(encoding="utf-8"))
+
+    assert 53_500 <= result["duration_ms"] <= 54_500
+    assert result["provider_metadata"]["duration_fit_applied"] is True
+    assert cues[-1]["end_ms"] <= 54_600
+
+def test_tts_duration_fit_expands_short_audio_and_subtitle_timings(tmp_path: Path) -> None:
+    audio_path = tmp_path / "voice.wav"
+    srt_path = tmp_path / "voice.srt"
+    sample_rate = 24_000
+    duration_sec = 27
+    with wave.open(str(audio_path), "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        frames = bytearray()
+        for idx in range(sample_rate * duration_sec):
+            sample = int(1200 * math.sin(2 * math.pi * 220 * idx / sample_rate))
+            frames.extend(sample.to_bytes(2, "little", signed=True))
+        wav_file.writeframes(frames)
+    srt_path.write_text(
+        "1\n00:00:00,000 --> 00:00:13,500\nprimeira metade\n\n"
+        "2\n00:00:13,500 --> 00:00:27,000\nsegunda metade\n",
+        encoding="utf-8",
+    )
+
+    result = orchestrator.asset_pipeline.tts.fit_tts_duration(
+        audio_path,
+        srt_path,
+        {"duration_ms": 27_000, "provider_metadata": {"mode": "edge"}},
+    )
+    cues = parse_srt(srt_path.read_text(encoding="utf-8"))
+
+    assert 35_500 <= result["duration_ms"] <= 36_500
+    assert result["provider_metadata"]["duration_fit_applied"] is True
+    assert 35_500 <= cues[-1]["end_ms"] <= 36_500
+
+def test_scene_semantics_keeps_image_prompt_in_english() -> None:
+    normalized = orchestrator.scene_pipeline.normalize_scene_semantics(
+        {
+            "scene_id": "scene-1",
+            "primary_subject": "polvos",
+            "image_prompt": "cinematic macro scene of an octopus changing skin texture",
+            "fallback_queries": ["polvos"],
+        },
+        "polvos",
+    )
+    prompt = normalized["image_prompt"].lower()
+    assert "octopuses" in prompt
+    assert "polvos" not in prompt
+    assert "no readable text anywhere" in prompt
+    assert "no letters" in prompt
+    assert "no logo" in prompt
+    assert "no typography" in prompt
+    assert "no text printed on objects" in prompt
+    assert "blank packages" in prompt
+    assert "sem texto" not in prompt
+
+def test_scene_semantics_rebuilds_generic_portuguese_prompt_from_narration() -> None:
+    normalized = orchestrator.scene_pipeline.normalize_scene_semantics(
+        {
+            "scene_id": "scene-1",
+            "primary_subject": "Polvos",
+            "narration_text": "Polvos possuem três corações e sangue azul.",
+            "visual_intent": "subject_closeup",
+            "image_prompt": "ilustracao vertical cinematografica de Polvos, mostrando subject closeup, sem texto",
+            "fallback_queries": ["Polvos"],
+        },
+        "Polvos",
+    )
+    prompt = normalized["image_prompt"].lower()
+    assert "three subtle hearts" in prompt
+    assert "blue copper-rich blood vessels" in prompt
+    assert "polvos" not in prompt
+    assert "ilustracao" not in prompt
+    assert "sem texto" not in prompt
+
+def test_scene_semantics_adds_caffeine_specific_visuals_and_blank_objects() -> None:
+    normalized = orchestrator.scene_pipeline.normalize_scene_semantics(
+        {
+            "scene_id": "scene-2",
+            "primary_subject": "cafeina e foco",
+            "narration_text": "A cafeina ocupa receptores de adenosina e reduz a sonolencia por alguns minutos.",
+            "visual_intent": "process_or_mechanism",
+            "image_prompt": "vertical cinematic image of coffee, no readable text anywhere",
+            "fallback_queries": ["cafeina foco"],
+        },
+        "cafeina e foco",
+    )
+    prompt = normalized["image_prompt"].lower()
+    assert "caffeine molecules" in prompt
+    assert "adenosine receptors" in prompt
+    assert "plain unbranded" in prompt or "blank cups" in prompt
+    assert "no text on cups" in prompt
+    assert "no labels or lettering on any object surface" in prompt
+    assert "cafeina" not in prompt
+
+def test_scene_semantics_translates_long_caffeine_topic_to_english_subject() -> None:
+    normalized = orchestrator.scene_pipeline.normalize_scene_semantics(
+        {
+            "scene_id": "scene-1",
+            "primary_subject": "Cafeína e foco: a ciência por trás do efeito do café na concentração matinal",
+            "narration_text": "Cafeína e foco dependem da adenosina pela manhã.",
+            "visual_intent": "subject_closeup",
+            "image_prompt": "soft morning coffee scene, no readable text anywhere",
+            "fallback_queries": ["cafeina foco"],
+        },
+        "Cafeína e foco",
+    )
+    prompt = normalized["image_prompt"].lower()
+    assert "central subject: caffeine and focus" in prompt
+    assert "cafeína" not in prompt
+    assert "café" not in prompt
+
+def test_scene_semantics_rebuilds_generic_cat_prompt_from_narration() -> None:
+    normalized = orchestrator.scene_pipeline.normalize_scene_semantics(
+        {
+            "scene_id": "scene-3",
+            "primary_subject": "gatos",
+            "narration_text": "Gatos giram cada orelha até 180 graus para captar sons.",
+            "visual_intent": "process_or_mechanism",
+            "image_prompt": (
+                "vertical cinematic scientific illustration of gatos, showing process or mechanism, "
+                "focused on the described phenomenon"
+            ),
+            "fallback_queries": ["gatos"],
+        },
+        "gatos",
+    )
+    prompt = normalized["image_prompt"].lower()
+    assert "cat ears rotating independently" in prompt
+    assert "sound waves" in prompt
+    assert "gatos" not in prompt
+    assert "focused on the described phenomenon" not in prompt
+
+def test_mock_scene_planner_uses_canonical_topic_as_subject() -> None:
+    provider = MockCreativeProvider()
+    scenes = provider.plan_scenes(
+        {
+            "canonical_topic": "buracos negros",
+            "title": "O que torna buracos negros tao estranhos pelo detalhe que quase ninguem nota",
+            "full_narration": "Buracos negros distorcem luz e tempo quando o contexto certo entra em cena.",
+            "estimated_duration_sec": 35,
+        },
+        6,
+    )
+    assert scenes[0]["primary_subject"] == "buracos negros"
+    assert scenes[0]["topic_hint"] == "buracos negros"
+    assert scenes[0]["fallback_queries"][0] == "buracos negros"
+
+def test_asset_extension_is_normalized_to_actual_file_format(tmp_path: Path) -> None:
+    wrong_path = tmp_path / "ai.png"
+    from PIL import Image
+
+    Image.new("RGB", (32, 48), "white").save(wrong_path, format="JPEG")
+    asset = {"uri": wrong_path.resolve().as_uri(), "provider": "test", "prompt_snapshot": "prompt"}
+
+    normalized = orchestrator.asset_pipeline.image_assets.normalize_asset_uri_extension(asset)
+
+    normalized_path = Path(normalized["uri"].replace("file://", ""))
+    assert normalized_path.suffix == ".jpg"
+    assert normalized_path.exists()
+    assert not wrong_path.exists()
+    assert normalized["file_format"] == "jpeg"
+    assert normalized["extension_normalized"] is True
+
+def test_conservative_ai_disclosure_requires_toggle_for_any_synthetic_asset(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.settings, "conservative_synthetic_disclosure", True)
+    monkeypatch.setattr(orchestrator.settings, "channel_ai_generated_content", False)
+    report = orchestrator.monetization_pipeline.build_ai_disclosure_report(
+        [
+            SimpleNamespace(
+                provider="mock",
+                scene_id="scene-1",
+                prompt_snapshot="abstract underwater texture without people",
+            )
+        ]
+    )
+
+    assert report["youtube_disclosure_required"] is True
+    assert report["auto_confirmed"] is False
+
+def test_rights_registry_requires_evidence_for_confirmed_minimax_assets(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.settings, "ai_generated_commercial_rights_confirmed", False)
+    monkeypatch.setattr(orchestrator.settings, "minimax_commercial_rights_confirmed", True)
+    monkeypatch.setattr(orchestrator.settings, "minimax_rights_evidence_url", None)
+    report = orchestrator.monetization_pipeline.build_rights_registry(
+        SimpleNamespace(job_id="job-rights"),
+        [
+            SimpleNamespace(
+                kind="image",
+                scene_id="scene-1",
+                provider="minimax",
+                uri="file:///tmp/asset.jpg",
+                license_note=None,
+                attribution=None,
+            )
+        ],
+        None,
+        None,
+    )
+
+    assert report["all_commercial_rights_confirmed"] is False
+    assert report["evidence_required_count"] == 1
+    assert report["entries"][0]["review_required"] is True
+
+def test_rights_registry_auto_confirms_ai_generated_assets(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.settings, "ai_generated_commercial_rights_confirmed", True)
+    monkeypatch.setattr(orchestrator.settings, "minimax_commercial_rights_confirmed", False)
+    monkeypatch.setattr(orchestrator.settings, "minimax_rights_evidence_url", None)
+    report = orchestrator.monetization_pipeline.build_rights_registry(
+        SimpleNamespace(job_id="job-ai-rights"),
+        [
+            SimpleNamespace(
+                kind="image",
+                scene_id="scene-1",
+                provider="minimax",
+                uri="file:///tmp/asset.jpg",
+                license_note=None,
+                attribution=None,
+            )
+        ],
+        SimpleNamespace(provider="edge_tts", voice="pt-BR", audio_uri="file:///tmp/voice.wav"),
+        SimpleNamespace(provider="minimax_music", audio_uri="file:///tmp/music.wav", license_note=None, attribution=None, provider_metadata={}),
+    )
+
+    assert report["all_commercial_rights_confirmed"] is True
+    assert report["evidence_required_count"] == 0
+    assert report["review_required_count"] == 0
+    assert {entry["license_source"] for entry in report["entries"]} == {"YTS_AI_GENERATED_COMMERCIAL_RIGHTS_CONFIRMED"}
+
+def test_scene_token_coverage_normalization_rebuilds_contiguous_spans() -> None:
+    scenes = [
+        {
+            "scene_id": "scene-2",
+            "order": 2,
+            "narration_text": "muda de cor para fugir",
+            "token_start": 99,
+            "token_end": 120,
+            "image_prompt": "ok no readable text anywhere",
+        },
+        {
+            "scene_id": "scene-1",
+            "order": 1,
+            "narration_text": "polvos parecem alienigenas",
+            "token_start": 5,
+            "token_end": 7,
+            "image_prompt": "ok no readable text anywhere",
+        },
+    ]
+
+    normalized = orchestrator.scene_pipeline.normalize_scene_token_coverage(
+        scenes,
+        "Polvos parecem alienigenas e mudam de cor para fugir de predadores",
+    )
+
+    assert normalized[0]["order"] == 1
+    assert normalized[0]["token_start"] == 0
+    assert normalized[0]["token_end"] < normalized[1]["token_start"]
+    assert normalized[1]["token_end"] == len(word_tokens("Polvos parecem alienigenas e mudam de cor para fugir de predadores")) - 1
+    assert normalized[0]["narration_text"].startswith("polvos parecem alienigenas")
+
+def test_step_background_music_persists_debug_on_provider_failure(monkeypatch) -> None:
+    job_id = orchestrator.create_job(
+        {
+            "seed_theme": "polvos",
+            "niche_id": "curiosidades",
+            "language": "pt-BR",
+            "target_duration_sec": 35,
+            "tone": "intrigante_direto",
+            "cta_style": "none",
+            "notes": "teste",
+            "requested_angle": None,
+        }
+    )
+    audio_dir = Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    narration_path = audio_dir / "narration.wav"
+    narration_path.write_bytes(b"RIFFtest")
+
+    with SessionLocal() as session:
+        session.add(
+            TopicPlan(
+                topic_id=f"topic-music-{job_id}",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="topic-music",
+                canonical_topic="polvos",
+                angle="curiosidades_inacreditaveis",
+                hook_promise="fatos sobre polvos",
+                entities=["polvos"],
+                search_terms=["polvos curiosidades"],
+                title_candidates=["Polvos parecem alienígenas reais"],
+                quality_metrics={},
+            )
+        )
+        session.add(
+            Script(
+                script_id=f"script-music-{job_id}",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="script-music",
+                title="Polvos parecem alienígenas",
+                hook="Cada braço do polvo parece pensar sozinho.",
+                body_beats=[],
+                ending="Isso muda como você olha para o oceano.",
+                cta=None,
+                full_narration="Cada braço do polvo parece pensar sozinho.",
+                estimated_duration_sec=30,
+                key_facts=[],
+                token_count=12,
+                language="pt-BR",
+                qa_metrics={},
+            )
+        )
+        session.add(
+            NarrationAsset(
+                narration_id=f"narration-music-{job_id}",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="narration-music",
+                provider="edge_tts",
+                voice="pt-BR-FranciscaNeural",
+                audio_uri=narration_path.resolve().as_uri(),
+                normalized_audio_uri=None,
+                raw_subtitles_uri=None,
+                duration_ms=32000,
+                sample_rate_hz=24000,
+                channels=1,
+                loudness_lufs=-16.0,
+                provider_metadata={},
+            )
+        )
+        session.commit()
+
+    def fake_select_track(_topic_dict, _script_dict, _output_path, _target_duration_ms):
+        raise ProviderFailure(
+            "background_music",
+            "strict minimax validation requires minimax music success: minimax music request timed out after 120.0s",
+            details={
+                "provider": "minimax_music",
+                "query": "polvos documentary",
+                "mood": "documentary",
+                "timeout_sec": 120.0,
+                "request_payload": {"model": "music-2.6"},
+            },
+        )
+
+    monkeypatch.setattr(orchestrator.providers.music, "select_track", fake_select_track)
+
+    with SessionLocal() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        try:
+            orchestrator.asset_pipeline.step_background_music(session, job, 1)
+        except ProviderFailure:
+            pass
+        else:
+            raise AssertionError("expected ProviderFailure")
+
+    debug_path = Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id / "background_music_debug.json"
+    debug = json.loads(debug_path.read_text(encoding="utf-8"))
+
+    assert debug["phase"] == "provider_failure"
+    assert debug["error_type"] == "ProviderFailure"
+    assert "minimax music request timed out" in debug["error_message"]
+    assert debug["canonical_topic"] == "polvos"
+    assert debug["provider_details"]["request_payload"]["model"] == "music-2.6"
+    assert debug["provider_details"]["query"] == "polvos documentary"
+
+def test_minimax_background_music_provider_uses_output_url(monkeypatch, tmp_path: Path) -> None:
+    provider = MiniMaxBackgroundMusicProvider()
+
+    class FakeResponse:
+        def __init__(self, payload: dict[str, object]) -> None:
+            self._payload = payload
+            self.status_code = 200
+            self.text = json.dumps(payload)
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return self._payload
+
+    captured: dict[str, object] = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["payload"] = json
+        return FakeResponse(
+            {
+                "data": {
+                    "audio": "https://example.com/music.mp3",
+                    "status": 2,
+                },
+                "trace_id": "trace-music",
+                "extra_info": {
+                    "music_duration": 31876,
+                    "music_sample_rate": 44100,
+                    "music_channel": 2,
+                    "bitrate": 256000,
+                },
+            }
+        )
+
+    class FakeDownloadResponse:
+        def __init__(self, content: bytes) -> None:
+            self.content = content
+
+        def raise_for_status(self) -> None:
+            return None
+
+    def fake_get(url, timeout=None, follow_redirects=None):
+        assert url == "https://example.com/music.mp3"
+        return FakeDownloadResponse(b"fake-mp3")
+
+    def fake_convert(input_path: Path, output_path: Path) -> None:
+        assert input_path.exists()
+        output_path.write_bytes(b"RIFFfake")
+
+    trimmed: dict[str, object] = {}
+
+    def fake_trim(output_path: Path, target_duration_ms: int) -> dict[str, object]:
+        trimmed["path"] = output_path
+        trimmed["target_duration_ms"] = target_duration_ms
+        return {
+            "source_trimmed_to_ms": target_duration_ms,
+            "source_trim_applied": True,
+        }
+
+    monkeypatch.setattr("app.providers.image.httpx.post", fake_post)
+    monkeypatch.setattr("app.providers.music.httpx.get", fake_get)
+    monkeypatch.setattr(provider, "_convert_audio_file_to_wav", fake_convert)
+    monkeypatch.setattr(provider, "_trim_wav_to_target_duration", fake_trim)
+
+    result = provider.select_track(
+        {"canonical_topic": "polvos", "angle": "inteligencia distribuida"},
+        {"title": "Polvos parecem alienígenas", "hook": "Cada braço parece pensar sozinho.", "full_narration": "Texto curto."},
+        tmp_path / "background.wav",
+        32000,
+    )
+
+    assert captured["payload"]["output_format"] == "url"
+    assert "exactly 32 seconds" in result["provider_metadata"]["prompt"]
+    assert result["source_url"] == "https://example.com/music.mp3"
+    assert result["provider_metadata"]["returned_duration_ms"] == 31876
+    assert result["provider_metadata"]["source_trimmed_to_ms"] == 32000
+    assert result["provider_metadata"]["source_trim_applied"] is True
+    assert trimmed == {"path": tmp_path / "background.wav", "target_duration_ms": 32000}
+    assert Path(result["audio_uri"].removeprefix("file://")).exists()
+
+def test_minimax_background_music_provider_surfaces_usage_limit(monkeypatch, tmp_path: Path) -> None:
+    provider = MiniMaxBackgroundMusicProvider()
+
+    class FakeResponse:
+        status_code = 200
+        text = "{}"
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {
+                "data": {},
+                "trace_id": "trace-limit",
+                "base_resp": {"status_code": 2056, "status_msg": "usage limit exceeded"},
+            }
+
+    monkeypatch.setattr("app.providers.music.httpx.post", lambda *args, **kwargs: FakeResponse())
+
+    with pytest.raises(ProviderFailure) as exc_info:
+        provider.select_track({"canonical_topic": "polvos"}, {"title": "Polvos", "hook": "Polvos somem."}, tmp_path / "background.wav", 32000)
+
+    assert "provider limit: usage limit exceeded" in str(exc_info.value)
+    assert exc_info.value.details["base_resp"]["status_code"] == 2056
+
+def test_minimax_background_music_prompt_is_compact_and_duration_aware() -> None:
+    provider = MiniMaxBackgroundMusicProvider()
+
+    prompt = provider._build_prompt(
+        {"canonical_topic": "Polvos - curiosidades científicas sobre o cefalópode mais inteligente do oceano", "angle": "fatos_científicos_absurdos"},
+        {
+            "title": "O animal com 3 corações e sangue azul que impressiona até cientistas",
+            "hook": "Este bicho marinho tem 3 corações e sangue azul.",
+            "full_narration": "Texto longo que não deveria ser despejado inteiro no prompt de música.",
+        },
+        "documentary",
+        25_476,
+    )
+
+    assert "exactly 25 seconds" in prompt
+    assert "Video context:" in prompt
+    assert "full_narration" not in prompt
+    assert len(prompt) < 900
