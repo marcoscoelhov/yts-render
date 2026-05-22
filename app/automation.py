@@ -209,7 +209,16 @@ class AutomationService:
             session.add(run)
             return run
 
-    def _finish_run(self, run_id: str, *, status: str, skipped_reason: str | None = None, error: str | None = None, result_job_id: str | None = None) -> AutomationRun:
+    def _finish_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        skipped_reason: str | None = None,
+        error: str | None = None,
+        result_job_id: str | None = None,
+        result_schedule_id: str | None = None,
+    ) -> AutomationRun:
         with session_scope() as session:
             run = session.get(AutomationRun, run_id)
             if not run:
@@ -220,6 +229,8 @@ class AutomationService:
             run.error = error
             if result_job_id:
                 run.result_job_id = result_job_id
+            if result_schedule_id:
+                run.result_schedule_id = result_schedule_id
             return run
 
     def _get_run(self, run_id: str) -> AutomationRun:
@@ -288,13 +299,13 @@ class AutomationService:
                 return False
         attempt = self._create_attempt(run_id, 1, AUTOMATION_SOURCE_RESUME, job_id=job_id)
         try:
-            self._approve_and_schedule(job_id, target_day)
+            schedule_id = self._approve_and_schedule(job_id, target_day)
         except Exception as exc:  # noqa: BLE001
             self._finish_attempt(attempt.attempt_id, status="publish_failed", error=str(exc))
             self._finish_run(run_id, status="failed", error=str(exc), result_job_id=job_id)
             return True
         self._finish_attempt(attempt.attempt_id, status="scheduled")
-        self._finish_run(run_id, status="succeeded", result_job_id=job_id)
+        self._finish_run(run_id, status="succeeded", result_job_id=job_id, result_schedule_id=schedule_id)
         return True
 
     def _run_generation_attempt(self, run_id: str, attempt_number: int, target_day: date) -> dict[str, Any]:
@@ -321,7 +332,7 @@ class AutomationService:
                 if selected_script:
                     self._mark_ready_script_needs_review(selected_script.script_item_id)
                 return {"scheduled": False}
-            self._approve_and_schedule(job_id, target_day)
+            schedule_id = self._approve_and_schedule(job_id, target_day)
         except Exception as exc:  # noqa: BLE001
             self._finish_attempt(attempt.attempt_id, status="failed", error=str(exc))
             if selected_script:
@@ -330,8 +341,8 @@ class AutomationService:
         self._finish_attempt(attempt.attempt_id, status="scheduled")
         if selected_script:
             self._mark_ready_script_scheduled(selected_script.script_item_id)
-        self._finish_run(run_id, status="succeeded", result_job_id=job_id)
-        return {"scheduled": True, "job_id": job_id}
+        self._finish_run(run_id, status="succeeded", result_job_id=job_id, result_schedule_id=schedule_id)
+        return {"scheduled": True, "job_id": job_id, "schedule_id": schedule_id}
 
     def _job_status_error(self, job_id: str, status: str) -> str:
         with session_scope() as session:
@@ -576,7 +587,7 @@ class AutomationService:
         self.orchestrator.storage.persist_json(job_id, "autoapproval_score.json", self.orchestrator._serialize_for_json(report))
         return report
 
-    def _approve_and_schedule(self, job_id: str, target_day: date) -> None:
+    def _approve_and_schedule(self, job_id: str, target_day: date) -> str:
         with session_scope() as session:
             job = session.get(Job, job_id)
             if not job:
@@ -605,11 +616,20 @@ class AutomationService:
         for _ in range(self.settings.automation_max_publish_attempts_per_job):
             try:
                 self.orchestrator.schedule_publication(job_id, payload)
-                return
+                schedule_id = self._publication_schedule_id(job_id)
+                if schedule_id:
+                    return schedule_id
+                raise RuntimeError("publication_schedule_missing_after_success")
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
         if last_error:
             raise last_error
+        raise RuntimeError("publication_schedule_failed")
+
+    def _publication_schedule_id(self, job_id: str) -> str | None:
+        with session_scope() as session:
+            schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
+            return str(schedule.schedule_id) if schedule else None
 
     def _job_status(self, job_id: str) -> str:
         with session_scope() as session:

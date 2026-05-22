@@ -133,6 +133,7 @@ def test_automation_cycle_autoapproves_and_schedules_publishable_job(monkeypatch
 
     assert run_result["status"] == "succeeded"
     assert run_result["result_job_id"] == job_id
+    assert run_result["result_schedule_id"] == f"{job_id}-schedule"
     assert run_result["attempts_used"] == 1
     with SessionLocal() as session:
         job = session.get(Job, job_id)
