@@ -178,6 +178,41 @@ def test_minimax_scene_prompt_keeps_image_prompt_english_exception(monkeypatch) 
     assert "exceto image_prompt" in prompt
     assert "image_prompt MUST be written in English only" in prompt
 
+def test_minimax_scene_prompt_requires_first_scene_visual_hook(monkeypatch) -> None:
+    captured: dict[str, str] = {}
+
+    def fake_json_completion(self, prompt: str) -> list[dict[str, object]]:
+        captured["prompt"] = prompt
+        return [
+            {
+                "scene_id": "scene-1",
+                "order": 1,
+                "narration_text": "Cena em pt-BR com impacto visual.",
+                "token_start": 0,
+                "token_end": 5,
+                "estimated_duration_sec": 5,
+                "visual_intent": "subject_closeup",
+                "primary_subject": "animal real",
+                "image_prompt": "high-impact vertical first-frame hook of a real animal, no readable text anywhere",
+                "fallback_queries": ["animal real"],
+            }
+        ]
+
+    monkeypatch.setattr(MinimaxCreativeProvider, "_json_completion", fake_json_completion)
+    provider = object.__new__(MinimaxCreativeProvider)
+    provider.plan_scenes(
+        {"title": "Teste", "hook": "O animal muda antes de você notar.", "full_narration": "Cena em pt-BR com impacto visual.", "estimated_duration_sec": 5},
+        1,
+    )
+
+    prompt = captured["prompt"]
+    assert "scene with order=1 is the visual hook frame" in prompt
+    assert "instantly legible in under one second" in prompt
+    assert "do not reveal a later payoff" in prompt
+    assert "retention_role" in prompt
+    assert 'scene order=1 deve ter retention_role="visual_hook"' in prompt
+    assert "usar visual_opening como brief visual" in prompt
+
 def test_minimax_image_provider_prefers_text_key_before_dedicated_key(monkeypatch) -> None:
     captured: dict[str, str] = {}
 
@@ -344,6 +379,8 @@ def test_local_music_bank_provider_selects_approved_track_and_records_license(mo
                         "source_url": "https://example.com/blocked",
                         "approved_for_youtube": True,
                         "content_id_registered": True,
+                        "instrumental": True,
+                        "vocals_or_lyrics": "none",
                     },
                     {
                         "id": "science-calm-01",
@@ -359,6 +396,8 @@ def test_local_music_bank_provider_selects_approved_track_and_records_license(mo
                         "requires_attribution": False,
                         "content_id_registered": False,
                         "content_id_risk": "low",
+                        "instrumental": True,
+                        "vocals_or_lyrics": "none",
                     },
                 ]
             }
@@ -386,6 +425,54 @@ def test_local_music_bank_provider_selects_approved_track_and_records_license(mo
         assert wav_file.getframerate() == 24_000
         assert wav_file.getnchannels() == 1
         assert round(wav_file.getnframes() / wav_file.getframerate() * 1000) == 1500
+
+def test_local_music_bank_provider_rejects_tracks_with_audible_vocals(monkeypatch, tmp_path: Path) -> None:
+    bank_dir = tmp_path / "music_bank"
+    vocal_path = bank_dir / "tracks" / "vocal.wav"
+    instrumental_path = bank_dir / "tracks" / "instrumental.wav"
+    _write_test_wave(vocal_path, duration_ms=700)
+    _write_test_wave(instrumental_path, duration_ms=700)
+    (bank_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "tracks": [
+                    {
+                        "id": "vocal-track",
+                        "path": "tracks/vocal.wav",
+                        "moods": ["technology"],
+                        "license": "Approved",
+                        "source_url": "https://example.com/vocal",
+                        "approved_for_youtube": True,
+                        "content_id_registered": False,
+                        "instrumental": True,
+                        "vocals_or_lyrics": "audible_vocal",
+                    },
+                    {
+                        "id": "instrumental-track",
+                        "path": "tracks/instrumental.wav",
+                        "moods": ["technology"],
+                        "license": "Approved",
+                        "source_url": "https://example.com/instrumental",
+                        "approved_for_youtube": True,
+                        "content_id_registered": False,
+                        "instrumental": True,
+                        "vocals_or_lyrics": "none",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.providers.music.get_settings", lambda: SimpleNamespace(music_bank_dir=bank_dir))
+
+    result = LocalMusicBankProvider().select_track(
+        {"canonical_topic": "cafeína", "angle": "tecnologia do cérebro"},
+        {"title": "Cafeína", "hook": "Café mexe com o alerta."},
+        tmp_path / "out.wav",
+        1500,
+    )
+
+    assert result["provider_metadata"]["track_id"] == "instrumental-track"
 
 def test_background_music_mood_is_inferred_from_full_script() -> None:
     from app.providers.music import infer_background_music_mood
@@ -457,6 +544,8 @@ def test_local_music_bank_provider_prefers_script_mood_over_generic_topic(monkey
                         "source_url": "https://example.com/cinematic",
                         "approved_for_youtube": True,
                         "content_id_registered": False,
+                        "instrumental": True,
+                        "vocals_or_lyrics": "none",
                     },
                     {
                         "id": "suspense-01",
@@ -466,6 +555,8 @@ def test_local_music_bank_provider_prefers_script_mood_over_generic_topic(monkey
                         "source_url": "https://example.com/suspense",
                         "approved_for_youtube": True,
                         "content_id_registered": False,
+                        "instrumental": True,
+                        "vocals_or_lyrics": "none",
                     },
                 ]
             }
@@ -505,6 +596,8 @@ def test_resilient_music_provider_uses_local_bank_before_minimax(monkeypatch, tm
                     "source_url": "https://youtube.com/audiolibrary",
                     "approved_for_youtube": True,
                     "content_id_registered": False,
+                    "instrumental": True,
+                    "vocals_or_lyrics": "none",
                 }
             ]
         ),
@@ -583,6 +676,8 @@ def test_import_minimax_music_artifacts_preserves_evidence_and_strips_signed_url
                     "trace_id": "trace-123",
                     "model": "music-2.6",
                     "instrumental": True,
+                    "vocals_or_lyrics": "none",
+                    "human_instrumental_review_confirmed": True,
                 },
                 "duration_ms": 1000,
             }
@@ -616,12 +711,15 @@ def test_import_minimax_music_artifacts_preserves_evidence_and_strips_signed_url
     assert track["quality_tier"] == "primary"
     assert track["source_job_id"] == "job-minimax-123456"
     assert track["trace_id"] == "trace-123"
+    assert track["instrumental"] is True
+    assert track["vocals_or_lyrics"] == "none"
+    assert track["human_instrumental_review_confirmed"] is True
     assert track["source_url"] == "https://example.com/music.wav"
     assert "Signature" not in json.dumps(track)
     assert (bank_dir / track["path"]).exists()
     assert (bank_dir / track["license_file"]).read_text(encoding="utf-8").find("trace-123") >= 0
 
-def test_local_music_bank_provider_prefers_imported_minimax_over_synthetic(monkeypatch, tmp_path: Path) -> None:
+def test_local_music_bank_provider_ignores_unreviewed_imported_minimax(monkeypatch, tmp_path: Path) -> None:
     bank_dir = tmp_path / "music_bank"
     populate_builtin_music_bank(bank_dir, duration_seconds=1)
     artifacts_dir = tmp_path / "artifacts"
@@ -648,8 +746,7 @@ def test_local_music_bank_provider_prefers_imported_minimax_over_synthetic(monke
     provider = LocalMusicBankProvider()
     result = provider.select_track({"canonical_topic": "x"}, {"title": "x", "hook": "x"}, tmp_path / "selected.wav", 1000)
 
-    assert result["provider_metadata"]["track_id"].startswith("minimax-")
-    assert result["provider_metadata"]["track_id"] == "minimax-job-mini"
+    assert result["provider_metadata"]["track_id"].startswith("local-")
 
 def test_resilient_music_provider_allows_mock_only_in_mock_mode(monkeypatch, tmp_path: Path) -> None:
     settings = SimpleNamespace(use_mock_providers=True, resolved_minimax_music_api_key=None, strict_minimax_validation=False)
@@ -1052,6 +1149,7 @@ def test_scene_semantics_rebuilds_generic_portuguese_prompt_from_narration() -> 
     normalized = orchestrator.scene_pipeline.normalize_scene_semantics(
         {
             "scene_id": "scene-1",
+            "order": 2,
             "primary_subject": "Polvos",
             "narration_text": "Polvos possuem três corações e sangue azul.",
             "visual_intent": "subject_closeup",
@@ -1066,6 +1164,54 @@ def test_scene_semantics_rebuilds_generic_portuguese_prompt_from_narration() -> 
     assert "polvos" not in prompt
     assert "ilustracao" not in prompt
     assert "sem texto" not in prompt
+
+def test_first_scene_prompt_adds_visual_hook_contract() -> None:
+    normalized = orchestrator.scene_pipeline.normalize_scene_semantics(
+        {
+            "scene_id": "scene-1",
+            "order": 1,
+            "retention_role": "visual_hook",
+            "primary_subject": "Polvos",
+            "narration_text": "Polvos possuem três corações e sangue azul.",
+            "visual_intent": "subject_closeup",
+            "image_prompt": "ilustracao vertical cinematografica de Polvos, mostrando subject closeup, sem texto",
+            "fallback_queries": ["Polvos"],
+        },
+        "Polvos",
+    )
+    prompt = normalized["image_prompt"].lower()
+    assert "first-frame hook for shorts" in prompt
+    assert "under one second" in prompt
+    assert "strong concrete contrast or visible consequence" in prompt
+    assert "do not reveal later payoff" in prompt
+    assert "three subtle hearts" in prompt
+    assert "blue copper-rich blood vessels" in prompt
+    assert "polvos" not in prompt
+    assert "sem texto" not in prompt
+
+def test_image_prompt_variants_do_not_copy_portuguese_narration() -> None:
+    variants = orchestrator.asset_pipeline.image_assets.image_prompt_variants(
+        {
+            "scene_id": "scene-1",
+            "order": 1,
+            "retention_role": "visual_hook",
+            "primary_subject": "Polvos",
+            "topic_hint": "Polvos",
+            "narration_text": "Polvos possuem três corações e sangue azul.",
+            "visual_intent": "subject_closeup",
+            "image_prompt": "vertical cinematic image of octopus anatomy, no readable text anywhere",
+            "fallback_queries": ["Polvos"],
+        }
+    )
+
+    assert variants
+    for variant in variants:
+        prompt = variant["image_prompt"].lower()
+        assert "possuem" not in prompt
+        assert "três" not in prompt
+        assert "tres" not in prompt
+        assert "polvos" not in prompt
+        assert "first-frame hook" in prompt or "stop-the-scroll" in prompt or "three subtle hearts" in prompt
 
 def test_scene_semantics_adds_caffeine_specific_visuals_and_blank_objects() -> None:
     normalized = orchestrator.scene_pipeline.normalize_scene_semantics(
@@ -1251,6 +1397,25 @@ def test_scene_token_coverage_normalization_rebuilds_contiguous_spans() -> None:
     assert normalized[0]["token_end"] < normalized[1]["token_start"]
     assert normalized[1]["token_end"] == len(word_tokens("Polvos parecem alienigenas e mudam de cor para fugir de predadores")) - 1
     assert normalized[0]["narration_text"].startswith("polvos parecem alienigenas")
+
+def test_scene_retention_annotation_marks_first_scene_as_visual_hook() -> None:
+    scenes = [
+        {"scene_id": "scene-1", "order": 1, "narration_text": "Abertura forte"},
+        {"scene_id": "scene-2", "order": 2, "narration_text": "Fechamento"},
+    ]
+
+    annotated = orchestrator.scene_pipeline.annotate_scene_retention_roles(
+        scenes,
+        {
+            "hook": "A primeira imagem precisa segurar o swipe.",
+            "visual_opening": {"first_frame_goal": "mostrar contraste imediato"},
+        },
+    )
+
+    assert annotated[0]["retention_role"] == "visual_hook"
+    assert annotated[0]["hook_text"] == "A primeira imagem precisa segurar o swipe."
+    assert annotated[0]["visual_opening"]["first_frame_goal"] == "mostrar contraste imediato"
+    assert annotated[-1]["retention_role"] == "loop_close"
 
 def test_step_background_music_persists_debug_on_provider_failure(monkeypatch) -> None:
     job_id = orchestrator.create_job(

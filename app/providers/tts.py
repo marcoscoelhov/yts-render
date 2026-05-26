@@ -11,8 +11,11 @@ import wave
 from pathlib import Path
 from typing import Any
 
+import httpx
 import imageio_ffmpeg
 
+from app.quality.subtitle_gate import BAD_ENDINGS
+from app.config import get_settings
 from app.utils import parse_srt, word_tokens, wrap_caption
 
 
@@ -62,14 +65,31 @@ class LocalSpeechFallbackProvider:
             chunks.append(" ".join(current))
         if not chunks:
             chunks = [text]
-        cue_duration = max(800, min(2500, duration_ms // len(chunks)))
+        chunks = self._avoid_weak_cue_endings(chunks)
         cues: list[dict[str, Any]] = []
-        start = 0
         for idx, chunk in enumerate(chunks, start=1):
-            end = duration_ms if idx == len(chunks) else min(duration_ms, start + cue_duration)
+            start = round((idx - 1) / len(chunks) * duration_ms)
+            end = duration_ms if idx == len(chunks) else round(idx / len(chunks) * duration_ms)
             cues.append({"idx": idx, "start_ms": start, "end_ms": end, "text": wrap_caption(chunk)})
-            start = end
         return cues
+
+    def _avoid_weak_cue_endings(self, chunks: list[str]) -> list[str]:
+        repaired = [chunk for chunk in chunks if str(chunk).strip()]
+        for index in range(len(repaired) - 1):
+            current_words = repaired[index].split()
+            next_words = repaired[index + 1].split()
+            if not current_words or not next_words:
+                continue
+            ending_tokens = word_tokens(current_words[-1])
+            ending = ending_tokens[0] if ending_tokens else ""
+            if ending not in BAD_ENDINGS:
+                continue
+            candidate_current = " ".join([*current_words, next_words[0]])
+            candidate_next = " ".join(next_words[1:])
+            if candidate_next and len(candidate_current) <= 42:
+                repaired[index] = candidate_current
+                repaired[index + 1] = candidate_next
+        return repaired
 
     def _write_speech_audio(self, text: str, path: Path) -> str:
         if not shutil.which("espeak-ng"):
@@ -237,14 +257,16 @@ class EdgeTTSProvider(LocalSpeechFallbackProvider):
         temp_audio_path = Path(temp_audio.name)
         temp_audio.close()
         audio_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(temp_audio_path, "wb") as audio_file:
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    audio_file.write(chunk["data"])
-                elif chunk["type"] in {"WordBoundary", "SentenceBoundary"}:
-                    submaker.feed(chunk)
-        self._normalize_edge_audio(temp_audio_path, audio_path)
-        temp_audio_path.unlink(missing_ok=True)
+        try:
+            with open(temp_audio_path, "wb") as audio_file:
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        audio_file.write(chunk["data"])
+                    elif chunk["type"] in {"WordBoundary", "SentenceBoundary"}:
+                        submaker.feed(chunk)
+            self._normalize_edge_audio(temp_audio_path, audio_path)
+        finally:
+            temp_audio_path.unlink(missing_ok=True)
         srt_path.write_text(submaker.get_srt(), encoding="utf-8")
         duration_ms = self._measure_audio_ms(audio_path)
         return {
@@ -290,6 +312,116 @@ class EdgeTTSProvider(LocalSpeechFallbackProvider):
                 str(source_path),
                 "-af",
                 "highpass=f=70,lowpass=f=9500,afftdn=nf=-25,loudnorm=I=-16:LRA=11:TP=-1.5",
+                "-ar",
+                "24000",
+                "-ac",
+                "1",
+                str(output_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
+class ElevenLabsTTSProvider(EdgeTTSProvider):
+    def synthesize(self, text: str, audio_path: Path, srt_path: Path) -> dict[str, Any]:
+        settings = get_settings()
+        if not settings.elevenlabs_api_key:
+            fallback = super().synthesize(text, audio_path, srt_path)
+            metadata = fallback.setdefault("provider_metadata", {})
+            metadata["fallback_used"] = True
+            metadata["fallback_from_provider"] = "elevenlabs"
+            metadata["fallback_provider"] = fallback.get("provider")
+            metadata["fallback_reason"] = "missing YTS_ELEVENLABS_API_KEY"
+            return fallback
+        last_error: Exception | None = None
+        for attempt in range(1, 3):
+            try:
+                return self._run_elevenlabs(text, audio_path, srt_path, settings)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(1.5 * attempt)
+                    continue
+        fallback = super().synthesize(text, audio_path, srt_path)
+        metadata = fallback.setdefault("provider_metadata", {})
+        metadata["fallback_used"] = True
+        metadata["fallback_from_provider"] = "elevenlabs"
+        metadata["fallback_provider"] = fallback.get("provider")
+        metadata["fallback_reason"] = f"elevenlabs failed after 2 attempts: {last_error}"
+        return fallback
+
+    def _run_elevenlabs(self, text: str, audio_path: Path, srt_path: Path, settings: Any) -> dict[str, Any]:
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_audio = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+        temp_audio_path = Path(temp_audio.name)
+        temp_audio.close()
+        try:
+            url = f"{settings.elevenlabs_base_url.rstrip('/')}/v1/text-to-speech/{settings.elevenlabs_voice_id}"
+            payload = {
+                "text": text,
+                "model_id": settings.elevenlabs_model_id,
+                "voice_settings": {
+                    "stability": settings.elevenlabs_voice_stability,
+                    "similarity_boost": settings.elevenlabs_voice_similarity_boost,
+                    "style": settings.elevenlabs_voice_style,
+                    "use_speaker_boost": settings.elevenlabs_voice_use_speaker_boost,
+                },
+            }
+            headers = {
+                "Accept": "audio/mpeg",
+                "Content-Type": "application/json",
+                "xi-api-key": settings.elevenlabs_api_key,
+            }
+            with httpx.Client(timeout=settings.elevenlabs_timeout_sec) as client:
+                response = client.post(
+                    url,
+                    params={"output_format": settings.elevenlabs_output_format},
+                    headers=headers,
+                    json=payload,
+                )
+            if response.status_code >= 400:
+                detail = response.text[:500].replace(settings.elevenlabs_api_key, "[redacted]")
+                raise RuntimeError(f"elevenlabs status={response.status_code}: {detail}")
+            temp_audio_path.write_bytes(response.content)
+            self._normalize_elevenlabs_audio(temp_audio_path, audio_path)
+        finally:
+            temp_audio_path.unlink(missing_ok=True)
+
+        duration_ms = self._measure_audio_ms(audio_path)
+        cues = self._build_cues(text, duration_ms)
+        srt_path.write_text(self._render_srt(cues), encoding="utf-8")
+        return {
+            "provider": "elevenlabs",
+            "voice": settings.elevenlabs_voice_id,
+            "audio_uri": audio_path.resolve().as_uri(),
+            "raw_subtitles_uri": srt_path.resolve().as_uri(),
+            "duration_ms": duration_ms,
+            "sample_rate_hz": 24000,
+            "channels": 1,
+            "provider_metadata": {
+                "mode": "elevenlabs",
+                "model_id": settings.elevenlabs_model_id,
+                "output_format": settings.elevenlabs_output_format,
+                "voice_id": settings.elevenlabs_voice_id,
+                "fallback_used": False,
+                "loudness_normalized": True,
+                "loudness_target_lufs": -16.0,
+                "true_peak_limit_db": -1.5,
+                "envelope_normalized": False,
+            },
+        }
+
+    def _normalize_elevenlabs_audio(self, source_path: Path, output_path: Path) -> None:
+        subprocess.run(
+            [
+                imageio_ffmpeg.get_ffmpeg_exe(),
+                "-y",
+                "-i",
+                str(source_path),
+                "-af",
+                "highpass=f=70,lowpass=f=12000,loudnorm=I=-16:LRA=11:TP=-1.5",
                 "-ar",
                 "24000",
                 "-ac",

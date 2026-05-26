@@ -48,7 +48,8 @@ def build_channel_repetition_report(
         if current_beat_count and beat_count == current_beat_count:
             exact_beat_count_matches += 1
             signals.append("same_beat_count")
-        if similarity >= 0.45 or signals:
+        substantive_signals = {"same_hook_opening", "same_title_opening", "same_ending_pattern"} & set(signals)
+        if similarity >= 0.45 or substantive_signals:
             matches.append(
                 {
                     "job_id": row.get("job_id"),
@@ -87,7 +88,6 @@ def build_channel_repetition_report(
         or exact_hook_opening_matches >= 1
         or exact_title_opening_matches >= 1
         or exact_ending_pattern_matches >= 1
-        or (exact_duration_bucket_matches >= 2 and exact_beat_count_matches >= 2)
     ):
         risk = "medium"
     return {

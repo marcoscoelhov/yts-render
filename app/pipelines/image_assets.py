@@ -158,20 +158,34 @@ class ImageAssetDomain:
         primary_subject = str(scene.get("primary_subject") or scene.get("topic_hint") or "")
         base_prompt = self.semantic_english_image_prompt(scene, topic_text, primary_subject)
         english_subject = self.english_subject_hint(topic_text, primary_subject)
-        narration = str(scene.get("narration_text") or "").strip()
         scene_hint = self.english_scene_visual_hint(scene, english_subject)
-        variant_prompts = [
-            base_prompt,
-            self.with_no_text_image_constraints(
-                f"vertical documentary close shot of {english_subject}, {scene_hint}, "
-                f"visually illustrate this exact narration beat: {narration}, scientific documentary realism, "
-                "natural lighting, one clear subject, no symbolic poster, no irrelevant props"
-            ),
-            self.with_no_text_image_constraints(
-                f"realistic vertical YouTube Shorts visual, {english_subject} as the unmistakable central subject, "
-                f"{narration}, cinematic science documentary frame, concrete factual detail, clean relevant background"
-            ),
-        ]
+        if self.is_visual_hook_scene(scene):
+            variant_prompts = [
+                base_prompt,
+                self.with_no_text_image_constraints(
+                    f"high-impact vertical first-frame hook for YouTube Shorts, {scene_hint}, "
+                    "instant visual contrast, one unmistakable central subject, close composition, strong depth, "
+                    "concrete factual consequence visible immediately, documentary realism, no later-payoff reveal"
+                ),
+                self.with_no_text_image_constraints(
+                    f"stop-the-scroll scientific documentary frame, {english_subject} as the unmistakable central subject, "
+                    f"{scene_hint}, visible tension or paradox in the first glance, natural dramatic lighting, "
+                    "no calm establishing shot, no abstract ambience, no irrelevant props"
+                ),
+            ]
+        else:
+            variant_prompts = [
+                base_prompt,
+                self.with_no_text_image_constraints(
+                    f"vertical documentary close shot of {english_subject}, {scene_hint}, "
+                    "visually illustrate this exact narration beat with scientific documentary realism, "
+                    "natural lighting, one clear subject, no symbolic poster, no irrelevant props"
+                ),
+                self.with_no_text_image_constraints(
+                    f"realistic vertical YouTube Shorts visual, {english_subject} as the unmistakable central subject, "
+                    f"{scene_hint}, cinematic science documentary frame, concrete factual detail, clean relevant background"
+                ),
+            ]
         variants: list[dict[str, Any]] = []
         seen: set[str] = set()
         for prompt in variant_prompts:
@@ -199,6 +213,10 @@ class ImageAssetDomain:
             prompt = self.replace_subject_aliases(prompt)
         if semantic_directive.lower() not in prompt.lower():
             prompt = f"{prompt}, {semantic_directive}".strip(", ")
+        if self.is_visual_hook_scene(scene):
+            hook_directive = self.visual_hook_directive(scene, scene_hint)
+            if hook_directive.lower() not in prompt.lower():
+                prompt = f"{prompt}, {hook_directive}".strip(", ")
         if scene_hint and scene_hint.lower() not in prompt.lower():
             prompt = f"{scene_hint}, {prompt}".strip(", ")
         elif english_subject and english_subject.lower() not in prompt.lower():
@@ -206,6 +224,14 @@ class ImageAssetDomain:
         if "no movie poster" not in prompt.lower():
             prompt += ", scientific visualization, documentary realism, no movie poster, no typography, no stock-photo generic scene"
         return self.with_no_text_image_constraints(prompt)
+
+    def is_visual_hook_scene(self, scene: dict[str, Any]) -> bool:
+        if str(scene.get("retention_role") or "").strip().lower() == "visual_hook":
+            return True
+        try:
+            return int(scene.get("order", 0) or 0) == 1
+        except (TypeError, ValueError):
+            return False
 
     def english_subject_hint(self, topic_text: str, primary_subject: str) -> str:
         for value in [primary_subject, topic_text]:
@@ -274,6 +300,14 @@ class ImageAssetDomain:
                 f"not a generic symbolic background, visual focus: {scene_hint}, scene role: {visual_intent}"
             )
         return "depict the specific narration beat with concrete cause-and-effect visual evidence, not a generic symbolic background"
+
+    def visual_hook_directive(self, scene: dict[str, Any], scene_hint: str) -> str:
+        return (
+            "first-frame hook for Shorts, instantly legible in under one second, "
+            "strong concrete contrast or visible consequence, close vertical composition, "
+            f"opening goal: show a concrete result, movement, or visual contrast, visual focus: {scene_hint}, "
+            "stay within this scene beat, do not reveal later payoff, no calm establishing shot, no generic beauty shot"
+        )
 
     def should_rebuild_image_prompt(self, prompt: str) -> bool:
         prompt_lower = prompt.lower()

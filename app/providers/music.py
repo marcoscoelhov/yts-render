@@ -260,6 +260,9 @@ class LocalMusicBankProvider:
                 "content_id_registered": bool(track.get("content_id_registered")),
                 "content_id_risk": str(track.get("content_id_risk") or "unknown"),
                 "approved_for_youtube": bool(track.get("approved_for_youtube")),
+                "instrumental": track.get("instrumental") is True,
+                "vocals_or_lyrics": str(track.get("vocals_or_lyrics") or "unknown").strip().lower(),
+                "human_instrumental_review_confirmed": bool(track.get("human_instrumental_review_confirmed")),
                 "requested_duration_ms": target_duration_ms,
                 "source_looped_to_ms": target_duration_ms,
             },
@@ -322,6 +325,12 @@ class LocalMusicBankProvider:
             return False
         if not (track.get("source_url") or track.get("license_file")):
             return False
+        if track.get("instrumental") is not True:
+            return False
+        if str(track.get("vocals_or_lyrics") or "").strip().lower() != "none":
+            return False
+        if str(track.get("bank_source") or "").strip().lower() == "minimax_artifact" and not bool(track.get("human_instrumental_review_confirmed")):
+            return False
         return True
 
     def _score_track(self, track: dict[str, Any], mood: str, query: str) -> int:
@@ -329,8 +338,6 @@ class LocalMusicBankProvider:
         score = 0
         if str(track.get("quality_tier") or "").strip().lower() == "primary":
             score += 40
-        if str(track.get("bank_source") or "").strip().lower() == "minimax_artifact":
-            score += 15
         if mood in labels:
             score += 20
         for token in word_tokens(query):

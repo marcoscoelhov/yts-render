@@ -523,6 +523,7 @@ class AutomationService:
             script = session.scalar(select(Script).where(Script.job_id == job_id))
             monetization_report = self.orchestrator._read_job_json(job_id, "monetization_report.json")
             repetition_report = monetization_report.get("channel_repetition_report") or {}
+            manual_confirmations = {str(item) for item in monetization_report.get("manual_confirmations") or []}
             metadata_review = monetization_report.get("metadata_review") or {}
             fact_claims_report = monetization_report.get("fact_claims_report") or {}
             publish_readiness = monetization_report.get("publish_readiness") or {}
@@ -537,7 +538,8 @@ class AutomationService:
         if not monetization_report.get("passed"):
             reasons.append("monetization_not_passed")
         repetition_risk = str(repetition_report.get("repetition_risk") or "unknown")
-        if repetition_risk == "high":
+        originality_confirmed = "originality_confirmed" in manual_confirmations
+        if repetition_risk == "high" and not originality_confirmed:
             reasons.append("high_narrative_similarity")
 
         factual_score = as_score(audit.get("factual_score"))
@@ -566,7 +568,7 @@ class AutomationService:
 
         component_scores = [factual_score, retention_score, metadata_score, asset_score]
         composite = sum(component_scores) / len(component_scores)
-        penalty = 0.10 if repetition_risk == "medium" else 0.0
+        penalty = 0.10 if repetition_risk == "medium" and not originality_confirmed else 0.0
         score = max(0.0, round(composite - penalty, 3))
         if score < self.settings.automation_score_threshold:
             reasons.append("automation_score_below_threshold")
@@ -582,6 +584,7 @@ class AutomationService:
                 "asset_semantic_score": round(asset_score, 3),
                 "repetition_risk": repetition_risk,
                 "repetition_penalty": penalty,
+                "originality_confirmed": originality_confirmed,
             },
         }
         self.orchestrator.storage.persist_json(job_id, "autoapproval_score.json", self.orchestrator._serialize_for_json(report))

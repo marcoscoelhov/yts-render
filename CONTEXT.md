@@ -92,6 +92,14 @@ _Avoid_: textarea sempre aberto, painel principal de publicacao, configuracao es
 A configuracao recorrente do **Hub de Revisao** que orienta copywriting e retencao sem substituir o formato interno dos **Jobs de Video**.
 _Avoid_: acao da fila, roteiro pronto, instrucao por job
 
+**Roteiro Viral Estruturado**:
+Um roteiro gerado pelo sistema que deve seguir a estrutura editorial canonica de Titulo, Hook, Loop, Beats, Payoff, Fechamento e Hashtags, com hook forte, loop mental, escalada, payoff tardio e fechamento de replay.
+_Avoid_: texto livre, lista plana de fatos, aula curta, resumo enciclopedico
+
+**Janela Alvo de Duracao do Short**:
+A duracao desejada do **Arquivo de Video Final** para Shorts gerados automaticamente, entre 35 e 55 segundos.
+_Avoid_: duracao fora de 35-55 segundos, duracao minima tecnica sem contexto editorial, video curto demais para validar retencao
+
 **Status Compacto da Automacao**:
 O resumo da **Pausa Global da Automacao** e do estoque do **Banco de Roteiros Prontos** na **Barra Lateral Global do Hub**, podendo alternar a pausa sem iniciar ciclos.
 _Avoid_: botao de rodar ciclo, comando de upload, log completo
@@ -123,6 +131,10 @@ _Avoid_: JSON, prompt livre, markdown arbitrario
 **Loop Editorial**:
 A tensao narrativa que sustenta a curiosidade entre o hook e a entrega dos beats em um **Roteiro Pronto**.
 _Avoid_: fato declarado, fonte factual, CTA
+
+**Imagem de Hook Visual**:
+A primeira imagem de um **Job de Video**, criada para tornar o hook visualmente compreensivel antes do espectador depender do audio.
+_Avoid_: thumbnail, capa, poster, imagem generica de abertura
 
 **Fato Declarado**:
 Uma afirmacao factual em um **Roteiro Pronto** cuja revisao e assumida por quem enviou o roteiro.
@@ -161,8 +173,8 @@ Um sinal de **Similaridade Narrativa** que reduz o score de **Elegibilidade Auto
 _Avoid_: bloqueio automatico, duplicata comprovada, erro grotesco
 
 **Risco Alto de Repeticao**:
-Um sinal forte de **Similaridade Narrativa** que bloqueia **Publicacao Automatizada**.
-_Avoid_: sugestao leve, tema amplo repetido, penalidade pequena
+Um sinal forte de **Similaridade Narrativa** que bloqueia **Publicacao Automatizada**, salvo quando um **Roteiro Pronto** tiver confirmacao humana de originalidade.
+_Avoid_: sugestao leve, tema amplo repetido, penalidade pequena, bloqueio de roteiro revisado manualmente
 
 **Score de Autoaprovacao**:
 Uma pontuacao composta que combina monetizacao, factualidade, retencao, metadados, alinhamento semantico de assets e repeticao para decidir **Elegibilidade Automatizada**.
@@ -301,8 +313,12 @@ O provider que produz ou seleciona os assets visuais a partir dos prompts do **P
 _Avoid_: planejador de cenas, LLM de roteiro, chave dedicada de imagem
 
 **Trilha Aprovada**:
-Uma musica de fundo previamente aceita para uso em **Jobs de Video**, com origem e licenca conhecidas.
-_Avoid_: musica aleatoria, faixa baixada em runtime, trilha sem licenca
+Uma musica de fundo instrumental previamente aceita para uso em **Jobs de Video**, sem letra ou vocal audivel, com origem e licenca conhecidas.
+_Avoid_: musica aleatoria, faixa com letra, faixa com vocal, faixa baixada em runtime, trilha sem licenca
+
+**Vocal Audivel em Trilha**:
+Qualquer voz, canto, fala, sample vocal, coro ou vocalizacao perceptivel numa musica de fundo, mesmo quando a letra nao e compreensivel.
+_Avoid_: apenas letra compreensivel, vocal toleravel, textura vocal
 
 **Trilha Sintetica Local**:
 Uma **Trilha Aprovada** criada pelo proprio projeto, sem amostras externas, vocal ou letra.
@@ -319,6 +335,10 @@ _Avoid_: baixar catalogo automaticamente, scraping de musica, usar faixas sem re
 **Trilha Reaproveitada de Provedor**:
 Uma **Trilha Aprovada** gerada anteriormente por um provedor externo e importada de artefatos locais depois de passar por qualidade e evidencia de origem.
 _Avoid_: baixar novamente do provedor, reaproveitar sem metadados, copiar audio sem licenca
+
+**Revisao Instrumental da Trilha**:
+A confirmacao humana de que uma **Trilha Reaproveitada de Provedor** nao contem **Vocal Audivel em Trilha** e pode voltar ao **Banco de Trilhas Aprovadas**.
+_Avoid_: metadado inferido, confianca cega no provedor, revisao automatica suficiente
 
 **Fallback de Musica por API**:
 O uso excepcional de um provedor externo de musica quando o **Banco de Trilhas Aprovadas** nao atende ao **Job de Video**.
@@ -338,6 +358,8 @@ _Avoid_: caminho primario, fallback silencioso, mock em run real
 - Um **Job de Video** pode ser criado a partir de um item do **Banco de Roteiros Prontos**.
 - Um **Banco de Roteiros Prontos** pode ser apresentado como **Controle Recolhido de Banco de Roteiros** na **Barra Lateral Global do Hub**.
 - Uma **Configuracao Global de Prompt Viral** deve ser acessada pela **Barra Lateral Global do Hub**.
+- **Roteiro Viral Estruturado** deve tratar a **Configuracao Global de Prompt Viral** como contrato de estrutura e gate, nao apenas como sugestao de estilo.
+- **Janela Alvo de Duracao do Short** deve orientar roteiro, TTS e render de **Jobs de Video** automaticos.
 - Uma **Barra Lateral Global do Hub** pode exibir **Status Compacto da Automacao**.
 - **Status Compacto da Automacao** pode alternar a **Pausa Global da Automacao**.
 - **Status Compacto da Automacao** nao deve iniciar um **Ciclo Diario de Automacao**.
@@ -394,8 +416,11 @@ _Avoid_: caminho primario, fallback silencioso, mock em run real
 - **Chave Dedicada de Imagem** deve ser usada depois que a chave primaria de imagem vira **Chave Esgotada**.
 - Um **Job de Video** pode usar zero ou uma **Trilha Aprovada**.
 - Um **Banco de Trilhas Aprovadas** pode conter uma ou mais **Trilhas Aprovadas**.
+- Uma **Trilha Aprovada** deve ser instrumental e nao pode conter letra ou vocal audivel.
+- **Vocal Audivel em Trilha** invalida uma **Trilha Aprovada**, mesmo quando nao houver letra compreensivel.
 - Uma **Trilha Sintetica Local** pode entrar no **Banco de Trilhas Aprovadas** sem licenca externa porque nao usa material de terceiros.
 - Uma **Trilha Reaproveitada de Provedor** deve preservar job original, provedor, licenca e evidencia de qualidade.
+- Uma **Trilha Reaproveitada de Provedor** exige **Revisao Instrumental da Trilha** antes de ser usada novamente em **Jobs de Video**.
 - Uma **Trilha Aprovada** deve ter origem e licenca rastreaveis antes de entrar em um **Job de Video**.
 - **Populacao Automatizada do Banco de Trilhas** deve criar trilhas locais, nao baixar musicas de catalogos externos.
 - **Fallback de Musica por API** nao deve ocorrer sem configuracao explicita.

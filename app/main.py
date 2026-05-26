@@ -100,7 +100,7 @@ Retenção:
 - cada frase deve criar motivo para assistir a proxima
 - evite frase neutra, didatica ou enciclopedica quando puder virar tensão, contraste ou consequência
 - use curiosidade concreta, causalidade e imagens mentais fortes
-- priorize "isso muda como você enxerga X" sobre lista de fatos soltos
+- priorize consequencia visual especifica, tensão concreta ou virada verificavel sobre lista de fatos soltos
 SEO:
 - palavra-chave principal cedo no titulo quando natural
 - titulo com curiosidade especifica, 45 a 75 caracteres quando possivel

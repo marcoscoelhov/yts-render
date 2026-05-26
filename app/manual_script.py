@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.editorial.retention import build_retention_map
 from app.utils import tokenize, word_tokens
 
 
@@ -89,10 +90,23 @@ def parse_ready_script(raw_text: str, *, fact_check_confirmed: bool) -> ReadyScr
         for fact, source_id in zip(key_facts, source_fact_ids, strict=False)
     ]
     estimated_duration_sec = round(max(35.0, min(55.0, len(word_tokens(full_narration)) / 2.55)), 2)
+    retention_map = build_retention_map(round(estimated_duration_sec))
+    retention_texts = {
+        "visual_hook": hook,
+        "proof_or_tension": loop,
+        "escalation": " ".join(beats[: max(1, min(3, len(beats)))]),
+        "turn_or_payoff": payoff,
+        "loop_close": closing,
+    }
+    for segment in retention_map.get("segments", []):
+        if isinstance(segment, dict):
+            mapped_text = retention_texts.get(str(segment.get("code") or ""))
+            if mapped_text:
+                segment["mapped_text"] = mapped_text
     script = {
         "title": title,
         "hook": hook,
-        "body_beats": [*beats, payoff],
+        "body_beats": beats,
         "ending": closing,
         "cta": None,
         "full_narration": full_narration,
@@ -102,7 +116,7 @@ def parse_ready_script(raw_text: str, *, fact_check_confirmed: bool) -> ReadyScr
         "claim_trace": claim_trace,
         "token_count": len(tokenize(full_narration)),
         "language": "pt-BR",
-        "retention_map": {},
+        "retention_map": retention_map,
         "visual_opening": {"source": "ready_script", "text": hook},
         "qa_metrics": {
             "hook_score": 0.9,

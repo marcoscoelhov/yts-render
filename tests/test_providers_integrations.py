@@ -176,6 +176,8 @@ def test_openai_provider_topic_prompt_uses_hub_viral_ruler(monkeypatch) -> None:
     assert captured["text"] == {"format": {"type": "json_object"}}
     assert "Crie pautas de curiosidades globais para YouTube Shorts em pt-BR." in str(captured["input"])
     assert "Loop: pergunta mental de tensão que só fecha no payoff" in str(captured["input"])
+    assert "exceto search_terms quando pesquisa factual em ingles ajudar" in str(captured["input"])
+    assert "search_terms em ingles para pesquisa factual" in str(captured["input"])
     assert result["quality_metrics"]["source_provider"] == "openai"
 
 def test_llm_registry_supports_openai_primary_provider(monkeypatch) -> None:

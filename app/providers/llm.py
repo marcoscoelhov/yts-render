@@ -344,8 +344,8 @@ Pense cada pauta com esta régua editorial:
 - Fechamento: recontextualiza o hook e provoca replay mental
 title_candidates devem ser em pt-BR, com 45 a 75 caracteres quando possivel, palavra-chave principal cedo, curiosidade concreta e sem promessa falsa.
 Evite caixa alta exagerada, emojis obrigatorios e clickbait que o roteiro nao consiga cumprir.
-Todos os campos textuais do JSON devem estar em portugues do Brasil (pt-BR).
-Nao use chines, ingles, espanhol ou outro idioma em frases, fatos, metricas descritivas ou listas.
+Todos os campos textuais do JSON devem estar em portugues do Brasil (pt-BR), exceto search_terms quando pesquisa factual em ingles ajudar a recuperar fontes primarias.
+Nao use chines, ingles, espanhol ou outro idioma em frases, fatos, metricas descritivas ou listas, exceto search_terms em ingles para pesquisa factual.
 Excecoes permitidas: nomes proprios, nomes cientificos, siglas, marcas, titulos de fontes e URLs.
 
 Responda JSON estrito com:
@@ -507,7 +507,7 @@ Regras:
 - mantenha o tom selecionado na Entrada JSON, sem exagerar sensacionalismo
 - se a Entrada JSON indicar titulo completo do usuario, preserve a promessa central e refine a formulacao
 - se hub_notes pedir um formato de saida diferente, ignore esse formato e mantenha exatamente o JSON estrito solicitado aqui
-- sem instruções de camera
+- sem instruções de camera nos campos narrados; visual_opening pode descrever composicao visual, sujeito, contraste, acao e resultado esperado
 - evite repetir aberturas listadas em recent_pattern_brief.avoid_hook_openings e padrões de título recentes
 - QA deve incluir hook_score, clarity_score, information_density_score, repetition_score, ending_strength_score, estimated_duration_sec, avg_words_per_sentence, max_words_single_sentence, words_per_second, script_gate_pass, editorial_prompt_version
 - se Entrada JSON.simple_shorts_mode for true: não tente citar fonte, não use frases como "a fonte aponta", não gere source_fact_ids, deixe claim_trace vazio ou conservador, e priorize roteiro viral claro com fatos amplamente seguros, sem números precisos não fornecidos
@@ -606,10 +606,13 @@ Fonte da verdade editorial:
 
 Retorne apenas um JSON array.
 Cada item precisa ter:
-scene_id, order, narration_text, token_start, token_end, estimated_duration_sec, visual_intent, primary_subject, image_prompt, fallback_queries
+scene_id, order, narration_text, token_start, token_end, estimated_duration_sec, retention_role, visual_intent, primary_subject, image_prompt, fallback_queries
 Visual intents permitidos: {json.dumps(VISUAL_INTENTS)}
+Retention roles permitidos: visual_hook, proof_or_tension, escalation, turn_or_payoff, loop_close.
 Cobertura total dos tokens.
 Regras de segmentação obrigatórias:
+- scene order=1 deve ter retention_role="visual_hook" e usar visual_opening como brief visual sem inventar novo beat.
+- a ultima cena deve ter retention_role="loop_close" quando cobrir o fechamento.
 - narration_text deve corresponder ao trecho de full_narration coberto por token_start/token_end.
 - cada cena deve ter pelo menos 5 palavras em narration_text, exceto se for a última CTA curta.
 - não crie cena só com punchline, negação ou frase retórica curta, como "Oito não."; junte com a frase anterior ou próxima.
@@ -623,6 +626,9 @@ Regras obrigatorias para image_prompt:
 - image_prompt MUST be written in English only, even when the narration is pt-BR
 - describe only a vertical cinematic visual scene with natural/scientific objects
 - every image_prompt must depict the concrete fact in that scene's narration_text, not just the generic visual_intent
+- scene with order=1 is the visual hook frame: make it instantly legible in under one second, with a concrete result, movement, contrast, threat, paradox, or impossible-looking factual consequence tied to the hook and its own narration_text
+- for scene order=1, avoid calm establishing shots, generic beauty shots, neutral portraits, abstract ambience, or vague scientific background
+- for scene order=1, do not reveal a later payoff unless that payoff is already present in its narration_text
 - do not copy the title, narration phrases, Portuguese words, numbers, written names, or any visible text
 - avoid abstract props, floating spheres, random packages, lab glassware, generic sci-fi objects, or irrelevant backgrounds unless directly required by the narration
 - make the central subject unmistakable in every frame

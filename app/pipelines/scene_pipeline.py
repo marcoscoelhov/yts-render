@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.models import Job, ScenePlan, Script, TopicPlan, TopicRequest
 from app.pipelines.common import RecoverableStepError, model_payload
 from app.pipelines.base import BasePipeline
-from app.utils import new_id, stable_hash, utcnow, word_tokens
+from app.utils import new_id, read_json, stable_hash, utcnow, word_tokens
 
 
 class ScenePipeline(BasePipeline):
@@ -19,6 +19,7 @@ class ScenePipeline(BasePipeline):
         topic_plan = session.scalar(select(TopicPlan).where(TopicPlan.job_id == job.job_id))
         assert script and topic_plan
         request = session.scalar(select(TopicRequest).where(TopicRequest.job_id == job.job_id))
+        script_artifact = self._script_artifact_payload(job.job_id)
         script_dict = {
             "title": script.title,
             "hook": script.hook,
@@ -29,6 +30,8 @@ class ScenePipeline(BasePipeline):
             "estimated_duration_sec": script.estimated_duration_sec,
             "key_facts": script.key_facts,
             "qa_metrics": script.qa_metrics,
+            "retention_map": script_artifact.get("retention_map") if isinstance(script_artifact.get("retention_map"), dict) else {},
+            "visual_opening": script_artifact.get("visual_opening") if isinstance(script_artifact.get("visual_opening"), dict) else {},
             "canonical_topic": topic_plan.canonical_topic,
             "angle": topic_plan.angle,
             "hub_viral_prompt_source": request.notes if request else None,
@@ -38,12 +41,14 @@ class ScenePipeline(BasePipeline):
         self.storage.persist_json(job.job_id, "scene_plan_raw.json", self._serialize_for_json({"scenes": scenes}))
         tokens = word_tokens(script.full_narration)
         scenes = self.normalize_scene_token_coverage(scenes, script.full_narration)
+        scenes = self.annotate_scene_retention_roles(scenes, script_dict)
         if not scenes or scenes[0]["token_start"] != 0 or scenes[-1]["token_end"] != len(tokens) - 1:
             fallback_planner = self.scene_fallback_planner()
             if fallback_planner is not None:
                 scenes = fallback_planner.plan_scenes(script_dict, self.settings.scene_target_count)
                 self.storage.persist_json(job.job_id, "scene_plan_raw.json", self._serialize_for_json({"scenes": scenes}))
                 scenes = self.normalize_scene_token_coverage(scenes, script.full_narration)
+                scenes = self.annotate_scene_retention_roles(scenes, script_dict)
             if not scenes or scenes[0]["token_start"] != 0 or scenes[-1]["token_end"] != len(tokens) - 1:
                 raise RecoverableStepError("scene coverage invalid")
         scenes = [self.normalize_scene_semantics(scene, topic_plan.canonical_topic) for scene in scenes]
@@ -54,6 +59,7 @@ class ScenePipeline(BasePipeline):
                 scenes = fallback_planner.plan_scenes(script_dict, self.settings.scene_target_count)
                 self.storage.persist_json(job.job_id, "scene_plan_raw.json", self._serialize_for_json({"scenes": scenes}))
                 scenes = self.normalize_scene_token_coverage(scenes, script.full_narration)
+                scenes = self.annotate_scene_retention_roles(scenes, script_dict)
                 scenes = [self.normalize_scene_semantics(scene, topic_plan.canonical_topic) for scene in scenes]
                 scene_gate = self.scene_gate.validate(scenes, self.settings.scene_target_count)
             if not scene_gate.passed:
@@ -81,6 +87,16 @@ class ScenePipeline(BasePipeline):
         job.quality_summary = quality_summary
         self._append_event(job.job_id, "scene_plan.generated", "succeeded", quality_summary["scene_plan"])
         return ["scene_plan.json"]
+
+    def _script_artifact_payload(self, job_id: str) -> dict[str, Any]:
+        path = self.storage.job_dir(job_id, create=False) / "script.json"
+        if not path.exists():
+            return {}
+        try:
+            payload = read_json(path)
+        except Exception:  # noqa: BLE001
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def scene_fallback_planner(self) -> Any:
         if self.settings.strict_minimax_validation:
@@ -129,6 +145,23 @@ class ScenePipeline(BasePipeline):
             normalized[0]["token_start"] = 0
             normalized[-1]["token_end"] = total_tokens - 1
             normalized[-1]["narration_text"] = " ".join(tokens[normalized[-1]["token_start"] : total_tokens]).strip()
+        return normalized
+
+    def annotate_scene_retention_roles(self, scenes: list[dict[str, Any]], script: dict[str, Any]) -> list[dict[str, Any]]:
+        if not scenes:
+            return scenes
+        normalized: list[dict[str, Any]] = []
+        visual_opening = script.get("visual_opening") if isinstance(script.get("visual_opening"), dict) else {}
+        hook_text = str(script.get("hook") or "").strip()
+        for index, scene in enumerate(scenes):
+            updated = dict(scene)
+            if index == 0:
+                updated.setdefault("retention_role", "visual_hook")
+                updated.setdefault("hook_text", hook_text)
+                updated.setdefault("visual_opening", visual_opening)
+            elif index == len(scenes) - 1:
+                updated.setdefault("retention_role", "loop_close")
+            normalized.append(updated)
         return normalized
 
     def normalize_scene_semantics(self, scene: dict[str, Any], canonical_topic: str) -> dict[str, Any]:

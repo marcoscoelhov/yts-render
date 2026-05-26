@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.editorial.retention import attach_retention_metadata
+from app.editorial.retention import attach_retention_metadata, build_retention_map
 from app.pipelines.base import BasePipeline
 from app.pipelines.common import RecoverableStepError
 from app.pipelines.script_metrics import normalize_script_metrics
@@ -129,12 +129,64 @@ class ScriptRepairDomain(BasePipeline):
         processed = self._normalize_script_visible_text(processed)
         processed = self._attach_claim_trace(processed, fact_pack)
         processed["estimated_duration_sec"] = round(max(35.0, min(55.0, len(word_tokens(str(processed.get("full_narration") or ""))) / 2.55)), 2)
+        processed = self._sync_retention_map_to_script(processed)
         processed["token_count"] = len(tokenize(str(processed.get("full_narration") or "")))
         return processed
+
+    def _sync_retention_map_to_script(self, script: dict[str, Any]) -> dict[str, Any]:
+        updated = dict(script)
+        duration = int(round(float(updated.get("estimated_duration_sec") or 45)))
+        retention_map = updated.get("retention_map") if isinstance(updated.get("retention_map"), dict) else {}
+        segments = retention_map.get("segments") if isinstance(retention_map.get("segments"), list) else None
+        synced_map = {**retention_map} if retention_map else build_retention_map(duration)
+        if segments is None:
+            synced_map = build_retention_map(duration)
+            segments = synced_map.get("segments") if isinstance(synced_map.get("segments"), list) else []
+
+        body_beats = [str(item).strip() for item in (updated.get("body_beats") or []) if str(item).strip()]
+        hook = str(updated.get("hook") or "").strip()
+        ending = str(updated.get("ending") or "").strip()
+        narration = str(updated.get("full_narration") or "").strip()
+        fallback_sentences = [part.strip() for part in sentence_split(narration) if part.strip()]
+        body_summary = " ".join(body_beats[:3])
+        fallback_body_summary = " ".join(fallback_sentences[1:-1] or fallback_sentences[:3])
+        retention_texts = {
+            "visual_hook": self._first_grounded_retention_text([hook, fallback_sentences[0] if fallback_sentences else ""], narration),
+            "proof_or_tension": self._first_grounded_retention_text([body_beats[0] if body_beats else "", fallback_sentences[1] if len(fallback_sentences) > 1 else ""], narration),
+            "escalation": self._first_grounded_retention_text([body_summary, fallback_body_summary, narration], narration),
+            "turn_or_payoff": self._first_grounded_retention_text([body_beats[-1] if body_beats else "", fallback_sentences[-2] if len(fallback_sentences) > 1 else ""], narration),
+            "loop_close": self._first_grounded_retention_text([ending, fallback_sentences[-1] if fallback_sentences else ""], narration),
+        }
+
+        synced_segments: list[Any] = []
+        for segment in segments or []:
+            if not isinstance(segment, dict):
+                synced_segments.append(segment)
+                continue
+            code = str(segment.get("code") or "").strip()
+            mapped_text = retention_texts.get(code)
+            synced_segment = dict(segment)
+            if mapped_text:
+                synced_segment["mapped_text"] = mapped_text
+            synced_segments.append(synced_segment)
+        synced_map["segments"] = synced_segments
+        synced_map["synced_from_script"] = True
+        updated["retention_map"] = synced_map
+        return updated
+
+    def _first_grounded_retention_text(self, candidates: list[str], narration: str) -> str:
+        narration_norm = self.script_gate._normalize(narration)  # noqa: SLF001
+        for candidate in candidates:
+            text = str(candidate or "").strip()
+            if text and self.script_gate._normalize(text) in narration_norm:  # noqa: SLF001
+                return text
+        return ""
 
     def _restore_script_from_retention_map(self, script: dict[str, Any]) -> dict[str, Any]:
         retention_map = script.get("retention_map")
         if not isinstance(retention_map, dict):
+            return script
+        if retention_map.get("synced_from_script") is True:
             return script
         raw_segments = retention_map.get("segments")
         if not isinstance(raw_segments, list):
@@ -348,10 +400,20 @@ class ScriptRepairDomain(BasePipeline):
         softened = [self._soften_risky_sentence(sentence, anchor) for sentence in narration_sentences]
         rewritten["hook"] = self._soften_risky_sentence(str(rewritten.get("hook") or softened[0]), anchor)
         rewritten["ending"] = self._soften_risky_sentence(str(rewritten.get("ending") or softened[-1]), anchor)
-        if len(softened) >= 3:
-            rewritten["body_beats"] = [sentence.rstrip(".!?") + "." for sentence in softened[1:-1][:4]]
-        rewritten["full_narration"] = " ".join(sentence.rstrip(".!?") + "." for sentence in softened if sentence).strip()
-        rewritten["key_facts"] = [sentence.rstrip(".!?") for sentence in softened[1:4] if sentence]
+        body_beats = [sentence.rstrip(".!?") + "." for sentence in softened[1:-1][:4] if sentence] if len(softened) >= 3 else []
+        filler_candidates = [
+            f"Esse cuidado mantém {anchor} no campo do provável, sem transformar hipótese em certeza.",
+            f"A virada fica mais honesta quando mostra limite em vez de cravar causa única.",
+            f"O ponto principal é reduzir promessa absoluta e deixar a explicação verificável respirar.",
+        ]
+        for candidate in filler_candidates:
+            if len(body_beats) >= 3:
+                break
+            body_beats.append(candidate)
+        rewritten["body_beats"] = body_beats[:4]
+        narration_parts = [rewritten["hook"], *rewritten["body_beats"], rewritten["ending"]]
+        rewritten["full_narration"] = " ".join(str(sentence).rstrip(".!?") + "." for sentence in narration_parts if sentence).strip()
+        rewritten["key_facts"] = [sentence.rstrip(".!?") for sentence in rewritten["body_beats"][:3] if sentence]
         rewritten["source_fact_ids"] = []
         rewritten["claim_trace"] = [
             {"text": sentence.rstrip(".!?") + ".", "source_fact_ids": [], "grounding": "conservative"}

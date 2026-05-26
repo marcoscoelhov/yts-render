@@ -162,6 +162,8 @@ def _manifest_track(preset: dict[str, Any], audio_path: str, license_path: str, 
         "content_id_risk": "low",
         "quality_tier": "fallback",
         "bank_source": "builtin_synthetic",
+        "instrumental": True,
+        "vocals_or_lyrics": "none",
         "duration_seconds": duration_seconds,
     }
 
@@ -376,7 +378,9 @@ def _minimax_manifest_track(
         "source_job_id": job_id,
         "trace_id": metadata.get("trace_id"),
         "model": metadata.get("model"),
-        "instrumental": metadata.get("instrumental", True),
+        "instrumental": metadata.get("instrumental") is True,
+        "vocals_or_lyrics": str(metadata.get("vocals_or_lyrics") or "unknown").strip().lower(),
+        "human_instrumental_review_confirmed": bool(metadata.get("human_instrumental_review_confirmed")),
         "content_hash": content_hash,
         "quality_report_passed": True,
         "duration_ms": source_metrics.get("duration_ms") or payload.get("duration_ms"),
@@ -393,7 +397,9 @@ def _minimax_license_text(job_id: str, payload: dict[str, Any]) -> str:
         f"License note: {payload.get('license_note') or 'Generated with MiniMax music_generation API.'}\n"
         f"Model: {metadata.get('model') or 'unknown'}\n"
         f"Trace ID: {metadata.get('trace_id') or 'unknown'}\n"
-        f"Instrumental: {metadata.get('instrumental', True)}\n"
+        f"Instrumental: {metadata.get('instrumental') is True}\n"
+        f"Vocals or lyrics: {str(metadata.get('vocals_or_lyrics') or 'unknown').strip().lower()}\n"
+        f"Human instrumental review confirmed: {bool(metadata.get('human_instrumental_review_confirmed'))}\n"
         "Imported from local YTS Render artifacts after background music quality gate passed.\n"
         "Original signed provider URL is intentionally not copied with query parameters.\n"
     )

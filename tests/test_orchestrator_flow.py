@@ -231,6 +231,86 @@ def test_autoapproval_score_blocks_high_repetition() -> None:
     assert "high_narrative_similarity" in report["reasons"]
     assert report["score"] >= 0.82
 
+def test_autoapproval_score_accepts_high_repetition_with_manual_originality_confirmation() -> None:
+    service = AutomationService(orchestrator)
+    job_id = "auto-score-manual-originality"
+    topic_request_id = f"{job_id}-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="auto-score-manual-originality",
+                status="ready_for_upload",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=45,
+                topic_request_id=topic_request_id,
+                artifact_index={},
+                quality_summary={
+                    "assets": {"asset_semantic_score_avg": 0.9},
+                    "monetization": {"passed": True, "final_status": "ready_for_upload", "hard_blockers": [], "manual_required": []},
+                },
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="auto-score-manual-originality-request",
+                niche_id="curiosidades",
+                seed_theme="Score alto com repeticao validada",
+                language="pt-BR",
+                target_duration_sec=45,
+            )
+        )
+        session.add(
+            Script(
+                script_id=f"{job_id}-script",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="auto-score-manual-originality-script",
+                title="Score alto com repeticao validada",
+                hook="Um roteiro manual pode repetir tema sem reprovar automaticamente.",
+                body_beats=["A confirmacao humana decide a originalidade editorial."],
+                ending="A fila automatica respeita a validacao manual.",
+                cta=None,
+                full_narration="Um roteiro manual pode repetir tema sem reprovar automaticamente. A confirmacao humana decide a originalidade editorial. A fila automatica respeita a validacao manual.",
+                estimated_duration_sec=40,
+                key_facts=[],
+                token_count=23,
+                language="pt-BR",
+                qa_metrics={"hook_score": 0.9, "information_density_score": 0.9},
+            )
+        )
+        session.commit()
+    orchestrator.storage.persist_json(
+        job_id,
+        "monetization_report.json",
+        {
+            "passed": True,
+            "manual_confirmations": ["originality_confirmed"],
+            "channel_repetition_report": {"repetition_risk": "high", "max_similarity": 0.91},
+            "metadata_review": {"requires_metadata_review": False},
+            "fact_claims_report": {"requires_fact_review": False},
+            "publish_readiness": {
+                "minimax_audit": {
+                    "factual_score": 0.9,
+                    "retention_score": 0.9,
+                    "metadata_score": 0.9,
+                }
+            },
+        },
+    )
+
+    report = service.evaluate_autoapproval(job_id)
+
+    assert report["eligible"] is True
+    assert "high_narrative_similarity" not in report["reasons"]
+    assert report["components"]["originality_confirmed"] is True
+    assert report["score"] >= 0.82
+
 def test_redirect_back_appends_params_before_fragment() -> None:
     response = main_module._redirect_back("/#publication-hub", {"automation_error": "failed"})
 
@@ -369,7 +449,7 @@ def test_channel_repetition_report_flags_similar_recent_jobs() -> None:
             language="pt-BR",
             target_duration_sec=35,
             topic_request_id="topic-request-previous",
-            topic_summary="Polvos e inteligência distribuída | surpresa científica",
+            topic_summary="Cristal heliotropo zafiro | fenômeno inventado de teste",
         )
         current = Job(
             job_id="job-repetition-current",
@@ -380,7 +460,7 @@ def test_channel_repetition_report_flags_similar_recent_jobs() -> None:
             language="pt-BR",
             target_duration_sec=35,
             topic_request_id="topic-request-current",
-            topic_summary="Polvos e inteligência distribuída | surpresa científica",
+            topic_summary="Cristal heliotropo zafiro | fenômeno inventado de teste",
         )
         session.add_all([previous, current])
         session.add(
@@ -449,6 +529,92 @@ def test_channel_repetition_report_flags_similar_recent_jobs() -> None:
     assert report["signals"]["exact_beat_count_matches"] >= 1
     assert any("same_hook_opening" in match["signals"] for match in report["matches"])
     assert any("same_duration_bucket" in match["signals"] for match in report["matches"])
+
+def test_channel_repetition_report_ignores_failed_regeneration_source() -> None:
+    with SessionLocal() as session:
+        failed = Job(
+            job_id="job-repetition-failed-source",
+            schema_version="1.0.0",
+            content_hash="failed-source",
+            status="failed",
+            niche_id="curiosidades",
+            language="pt-BR",
+            target_duration_sec=35,
+            topic_request_id="topic-request-failed-source",
+            topic_summary="Polvos e inteligência distribuída | surpresa científica",
+        )
+        current = Job(
+            job_id="job-repetition-regenerated-current",
+            schema_version="1.0.0",
+            content_hash="regenerated-current",
+            status="ready_for_upload",
+            niche_id="curiosidades",
+            language="pt-BR",
+            target_duration_sec=35,
+            topic_request_id="topic-request-regenerated-current",
+            topic_summary="Polvos e inteligência distribuída | surpresa científica",
+        )
+        session.add_all([failed, current])
+        session.add(
+            Script(
+                script_id="script-repetition-failed-source",
+                job_id=failed.job_id,
+                schema_version="1.0.0",
+                content_hash="script-failed-source",
+                title="Cristal zafiro vibra sem tocar na mesa",
+                hook="O cristal zafiro parece parado, mas vibra sozinho.",
+                body_beats=["A borda muda de brilho.", "A mesa não encosta no centro.", "O reflexo entrega o truque."],
+                ending="O objeto parecia imóvel, mas já estava reagindo.",
+                cta=None,
+                full_narration="O cristal zafiro parece parado, mas vibra sozinho. A borda muda de brilho.",
+                estimated_duration_sec=35,
+                key_facts=[],
+                token_count=30,
+                language="pt-BR",
+                qa_metrics={},
+            )
+        )
+        topic_plan = TopicPlan(
+            topic_id="topic-repetition-regenerated-current",
+            job_id=current.job_id,
+            schema_version="1.0.0",
+            content_hash="topic-regenerated-current",
+            canonical_topic="Cristal heliotropo zafiro",
+            angle="fenômeno inventado de teste",
+            hook_promise="o cristal parece parado, mas vibra sozinho",
+            entities=["cristal zafiro"],
+            search_terms=["cristal zafiro teste"],
+            title_candidates=["Cristal zafiro vibra sem tocar na mesa"],
+            quality_metrics={},
+        )
+        script = Script(
+            script_id="script-repetition-regenerated-current",
+            job_id=current.job_id,
+            schema_version="1.0.0",
+            content_hash="script-regenerated-current",
+            title="Cristal zafiro vibra sem tocar na mesa",
+            hook="O cristal zafiro parece parado, mas vibra sozinho.",
+            body_beats=["A borda muda de brilho.", "A mesa não encosta no centro.", "O reflexo entrega o truque."],
+            ending="O objeto parecia imóvel, mas já estava reagindo.",
+            cta=None,
+            full_narration="O cristal zafiro parece parado, mas vibra sozinho. A borda muda de brilho.",
+            estimated_duration_sec=35,
+            key_facts=[],
+            token_count=30,
+            language="pt-BR",
+            qa_metrics={},
+        )
+        session.add_all([topic_plan, script])
+        session.commit()
+
+    with SessionLocal() as session:
+        current = session.get(Job, "job-repetition-regenerated-current")
+        topic_plan = session.query(TopicPlan).filter_by(job_id=current.job_id).one()
+        script = session.query(Script).filter_by(job_id=current.job_id).one()
+        report = orchestrator.monetization_pipeline.build_channel_repetition_report(session, current, topic_plan, script)
+
+    assert report["repetition_risk"] == "low"
+    assert report["matches"] == []
 
 def test_retry_action_creates_new_job() -> None:
     client = TestClient(app)
@@ -748,6 +914,7 @@ def test_process_job_returns_persisted_cancelled_status_after_shutdown(monkeypat
         assert job.status == "cancelled"
 
 def test_process_job_fails_explicitly_for_legacy_invalid_niche() -> None:
+    orchestrator.stop_event.clear()
     job_id = "job-invalid-niche"
     topic_request_id = "topic-invalid-niche"
     with SessionLocal() as session:
@@ -904,6 +1071,94 @@ def test_final_loudness_normalization_uses_ffmpeg_loudnorm(tmp_path: Path, monke
     command_text = " ".join(captured["command"])
     assert "loudnorm=I=-16:LRA=11:TP=-1.5" in command_text
     assert audio_path.exists()
+
+def test_elevenlabs_tts_generates_normalized_wav_and_local_srt(tmp_path: Path, monkeypatch) -> None:
+    from app.providers.tts import ElevenLabsTTSProvider
+
+    settings = SimpleNamespace(
+        elevenlabs_api_key="test-key",
+        elevenlabs_base_url="https://api.elevenlabs.io",
+        elevenlabs_voice_id="voice-ptbr",
+        elevenlabs_model_id="eleven_multilingual_v2",
+        elevenlabs_output_format="mp3_44100_128",
+        elevenlabs_timeout_sec=120.0,
+        elevenlabs_voice_stability=0.5,
+        elevenlabs_voice_similarity_boost=0.75,
+        elevenlabs_voice_style=0.0,
+        elevenlabs_voice_use_speaker_boost=True,
+    )
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, timeout: float) -> None:
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args) -> None:
+            return None
+
+        def post(self, url: str, *, params: dict[str, str], headers: dict[str, str], json: dict[str, object]):
+            captured["url"] = url
+            captured["params"] = params
+            captured["headers"] = headers
+            captured["json"] = json
+            return httpx.Response(200, content=b"audio")
+
+    def fake_normalize(source_path: Path, output_path: Path) -> None:
+        with wave.open(str(output_path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(24_000)
+            wav_file.writeframes(b"\0\0" * 24_000)
+
+    monkeypatch.setattr("app.providers.tts.get_settings", lambda: settings)
+    monkeypatch.setattr("app.providers.tts.httpx.Client", FakeClient)
+    monkeypatch.setattr(ElevenLabsTTSProvider, "_normalize_elevenlabs_audio", lambda self, source, output: fake_normalize(source, output))
+
+    audio_path = tmp_path / "voice.wav"
+    srt_path = tmp_path / "voice.srt"
+    result = ElevenLabsTTSProvider().synthesize("Texto curto em portugues brasileiro.", audio_path, srt_path)
+
+    assert result["provider"] == "elevenlabs"
+    assert result["voice"] == "voice-ptbr"
+    assert result["duration_ms"] == 1000
+    assert result["provider_metadata"]["fallback_used"] is False
+    assert captured["url"] == "https://api.elevenlabs.io/v1/text-to-speech/voice-ptbr"
+    assert captured["params"] == {"output_format": "mp3_44100_128"}
+    assert captured["json"]["model_id"] == "eleven_multilingual_v2"
+    assert "Texto curto" in srt_path.read_text(encoding="utf-8")
+
+def test_elevenlabs_tts_falls_back_to_edge_tts_when_primary_fails(tmp_path: Path, monkeypatch) -> None:
+    from app.providers.tts import EdgeTTSProvider, ElevenLabsTTSProvider
+
+    settings = SimpleNamespace(elevenlabs_api_key=None)
+
+    def fake_edge_synthesize(self, text: str, audio_path: Path, srt_path: Path) -> dict[str, object]:
+        audio_path.write_bytes(b"edge")
+        srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nedge\n", encoding="utf-8")
+        return {
+            "provider": "edge_tts",
+            "voice": "pt-BR-FranciscaNeural",
+            "audio_uri": audio_path.resolve().as_uri(),
+            "raw_subtitles_uri": srt_path.resolve().as_uri(),
+            "duration_ms": 1000,
+            "sample_rate_hz": 24000,
+            "channels": 1,
+            "provider_metadata": {"fallback_used": False},
+        }
+
+    monkeypatch.setattr("app.providers.tts.get_settings", lambda: settings)
+    monkeypatch.setattr(EdgeTTSProvider, "synthesize", fake_edge_synthesize)
+    monkeypatch.setattr("app.providers.tts.time.sleep", lambda _: None)
+
+    result = ElevenLabsTTSProvider().synthesize("Texto", tmp_path / "voice.wav", tmp_path / "voice.srt")
+
+    assert result["provider"] == "edge_tts"
+    assert result["provider_metadata"]["fallback_used"] is True
+    assert result["provider_metadata"]["fallback_from_provider"] == "elevenlabs"
+    assert result["provider_metadata"]["fallback_provider"] == "edge_tts"
 
 def test_human_review_checklist_marks_required_completed_and_pending_items() -> None:
     checklist = build_human_review_checklist(

@@ -40,7 +40,7 @@ class SubtitleGate:
                 item_reasons.append("empty_text")
             if MARKUP_PATTERN.search(text):
                 item_reasons.append("markup_or_ssml_leaked")
-            if re.search(r"\b[a-záàãâéêíóõôúç]$", text, re.IGNORECASE) and text.lower()[-1] not in {"a", "e", "o"}:
+            if re.search(r"\b[a-záàãâéêíóõôúç]$", text, re.IGNORECASE) and text.lower()[-1] not in {"a", "à", "á", "ã", "â", "e", "é", "ê", "o", "ó", "õ", "ô"}:
                 item_reasons.append("possible_truncated_word")
             words = word_tokens(text)
             if len(words) > 14:

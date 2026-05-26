@@ -8,6 +8,8 @@ import math
 
 import os
 
+import re
+
 import shutil
 
 import threading
@@ -200,10 +202,23 @@ def _write_test_wave(path: Path, *, duration_ms: int = 1000, amplitude: int = 24
         wav_file.writeframes(frames)
 
 def _base_script(full_narration: str) -> dict[str, object]:
+    sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", full_narration) if part.strip()]
+    while len(sentences) < 3:
+        sentences.append(sentences[-1] if sentences else full_narration)
+    body_beats = sentences[1:4]
+    while len(body_beats) < 3:
+        body_beats.append("A pista fica mais clara quando a cena volta ao detalhe central.")
+    retention_map = {
+        "visual_hook": {"text": sentences[0]},
+        "proof_or_tension": {"text": sentences[1]},
+        "escalation": {"text": sentences[2]},
+        "turn_or_payoff": {"text": sentences[-2]},
+        "loop_close": {"text": sentences[-1]},
+    }
     return {
         "title": "Curiosidade científica em menos de um minuto",
         "hook": full_narration.split(".")[0] + ".",
-        "body_beats": [full_narration],
+        "body_beats": body_beats,
         "ending": "No fim, essa curiosidade científica muda como você olha para o tema.",
         "cta": None,
         "full_narration": full_narration,
@@ -211,6 +226,7 @@ def _base_script(full_narration: str) -> dict[str, object]:
         "key_facts": [full_narration],
         "token_count": len(full_narration.split()),
         "language": "pt-BR",
+        "retention_map": retention_map,
         "qa_metrics": {
             "hook_score": 0.92,
             "clarity_score": 0.9,

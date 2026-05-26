@@ -987,7 +987,7 @@ class PublicationOperations:
             job = session.get(Job, job_id)
             if not job:
                 raise KeyError(job_id)
-            if job.status not in {"approved_for_publish", "published"}:
+            if job.status != "approved_for_publish":
                 raise FatalStepError("job must be approved_for_publish before publishing")
             schedule = session.scalar(select(PublicationSchedule).where(PublicationSchedule.job_id == job_id))
             monetization_report = self._read_job_json(job.job_id, "monetization_report.json")

@@ -106,6 +106,18 @@ REWATCH_LOOP_PATTERN = re.compile(
     r"\b(?:replay|rever|ver de novo|v[eê] de novo|segunda olhada|volta para|quando voc[eê] volta|in[ií]cio|no come[cç]o|primeir[ao] frase|primeir[ao] cena|primeir[ao] imagem|cena inicial|aquela imagem|aquele detalhe|a pista)\b",
     re.IGNORECASE,
 )
+WEAK_HOOK_FIRST_WORDS = {
+    "veja",
+    "olhe",
+    "entenda",
+    "descubra",
+    "saiba",
+    "aprenda",
+    "conheca",
+    "conheça",
+    "imagine",
+}
+RETENTION_MAP_REQUIRED_KEYS = {"visual_hook", "proof_or_tension", "escalation", "turn_or_payoff", "loop_close"}
 GENERIC_LOOP_ENDING_PATTERN = re.compile(
     r"\b(?:fecha o ciclo|agora tudo faz sentido|parece inevit[aá]vel|isso muda como voc[eê] olha|essa curiosidade muda como voc[eê] olha)\b",
     re.IGNORECASE,
@@ -116,6 +128,10 @@ AI_STYLE_PHRASE_PATTERN = re.compile(
 )
 PLACEHOLDER_SOURCE_PHRASE_PATTERN = re.compile(
     r"\b(?:a fonte aponta|a fonte sustenta|sem precisar inflar o fato|mecanismo real|deixa de ser s[oó] apar[eê]ncia|lastro por tr[aá]s|payoff [ée] esse|em geral,[^.?!]{0,140}(?:sem depender de n[úu]mero exato|escala incomum|revela um detalhe real|ajuda a explicar o efeito|contexto antigo))\b",
+    re.IGNORECASE,
+)
+BROKEN_VIRAL_CLOSING_PATTERN = re.compile(
+    r"\b(?:isso\s+choque|choque\s+depois)\b",
     re.IGNORECASE,
 )
 TRUNCATED_OR_BROKEN_LOGIC_PATTERN = re.compile(
@@ -218,10 +234,21 @@ class ScriptQualityGate:
             reasons.append("generic_ai_style_phrase")
         if PLACEHOLDER_SOURCE_PHRASE_PATTERN.search(combined_text):
             reasons.append("placeholder_source_language")
+        if BROKEN_VIRAL_CLOSING_PATTERN.search(combined_text):
+            reasons.append("broken_viral_closing")
         if TRUNCATED_OR_BROKEN_LOGIC_PATTERN.search(combined_text):
             reasons.append("truncated_ending_logic")
         if self._has_repeated_clause(full_narration):
             reasons.append("repeated_clause")
+        structured_report = self._structured_viral_report(script)
+        if structured_report["hook_first_word_weak"]:
+            reasons.append("hook_first_word_weak")
+        if not structured_report["body_beat_count_valid"]:
+            reasons.append("body_beat_count_invalid")
+        if not structured_report["retention_map_complete"]:
+            reasons.append("retention_map_incomplete")
+        if structured_report["retention_map_ungrounded_keys"]:
+            reasons.append("retention_map_not_grounded_in_narration")
         fact_risk = self._fact_risk_report(script)
         trace_report = self._claim_trace_report(script, fact_risk)
         if self._has_overconfident_or_unsupported_factual_claims(combined_text):
@@ -288,6 +315,7 @@ class ScriptQualityGate:
             "fact_risk": fact_risk,
             "claim_trace": trace_report,
             "loop_gate": loop_metrics,
+            "structured_viral_gate": structured_report,
         }
         return ScriptGateResult(passed=not reasons, reasons=reasons, metrics=metrics)
 
@@ -309,6 +337,52 @@ class ScriptQualityGate:
                 texts.extend(self._collect_text(item))
             return texts
         return []
+
+    def _structured_viral_report(self, script: dict[str, Any]) -> dict[str, Any]:
+        hook = str(script.get("hook") or "").strip()
+        first_word_match = re.match(r"\s*([0-9]+|[A-Za-zÀ-ÖØ-öø-ÿĀ-ſ]+)", hook)
+        first_word = first_word_match.group(1).lower() if first_word_match else ""
+        body_beats = script.get("body_beats") if isinstance(script.get("body_beats"), list) else []
+        retention_map = script.get("retention_map") if isinstance(script.get("retention_map"), dict) else {}
+        full_narration = self._normalize(str(script.get("full_narration") or ""))
+        retention_map_entries = self._retention_map_entries(retention_map)
+        ungrounded_keys: list[str] = []
+        for key in RETENTION_MAP_REQUIRED_KEYS & set(retention_map_entries):
+            text = retention_map_entries[key]
+            if text and self._normalize(text) not in full_narration:
+                ungrounded_keys.append(key)
+        return {
+            "hook_first_word": first_word,
+            "hook_first_word_weak": first_word in WEAK_HOOK_FIRST_WORDS,
+            "body_beat_count": len(body_beats),
+            "body_beat_count_valid": 3 <= len(body_beats) <= 5,
+            "retention_map_complete": RETENTION_MAP_REQUIRED_KEYS.issubset(set(retention_map_entries)),
+            "retention_map_ungrounded_keys": sorted(ungrounded_keys),
+        }
+
+    def _retention_map_entries(self, retention_map: dict[str, Any]) -> dict[str, str]:
+        entries: dict[str, str] = {}
+        for key in RETENTION_MAP_REQUIRED_KEYS & set(retention_map):
+            entries[key] = self._retention_map_item_text(retention_map.get(key))
+
+        raw_segments = retention_map.get("segments")
+        if isinstance(raw_segments, list):
+            for segment in raw_segments:
+                if not isinstance(segment, dict):
+                    continue
+                code = str(segment.get("code") or "").strip()
+                if code in RETENTION_MAP_REQUIRED_KEYS:
+                    entries[code] = self._retention_map_item_text(segment)
+        return entries
+
+    def _retention_map_item_text(self, item: Any) -> str:
+        if isinstance(item, dict):
+            for key in ("text", "mapped_text", "narration"):
+                text = str(item.get(key) or "").strip()
+                if text:
+                    return text
+            return ""
+        return str(item or "").strip()
 
     def _contains_foreign_language(self, text: str) -> bool:
         normalized = self._normalize(text)

@@ -150,7 +150,7 @@ Via `curl`:
 ```bash
 curl -i -X POST http://127.0.0.1:8080/jobs \
   -F seed_theme="polvos" \
-  -F target_duration_sec=35 \
+  -F target_duration_sec=50 \
   -F tone="intrigante_direto" \
   -F cta_style="none"
 ```

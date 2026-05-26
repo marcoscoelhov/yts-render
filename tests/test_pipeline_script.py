@@ -232,6 +232,8 @@ def test_minimax_script_prompt_requires_pt_br_for_all_text_fields(monkeypatch) -
     assert "claim_trace" in prompt
     assert "proibido usar os caracteres" in prompt
     assert "ignore esse formato e mantenha exatamente o JSON estrito" in prompt
+    assert "sem instruções de camera nos campos narrados" in prompt
+    assert "visual_opening pode descrever composicao visual" in prompt
 
 def test_script_quality_gate_blocks_generic_hook_opening() -> None:
     script = {
@@ -1464,6 +1466,52 @@ def test_script_gate_allows_conservative_factual_language() -> None:
     assert result.passed
     assert result.metrics["fact_risk"]["blocked"] is False
 
+def test_script_gate_accepts_domain_retention_map_segments() -> None:
+    script = {
+        "title": "Flamingos: a comida que pinta penas",
+        "hook": "A pena rosa começa no prato.",
+        "body_beats": [
+            "O pigmento entra pela comida antes de aparecer na cor.",
+            "Esses carotenoides vêm de organismos pequenos na cadeia alimentar.",
+            "Com o tempo, o corpo deposita essa cor nas penas novas.",
+        ],
+        "ending": "Quando você vê de novo, aquela refeição vira tinta.",
+        "cta": None,
+        "full_narration": (
+            "A pena rosa começa no prato. "
+            "O pigmento entra pela comida antes de aparecer na cor. "
+            "Esses carotenoides vêm de organismos pequenos na cadeia alimentar. "
+            "Com o tempo, o corpo deposita essa cor nas penas novas. "
+            "Quando você vê de novo, aquela refeição vira tinta."
+        ),
+        "estimated_duration_sec": 35,
+        "key_facts": ["Flamingos acumulam pigmentos da alimentação nas penas."],
+        "source_fact_ids": [],
+        "claim_trace": [],
+        "language": "pt-BR",
+        "retention_map": {
+            "segments": [
+                {"code": "visual_hook", "mapped_text": "A pena rosa começa no prato."},
+                {"code": "proof_or_tension", "mapped_text": "O pigmento entra pela comida antes de aparecer na cor."},
+                {"code": "escalation", "mapped_text": "Esses carotenoides vêm de organismos pequenos na cadeia alimentar."},
+                {"code": "turn_or_payoff", "mapped_text": "Com o tempo, o corpo deposita essa cor nas penas novas."},
+                {"code": "loop_close", "mapped_text": "Quando você vê de novo, aquela refeição vira tinta."},
+            ]
+        },
+        "qa_metrics": {
+            "hook_score": 0.9,
+            "clarity_score": 0.9,
+            "information_density_score": 0.8,
+            "repetition_score": 0.2,
+            "ending_strength_score": 0.9,
+        },
+    }
+
+    result = ScriptQualityGate().validate(script, target_duration_sec=35)
+
+    assert result.passed
+    assert result.metrics["structured_viral_gate"]["retention_map_complete"] is True
+
 def test_script_gate_rejects_ending_without_loop_connection() -> None:
     script = _base_script(
         "Polvos mudam de cor em segundos para confundir ameaças. "
@@ -2328,9 +2376,60 @@ def test_script_postprocess_splits_long_sentences_before_gate() -> None:
     )
 
     processed = orchestrator.script_pipeline._postprocess_script_for_quality(script, {"canonical_topic": "espaço"}, [])
-    result = ScriptQualityGate().validate(processed, target_duration_sec=35)
+    result = ScriptQualityGate().validate(processed, target_duration_sec=50)
 
-    assert result.metrics["max_words_single_sentence"] <= 20
+    assert result.metrics["max_words_single_sentence"] <= 15
+
+def test_script_gate_blocks_weak_hook_broken_closing_and_ungrounded_retention_map() -> None:
+    script = {
+        "title": "Cafeína: por que o café parece dar energia, mas esconde o cansaço",
+        "hook": "Veja o truque: o café acorda, mas não recarrega nada.",
+        "body_beats": [
+            "Seu corpo continua gasto, só que o aviso fica mais baixo.",
+            "No cérebro, a adenosina funciona como um alarme de fadiga acumulada.",
+            "A cafeína entra nessa disputa e bloqueia temporariamente esse recado químico.",
+            "A sensação é de bateria cheia, enquanto o desgaste real segue correndo por trás.",
+            "Por isso o choque vem depois: o café não cria energia.",
+        ],
+        "ending": "Volta para a primeira imagem e o truque aparece: isso choque depois.",
+        "cta": None,
+        "full_narration": (
+            "Veja o truque: o café acorda, mas não recarrega nada. "
+            "Seu corpo continua gasto, só que o aviso fica mais baixo. "
+            "No cérebro, a adenosina funciona como um alarme de fadiga acumulada. "
+            "A cafeína entra nessa disputa e bloqueia temporariamente esse recado químico. "
+            "A sensação é de bateria cheia, enquanto o desgaste real segue correndo por trás. "
+            "Por isso o choque vem depois: o café não cria energia. "
+            "Volta para a primeira imagem e o truque aparece: isso choque depois."
+        ),
+        "estimated_duration_sec": 34,
+        "key_facts": [],
+        "source_fact_ids": [],
+        "claim_trace": [],
+        "language": "pt-BR",
+        "retention_map": {
+            "visual_hook": {"text": "Veja o truque: o café acorda, mas não recarrega nada."},
+            "proof_or_tension": {"text": "Seu corpo continua gasto, só que o aviso fica mais baixo."},
+            "escalation": {"text": "A cafeína entra nessa disputa e bloqueia temporariamente esse recado químico."},
+            "turn_or_payoff": {"text": "Depois, quando o efeito cai, o cansaço parece voltar de uma vez."},
+            "loop_close": {"text": "Então aquele pico não era energia nova. Era silêncio no alarme."},
+        },
+        "qa_metrics": {
+            "hook_score": 0.9,
+            "clarity_score": 0.9,
+            "information_density_score": 0.8,
+            "repetition_score": 0.2,
+            "ending_strength_score": 0.9,
+        },
+    }
+
+    result = ScriptQualityGate().validate(script, target_duration_sec=50)
+
+    assert result.passed is False
+    assert "hook_first_word_weak" in result.reasons
+    assert "broken_viral_closing" in result.reasons
+    assert "estimated_duration_outside_absolute_range" in result.reasons
+    assert "retention_map_not_grounded_in_narration" in result.reasons
 
 def test_build_publish_description_prefers_concise_summary_over_full_narration() -> None:
     description = orchestrator.monetization_pipeline.build_publish_description(

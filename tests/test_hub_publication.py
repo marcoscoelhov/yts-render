@@ -178,6 +178,13 @@ def test_hub_prompt_panel_saves_and_resets_safe_template(monkeypatch, tmp_path: 
     assert reset.headers["location"] == "/jobs?status=queued"
     assert main_module._viral_prompt_template() == main_module.DEFAULT_VIRAL_PROMPT_TEMPLATE
 
+def test_default_viral_prompt_avoids_generic_changes_how_you_see_formula() -> None:
+    prompt = main_module.DEFAULT_VIRAL_PROMPT_TEMPLATE
+
+    assert "isso muda como você enxerga X" not in prompt
+    assert "consequencia visual especifica" in prompt
+    assert "virada verificavel" in prompt
+
 def test_publish_audit_is_cached_by_input_hash(monkeypatch) -> None:
     monkeypatch.setattr(orchestrator.monetization_pipeline.settings, "simple_shorts_mode", False)
     calls = {"count": 0}
@@ -790,6 +797,69 @@ def test_manual_publish_marks_publication_schedule_as_published() -> None:
     assert publish_result["publication_schedule"]["status"] == "published"
     assert publish_result["publication_schedule"]["youtube_url"] == "https://youtube.com/shorts/abc123"
     assert publish_result["youtube"]["url"] == "https://youtube.com/shorts/abc123"
+
+def test_manual_publish_rejects_already_published_job_until_reopened() -> None:
+    client = TestClient(app)
+    job_id = "already-published-job"
+    topic_request_id = "already-published-job-request"
+    with SessionLocal() as session:
+        session.add(
+            Job(
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="already-published",
+                status="published",
+                niche_id="curiosidades",
+                language="pt-BR",
+                target_duration_sec=45,
+                topic_request_id=topic_request_id,
+                review_state="published",
+                artifact_index={},
+            )
+        )
+        session.add(
+            TopicRequest(
+                topic_request_id=topic_request_id,
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="already-published-request",
+                niche_id="curiosidades",
+                seed_theme="Flamingos",
+                language="pt-BR",
+                target_duration_sec=45,
+            )
+        )
+        session.add(
+            PublicationSchedule(
+                schedule_id="already-published-row",
+                job_id=job_id,
+                schema_version="1.0.0",
+                content_hash="already-published-row",
+                scheduled_for_utc=utcnow(),
+                timezone="UTC",
+                youtube_visibility="public",
+                status="published",
+                youtube_video_id="yt-published",
+                youtube_url="https://youtube.com/watch?v=yt-published",
+                published_at=utcnow(),
+            )
+        )
+        session.commit()
+
+    response = client.post(
+        f"/jobs/{job_id}/publish",
+        data={"youtube_url": "https://youtube.com/shorts/new"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "publish_error=job+must+be+approved_for_publish+before+publishing" in response.headers["location"]
+    with SessionLocal() as session:
+        schedule = session.query(PublicationSchedule).filter_by(job_id=job_id).one()
+        job = session.get(Job, job_id)
+
+    assert job and job.status == "published"
+    assert schedule.youtube_url == "https://youtube.com/watch?v=yt-published"
 
 def test_job_detail_hides_immediate_publish_when_schedule_is_active() -> None:
     client = TestClient(app)

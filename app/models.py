@@ -24,7 +24,7 @@ class Job(Base):
     current_step: Mapped[str | None] = mapped_column(String, nullable=True)
     niche_id: Mapped[str] = mapped_column(String, default="curiosidades")
     language: Mapped[str] = mapped_column(String, default="pt-BR")
-    target_duration_sec: Mapped[int] = mapped_column(Integer, default=45)
+    target_duration_sec: Mapped[int] = mapped_column(Integer, default=50)
     topic_request_id: Mapped[str] = mapped_column(String, unique=True)
     retry_of_job_id: Mapped[str | None] = mapped_column(String, nullable=True)
     review_state: Mapped[str | None] = mapped_column(String, nullable=True)

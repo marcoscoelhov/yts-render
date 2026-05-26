@@ -57,6 +57,17 @@ class Settings(BaseSettings):
     music_bank_dir: Path = Path("data/music_bank")
     music_bank_auto_populate: bool = True
     allow_music_api_fallback: bool = False
+    tts_primary_provider: str = "elevenlabs"
+    elevenlabs_api_key: str | None = None
+    elevenlabs_base_url: str = "https://api.elevenlabs.io"
+    elevenlabs_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
+    elevenlabs_model_id: str = "eleven_multilingual_v2"
+    elevenlabs_output_format: str = "mp3_44100_128"
+    elevenlabs_timeout_sec: float = 120.0
+    elevenlabs_voice_stability: float = 0.5
+    elevenlabs_voice_similarity_boost: float = 0.75
+    elevenlabs_voice_style: float = 0.0
+    elevenlabs_voice_use_speaker_boost: bool = True
     sound_design_enabled: bool = False
     sound_design_gain_db: float = -18.0
     youtube_publish_mode: str = "manual"

@@ -130,7 +130,7 @@ Etapas atuais de `JobOrchestrator._steps()`:
 | `input_gate` | 0 | Valida entrada basica do job. |
 | `topic_plan` | 2 | Gera pauta, angulo, entidades, promessa e candidatos de titulo. |
 | `script` | 2 | Gera roteiro e passa pelo `ScriptQualityGate`, com repair quando cabivel. |
-| `scene_plan` | 1 | Divide o roteiro em cenas e valida estrutura visual. |
+| `scene_plan` | 1 | Divide o roteiro em cenas, marca a primeira como **Imagem de Hook Visual** e valida estrutura visual. |
 | `asset_generation` | 2 | Gera ou seleciona imagens e aplica score semantico. |
 | `tts` | 2 | Gera narracao e metadados basicos de audio. |
 | `subtitle_alignment` | 1 | Normaliza legenda e arquivos de render. |
@@ -138,6 +138,8 @@ Etapas atuais de `JobOrchestrator._steps()`:
 | `render` | 1 | Gera `render/final.mp4` vertical via FFmpeg. |
 | `monetization_readiness_gate` | 0 | Consolida direitos, disclosure, factualidade, repeticao e publish readiness. |
 | `publish_to_review_hub` | 0 | Persiste o pacote de publicacao e leva o job ao hub. |
+
+A primeira cena carrega a **Imagem de Hook Visual**: o prompt visual deve tornar o hook legivel em menos de um segundo, com contraste, movimento, resultado ou consequencia concreta, sem revelar payoff que ainda nao apareceu no roteiro.
 
 Cada etapa grava `StepExecution`, eventos em `events.jsonl` e artefatos JSON ou midia no diretorio do job.
 
@@ -212,7 +214,7 @@ Defaults importantes:
 - `app_url=http://127.0.0.1:8080`
 - `niche_id=curiosidades`
 - `language=pt-BR`
-- `target_duration_sec=45`
+- `target_duration_sec=50`
 - `simple_shorts_mode=true`
 - `llm_primary_provider=openai`
 - `llm_fallback_provider=deepseek`
@@ -256,6 +258,7 @@ Credenciais MiniMax por midia:
 - imagem usa `YTS_MINIMAX_IMAGE_API_KEY` so depois de limite ou quota na chave de texto, e marca essa chave como esgotada para o job atual
 - se nao houver chave de texto, imagem usa diretamente `YTS_MINIMAX_IMAGE_API_KEY`
 - musica usa `YTS_MINIMAX_MUSIC_API_KEY` ou a chave resolvida de texto apenas quando MiniMax Music esta configurado como provider ou fallback
+- narracao usa ElevenLabs quando `YTS_TTS_PRIMARY_PROVIDER=elevenlabs` e `YTS_ELEVENLABS_API_KEY` esta configurada; se ElevenLabs falhar, cai para Edge TTS e registra `fallback_from_provider=elevenlabs`
 
 Limite de provedor para troca de chave de imagem significa quota, saldo, credito ou rate limit. Timeout, erro de conexao, resposta invalida e `5xx` continuam sendo falhas transientes da chamada atual.
 
