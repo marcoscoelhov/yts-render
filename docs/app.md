@@ -198,8 +198,10 @@ O contexto de integracao exposto no hub usa:
 | `GET` | `/` | Home do hub com formulario, jobs e resumo operacional. |
 | `POST` | `/hub/prompt` | Salva ou reseta o template viral do hub. |
 | `GET` | `/jobs` | Fragmento HTML da tabela paginada de jobs. |
-| `GET` | `/publication-hub` | Centro de Crescimento do Canal com performance, integracao YouTube e secao operacional de publicacao. |
+| `GET` | `/publication-hub` | Centro de Crescimento do Canal com estatisticas, Analytics e orientacao editorial. |
 | `GET` | `/publication-hub/fragment` | Fragmento HTMX do Centro de Crescimento do Canal. |
+| `GET` | `/library` | Pagina de Biblioteca de Roteiros para importar e acompanhar o Banco de Roteiros Prontos. |
+| `GET` | `/settings` | Pagina de configuracoes operacionais do hub. |
 | `GET` | `/youtube/connect` | Inicia OAuth do YouTube. |
 | `GET` | `/youtube/oauth/callback` | Conclui OAuth do YouTube. |
 | `POST` | `/youtube/disconnect` | Remove token OAuth local. |

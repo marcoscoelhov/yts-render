@@ -93,9 +93,10 @@ Hashtags: #curiosidades #shorts"""
     assert len(rows) == 2
     assert {row.status for row in rows} == {"available"}
     assert all(row.fact_check_confirmed for row in rows)
-    page = client.get("/")
+    page = client.get("/library")
     assert page.status_code == 200
-    assert 'id="ready-script-bank-modal"' in page.text
+    assert "Banco de roteiros" in page.text
+    assert 'id="ready-script-bank-modal"' not in page.text
     assert "Terremoto teste lote A" in page.text
     assert "Terremoto teste lote B" in page.text
     assert "2 disponíveis" in page.text

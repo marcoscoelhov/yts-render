@@ -164,9 +164,9 @@ _Avoid_: prompt, tema, titulo completo
 Um estoque de **Roteiros Prontos** fornecidos por uma pessoa para a automacao transformar em **Jobs de Video** sem gerar nova pauta ou novo roteiro por LLM.
 _Avoid_: fila de prompts, temas soltos, backlog gerado pelo app
 
-**Controle Recolhido de Banco de Roteiros**:
-A apresentacao compacta do **Banco de Roteiros Prontos** na **Barra Lateral Global do Hub**, aberta apenas quando uma pessoa vai importar ou consultar roteiros.
-_Avoid_: textarea sempre aberto, painel principal de publicacao, configuracao escondida
+**Pagina de Biblioteca de Roteiros**:
+A superficie dedicada do **Hub de Revisao** para importar, consultar e acompanhar o **Banco de Roteiros Prontos** fora de modais globais.
+_Avoid_: modal como destino principal, textarea escondido na sidebar, painel principal de publicacao, configuracao escondida
 
 **Configuracao Global de Prompt Viral**:
 A configuracao recorrente do **Hub de Revisao** que orienta copywriting e retencao sem substituir o formato interno dos **Jobs de Video**.

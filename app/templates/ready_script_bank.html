@@ -1,0 +1,79 @@
+<section class="panel library-summary">
+  <div>
+    <p class="eyebrow">Biblioteca</p>
+    <h2>Banco de roteiros</h2>
+    <p>Importe e acompanhe Roteiros Prontos usados pela automação para criar Jobs de Vídeo.</p>
+  </div>
+  <div class="ready-script-bank-summary">
+    <span>{{ automation.metrics.available_ready_scripts }} disponíveis</span>
+    <span>{{ automation.metrics.needs_review_ready_scripts }} para revisar</span>
+    <span>{{ automation.metrics.scheduled_ready_scripts }} agendados</span>
+  </div>
+</section>
+
+{% if request.query_params.get("imported") or request.query_params.get("errors") %}
+<section class="panel status-banner">
+  <strong>Importação concluída</strong>
+  <p>{{ request.query_params.get("imported", "0") }} roteiro{% if request.query_params.get("imported", "0") != "1" %}s{% endif %} importado{% if request.query_params.get("imported", "0") != "1" %}s{% endif %}{% if request.query_params.get("errors") %}; {{ request.query_params.get("errors") }} bloco{% if request.query_params.get("errors") != "1" %}s{% endif %} com erro{% endif %}.</p>
+</section>
+{% endif %}
+
+<section class="ready-script-bank-layout library-workbench">
+  <section class="panel ready-script-list" aria-label="Roteiros importados">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Roteiros importados</p>
+        <h3>Fila da biblioteca</h3>
+      </div>
+      <p class="section-note">Roteiros disponíveis são consumidos pela automação antes de gerar uma pauta nova.</p>
+    </div>
+    {% for item in automation.ready_scripts %}
+    <article class="ready-script-item">
+      <div>
+        <strong>{{ item.title }}</strong>
+        <small>{{ item.created_at[:16] if item.created_at else "-" }} · {{ item.source }}</small>
+      </div>
+      <div class="ready-script-item-meta">
+        <span class="badge {{ item.status }}">
+          {% if item.status == "available" %}disponível{% elif item.status == "needs_review" %}revisar{% elif item.status == "scheduled" %}agendado{% else %}{{ item.status }}{% endif %}
+        </span>
+        {% if item.consumed_job_id %}
+        <a href="/jobs/{{ item.consumed_job_id }}">job {{ item.consumed_job_id[:8] }}</a>
+        {% endif %}
+      </div>
+      {% if item.last_skip_reason %}
+      <p class="ready-script-note">Último pulo: {{ item.last_skip_reason }}{% if item.last_similarity_score is not none %} · {{ item.last_similarity_score|round(2) }}{% endif %}</p>
+      {% endif %}
+    </article>
+    {% else %}
+    <div class="empty-state-card">
+      <strong>Nenhum roteiro importado.</strong>
+      <p>Cole um lote ou envie um arquivo para abastecer a automação.</p>
+    </div>
+    {% endfor %}
+  </section>
+
+  <form method="post" action="/automation/ready-scripts/import" enctype="multipart/form-data" class="panel sidebar-form ready-script-import-form ready-script-import-panel">
+    <input type="hidden" name="return_to" value="/library">
+    <div class="section-heading">
+      <div>
+        <p class="eyebrow">Importar</p>
+        <h3>Novo lote</h3>
+      </div>
+    </div>
+    <div class="field full">
+      <label for="library_ready_script_batch">Roteiros em texto</label>
+      <textarea id="library_ready_script_batch" name="ready_script_batch" rows="12" placeholder="Título: ...&#10;Hook: ...&#10;Loop: ...&#10;Beats: ...&#10;Payoff: ...&#10;Fechamento: ...&#10;Hashtags: ..." aria-describedby="library_ready_script_batch_help"></textarea>
+      <p id="library_ready_script_batch_help" class="field-help">Um roteiro por bloco, com rótulos como Título, Hook, Beats e Fechamento.</p>
+    </div>
+    <div class="field full">
+      <label for="library_ready_script_file">Arquivo .txt ou .md</label>
+      <input id="library_ready_script_file" name="ready_script_file" type="file" accept=".txt,.md">
+    </div>
+    <label class="checkbox-line" for="library_fact_check_confirmed">
+      <input id="library_fact_check_confirmed" type="checkbox" name="fact_check_confirmed" value="true" required>
+      Confirmo que os fatos deste lote já foram revisados.
+    </label>
+    <button type="submit" class="sidebar-button">Importar lote</button>
+  </form>
+</section>

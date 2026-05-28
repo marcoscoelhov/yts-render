@@ -159,11 +159,22 @@ def test_hub_prompt_panel_saves_and_resets_safe_template(monkeypatch, tmp_path: 
 
     page = client.get("/")
     assert page.status_code == 200
-    assert "Configurações do hub" in page.text
-    assert "Banco de roteiros" in page.text
-    assert 'data-open-ready-script-bank' in page.text
-    assert "/automation/ready-scripts/import" in page.text
+    assert 'href="/settings"' in page.text
+    assert 'href="/library"' in page.text
+    assert 'data-open-ready-script-bank' not in page.text
+    assert 'id="ready-script-bank-modal"' not in page.text
+    assert "/automation/ready-scripts/import" not in page.text
     assert 'data-open-operational-settings' in page.text
+
+    library_page = client.get("/library")
+    assert library_page.status_code == 200
+    assert "Banco de roteiros" in library_page.text
+    assert "/automation/ready-scripts/import" in library_page.text
+
+    settings_page = client.get("/settings")
+    assert settings_page.status_code == 200
+    assert "Configurações do hub" in settings_page.text
+    assert "/operations/settings" in settings_page.text
 
     custom_prompt = "Priorize gancho contraintuitivo, titulo SEO e payoff visual."
     save = client.post(

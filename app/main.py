@@ -482,6 +482,28 @@ def publication_dashboard_fragment(request: Request):
     )
 
 
+@app.get("/library", response_class=HTMLResponse)
+def ready_script_library(request: Request):
+    return templates.TemplateResponse(
+        request,
+        "library.html",
+        {
+            "settings": settings,
+        },
+    )
+
+
+@app.get("/settings", response_class=HTMLResponse)
+def operational_settings_page(request: Request):
+    return templates.TemplateResponse(
+        request,
+        "settings.html",
+        {
+            "settings": settings,
+        },
+    )
+
+
 @app.post("/automation/toggle")
 def toggle_automation(enabled: bool = Form(default=False), return_to: str | None = Form(default=None)):
     automation_service.set_automation_enabled(enabled)

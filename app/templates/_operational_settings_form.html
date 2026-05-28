@@ -1,0 +1,67 @@
+{% import "components.html" as ui %}
+<form method="post" action="/operations/settings" class="{{ settings_form_class|default('schedule-picker-card operational-settings-card') }}">
+  <input type="hidden" name="return_to" value="{{ settings_return_to|default(return_to) }}">
+  {% if settings_form_dialog|default(false) %}
+  {{ ui.dialog_head("Operação", "Configurações do hub", "operational-settings-title", "operational-settings", "Fechar configurações") }}
+  {% else %}
+  <div class="section-heading operational-settings-page-head">
+    <div>
+      <p class="eyebrow">Operação</p>
+      <h3>Configurações do hub</h3>
+    </div>
+    <p class="section-note">Ajustes operacionais não secretos. Segredos e boot continuam na configuração de ambiente.</p>
+  </div>
+  {% endif %}
+  <div class="operational-settings-grid">
+    {% for group in operational_settings.groups %}
+    <section class="operational-settings-group" aria-label="{{ group.name }}">
+      <h5>{{ group.name }}</h5>
+      <div class="settings-body">
+        {% for field in group.fields %}
+        {% if field.input_type == "select" %}
+        <div class="field">
+          <label for="ops_{{ field.key }}{% if not settings_form_dialog|default(false) %}_page{% endif %}">{{ field.label }}</label>
+          <select id="ops_{{ field.key }}{% if not settings_form_dialog|default(false) %}_page{% endif %}" name="{{ field.key }}" {% if field.description %}aria-describedby="ops_{{ field.key }}_help{% if not settings_form_dialog|default(false) %}_page{% endif %}"{% endif %}>
+            {% for option in field.options %}
+            <option value="{{ option.value }}" {% if option.value == field.value %}selected{% endif %}>{{ option.label }}</option>
+            {% endfor %}
+          </select>
+          {% if field.description %}<small id="ops_{{ field.key }}_help{% if not settings_form_dialog|default(false) %}_page{% endif %}">{{ field.description }}</small>{% endif %}
+        </div>
+        {% elif field.input_type == "checkbox" %}
+        <label class="checkbox-line operational-checkbox" for="ops_{{ field.key }}{% if not settings_form_dialog|default(false) %}_page{% endif %}">
+          <input id="ops_{{ field.key }}{% if not settings_form_dialog|default(false) %}_page{% endif %}" type="checkbox" name="{{ field.key }}" value="true" {% if field.checked %}checked{% endif %}>
+          {{ field.label }}
+        </label>
+        {% elif field.input_type == "readonly" %}
+        <div class="field operational-readonly">
+          <span>{{ field.label }}</span>
+          <strong>{{ field.value }}</strong>
+          {% if field.description %}<small>{{ field.description }}</small>{% endif %}
+        </div>
+        {% else %}
+        <div class="field">
+          <label for="ops_{{ field.key }}{% if not settings_form_dialog|default(false) %}_page{% endif %}">{{ field.label }}</label>
+          <input
+            id="ops_{{ field.key }}{% if not settings_form_dialog|default(false) %}_page{% endif %}"
+            name="{{ field.key }}"
+            type="{{ field.input_type }}"
+            value="{{ field.value }}"
+            {% if field.min is not none %}min="{{ field.min }}"{% endif %}
+            {% if field.max is not none %}max="{{ field.max }}"{% endif %}
+            {% if field.step %}step="{{ field.step }}"{% endif %}
+            {% if field.description %}aria-describedby="ops_{{ field.key }}_help{% if not settings_form_dialog|default(false) %}_page{% endif %}"{% endif %}
+          >
+          {% if field.description %}<small id="ops_{{ field.key }}_help{% if not settings_form_dialog|default(false) %}_page{% endif %}">{{ field.description }}</small>{% endif %}
+        </div>
+        {% endif %}
+        {% endfor %}
+      </div>
+    </section>
+    {% endfor %}
+  </div>
+  <div class="button-row operational-settings-actions">
+    <button type="submit" name="action" value="save">Salvar</button>
+    <button type="submit" name="action" value="reset" class="ghost">Restaurar .env</button>
+  </div>
+</form>

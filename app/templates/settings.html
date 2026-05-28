@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="panel settings-summary">
+  <div>
+    <p class="eyebrow">Configurações</p>
+    <h2>Operação do hub</h2>
+    <p>Ajuste providers, música, automação e publicação sem editar arquivos de ambiente.</p>
+  </div>
+</section>
+
+{% if request.query_params.get("settings_error") %}
+<section class="panel status-banner">
+  <strong>Configuração não salva</strong>
+  <p>{{ request.query_params.get("settings_error") }}</p>
+</section>
+{% elif request.query_params.get("settings_saved") %}
+<section class="panel status-banner">
+  <strong>Configuração salva</strong>
+  <p>As sobreposições operacionais foram aplicadas ao hub.</p>
+</section>
+{% endif %}
+
+{% set settings_form_class = "panel operational-settings-page-card" %}
+{% set settings_form_dialog = false %}
+{% set settings_return_to = "/settings" %}
+{% include "_operational_settings_form.html" %}
+{% endblock %}

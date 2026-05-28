@@ -1667,6 +1667,50 @@ pre {
   background: rgba(2, 6, 23, 0.38);
 }
 
+.library-summary,
+.settings-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+}
+
+.library-summary h2,
+.settings-summary h2 {
+  margin: 0.2rem 0 0;
+}
+
+.library-summary p:not(.eyebrow),
+.settings-summary p:not(.eyebrow) {
+  margin: 0.35rem 0 0;
+  color: var(--muted-strong);
+}
+
+.library-workbench {
+  margin-top: 1rem;
+}
+
+.library-workbench .ready-script-list {
+  max-height: none;
+  overflow: visible;
+  padding-right: 1.2rem;
+}
+
+.library-workbench .ready-script-import-panel {
+  position: sticky;
+  top: 6.5rem;
+  align-self: start;
+}
+
+.operational-settings-page-card {
+  display: grid;
+  gap: 1rem;
+}
+
+.operational-settings-page-head {
+  margin-bottom: 0;
+}
+
 .calendar-schedule-card {
   gap: 1.1rem;
   max-height: calc(100dvh - 2rem);
@@ -2318,6 +2362,15 @@ a:focus-visible {
   .operational-settings-grid,
   .operational-settings-group .settings-body {
     grid-template-columns: 1fr;
+  }
+
+  .library-summary,
+  .settings-summary {
+    display: grid;
+  }
+
+  .library-workbench .ready-script-import-panel {
+    position: static;
   }
 
   .ready-script-list {
