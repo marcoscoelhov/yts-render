@@ -1979,6 +1979,17 @@ def test_publication_dashboard_fragment_shows_ready_and_scheduled_items() -> Non
     assert "Analytics OAuth" in response.text
     assert "/automation/ready-scripts/import" not in response.text
 
+def test_home_growth_menu_anchor_renders_full_growth_center() -> None:
+    client = TestClient(app)
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert 'href="/#publication-hub"' in response.text
+    assert 'id="publication-hub" class="publication-shell"' in response.text
+    assert "Centro de Crescimento do Canal" in response.text
+    assert "Linhas editoriais por retenção" in response.text
+
 def test_record_performance_metrics_persists_artifact_and_learning_brief() -> None:
     job_id = orchestrator.create_job(
         {

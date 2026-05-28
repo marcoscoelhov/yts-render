@@ -392,6 +392,7 @@ def jobs_page(
         "jobs.html",
         {
             **list_context,
+            **publication_context,
             "workflow_summary": publication_context["metrics"],
             "youtube_integration": publication_context["integration"],
             "automation": publication_context["automation"],

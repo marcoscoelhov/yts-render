@@ -101,19 +101,7 @@
   </form>
 </dialog>
 
-<section id="publication-hub" class="publication-overview">
-  <div>
-    <p class="eyebrow">Crescimento</p>
-    <h3>Status do canal</h3>
-  </div>
-  <div class="publication-metrics">
-    <span><strong>{{ workflow_summary.awaiting_approval_count }}</strong> aguardando aprovação</span>
-    <span><strong>{{ workflow_summary.unscheduled_approved_count }}</strong> aprovados sem agenda</span>
-    <span><strong>{{ workflow_summary.scheduled_count }}</strong> programados</span>
-    <span><strong>{{ workflow_summary.failed_count }}</strong> falhas de publicação</span>
-  </div>
-  <a class="button-link ghost-link" href="/calendar">Abrir agenda</a>
-</section>
+{% include "publication_dashboard.html" %}
 
 <script>
   (() => {
