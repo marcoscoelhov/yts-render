@@ -147,9 +147,19 @@ YTS_MINIMAX_IMAGE_API_KEY=...
 
 `YTS_MINIMAX_IMAGE_API_KEY` e a **Chave Dedicada de Imagem**. Ela so e usada quando a chave de texto retorna limite de provedor, como quota, saldo, credito ou rate limit. Timeout, erro de conexao e `5xx` nao disparam troca de chave. Se nao houver chave de texto configurada, a chave dedicada de imagem e usada diretamente.
 
-### ElevenLabs para narracao
+### TTS para narracao
 
-Em execucao real, o TTS primario e ElevenLabs. Se a chamada falhar, o pipeline cai para Edge TTS e registra o fallback nos metadados da narracao.
+Em execucao real, o TTS primario pode ser Gemini TTS ou ElevenLabs. A saida continua sendo normalizada para WAV local e `raw.srt` para preservar o contrato das etapas de legendas, mixagem e render.
+
+```env
+YTS_TTS_PRIMARY_PROVIDER=gemini_tts
+YTS_GEMINI_API_KEY=...
+YTS_GEMINI_TTS_MODEL=gemini-3.1-flash-tts-preview
+YTS_GEMINI_TTS_VOICE_NAME=Kore
+YTS_GEMINI_TTS_STYLE_PROMPT="Narre em portugues brasileiro natural, com ritmo humano de documentario curto, sem soar sintetico ou robotico."
+```
+
+Se Gemini TTS falhar ou nao tiver chave, o pipeline tenta ElevenLabs; se ElevenLabs falhar, cai para Edge TTS e registra o fallback nos metadados da narracao.
 
 ```env
 YTS_TTS_PRIMARY_PROVIDER=elevenlabs
@@ -158,7 +168,7 @@ YTS_ELEVENLABS_VOICE_ID=...
 YTS_ELEVENLABS_MODEL_ID=eleven_multilingual_v2
 ```
 
-Se `YTS_TTS_PRIMARY_PROVIDER=edge_tts`, o app ignora ElevenLabs e usa Edge TTS diretamente. A saida continua sendo normalizada para WAV local e `raw.srt` para preservar o contrato das etapas de legendas, mixagem e render.
+Se `YTS_TTS_PRIMARY_PROVIDER=edge_tts`, o app ignora Gemini e ElevenLabs e usa Edge TTS diretamente.
 
 ## YouTube e OAuth
 

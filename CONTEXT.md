@@ -260,6 +260,14 @@ _Avoid_: sugestao leve, tema amplo repetido, penalidade pequena, bloqueio de rot
 Uma pontuacao composta que combina monetizacao, factualidade, retencao, metadados, alinhamento semantico de assets e repeticao para decidir **Elegibilidade Automatizada**.
 _Avoid_: aprovacao subjetiva, score unico sem criterio, decisao invisivel
 
+**Narracao Publicavel**:
+A voz principal de um **Job de Video** quando ela soa natural para o publico, tem direito comercial confirmado e nao depende de fallback tecnico de baixa qualidade.
+_Avoid_: qualquer TTS gerado, voz de teste, fallback tecnico, audio sem direito comercial
+
+**Direcao de Voz**:
+A orientacao editorial que define como a **Narracao Publicavel** deve soar, priorizando hook, retencao, payoff e fechamento sem alterar o texto aprovado do roteiro.
+_Avoid_: reescrita do roteiro, improviso do TTS, contexto visual solto, efeito de voz sem funcao editorial
+
 **Tentativa Automatizada Sem Publicacao**:
 Um **Job de Video** criado pela automacao que falha, nao chega a `ready_for_upload` ou nao atinge o **Score de Autoaprovacao**, consumindo uma tentativa diaria sem ser descartado automaticamente.
 _Avoid_: rejeicao automatica, apagar candidato, loop sem custo

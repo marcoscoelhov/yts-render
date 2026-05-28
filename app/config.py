@@ -57,7 +57,13 @@ class Settings(BaseSettings):
     music_bank_dir: Path = Path("data/music_bank")
     music_bank_auto_populate: bool = True
     allow_music_api_fallback: bool = False
-    tts_primary_provider: str = "elevenlabs"
+    tts_primary_provider: str = "gemini_tts"
+    gemini_api_key: str | None = None
+    gemini_tts_api_key: str | None = None
+    gemini_tts_model: str = "gemini-3.1-flash-tts-preview"
+    gemini_tts_voice_name: str = "Kore"
+    gemini_tts_style_prompt: str = "Narre em portugues brasileiro natural, com ritmo humano de documentario curto, sem soar sintetico ou robotico."
+    gemini_tts_timeout_sec: float = 120.0
     elevenlabs_api_key: str | None = None
     elevenlabs_base_url: str = "https://api.elevenlabs.io"
     elevenlabs_voice_id: str = "JBFqnCBsd6RMkjVDRZzb"
@@ -182,6 +188,7 @@ class Settings(BaseSettings):
         "openai_timeout_sec",
         "deepseek_timeout_sec",
         "qwen_timeout_sec",
+        "gemini_tts_timeout_sec",
     )
     @classmethod
     def validate_positive_timeout(cls, value: float) -> float:

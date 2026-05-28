@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import concurrent.futures
+import json
 from pathlib import Path
 from typing import Any
 
@@ -304,10 +305,13 @@ class AssetPipeline(BasePipeline):
 
     def step_tts(self, session: Session, job: Job, attempt: int) -> list[str]:
         script = session.scalar(select(Script).where(Script.job_id == job.job_id))
+        topic_plan = session.scalar(select(TopicPlan).where(TopicPlan.job_id == job.job_id))
         assert script
         audio_path = self.storage.job_dir(job.job_id) / "audio" / "narration.wav"
         srt_path = self.storage.job_dir(job.job_id) / "audio" / "raw.srt"
-        result = self.providers.tts.synthesize(script.full_narration, audio_path, srt_path)
+        script_artifact = self._read_job_json(job.job_id, "script.json")
+        voice_direction = self._build_voice_direction(script, topic_plan, script_artifact)
+        result = self.providers.tts.synthesize(script.full_narration, audio_path, srt_path, voice_direction)
         result = self.tts.fit_tts_duration(audio_path, srt_path, result)
         if not 35_000 <= result["duration_ms"] <= 55_000:
             raise RecoverableStepError("tts duration outside allowed range")
@@ -337,6 +341,34 @@ class AssetPipeline(BasePipeline):
         job.quality_summary = quality_summary
         self._append_event(job.job_id, "tts.generated", "succeeded", quality_summary["tts"])
         return ["audio/narration.wav", "audio/raw.srt", "narration_asset.json"]
+
+    def _build_voice_direction(self, script: Script, topic_plan: TopicPlan | None, script_artifact: dict[str, Any] | None = None) -> dict[str, Any]:
+        qa_metrics = dict(script.qa_metrics or {})
+        retention_source = script_artifact if isinstance(script_artifact, dict) else {}
+        retention_map = retention_source.get("retention_map") if isinstance(retention_source.get("retention_map"), dict) else {}
+        if not retention_map:
+            retention_map = qa_metrics.get("retention_map") if isinstance(qa_metrics.get("retention_map"), dict) else {}
+        return {
+            "canonical_topic": topic_plan.canonical_topic if topic_plan else None,
+            "angle": topic_plan.angle if topic_plan else None,
+            "hook_promise": topic_plan.hook_promise if topic_plan else None,
+            "title": script.title,
+            "hook": script.hook,
+            "body_beats": script.body_beats,
+            "ending": script.ending,
+            "estimated_duration_sec": script.estimated_duration_sec,
+            "retention_map": retention_map,
+        }
+
+    def _read_job_json(self, job_id: str, relative_path: str) -> dict[str, Any]:
+        path = self.storage.job_dir(job_id, create=False) / relative_path
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def step_subtitles(self, session: Session, job: Job, attempt: int) -> list[str]:
         self._remove_stale_quality_report(job.job_id, "subtitle_quality_report.json")

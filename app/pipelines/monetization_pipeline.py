@@ -20,7 +20,8 @@ REPETITION_HISTORY_STATUSES = {"ready_for_upload", "approved_for_publish", "publ
 
 
 class MonetizationPipeline(BasePipeline):
-    AI_GENERATED_RIGHTS_PROVIDERS = {"minimax", "minimax_music", "elevenlabs", "edge_tts", "mock", "mock_music", "synthetic_wav"}
+    AI_GENERATED_RIGHTS_PROVIDERS = {"minimax", "minimax_music", "elevenlabs", "gemini_tts", "edge_tts", "mock", "mock_music", "synthetic_wav"}
+    TECHNICAL_TTS_PROVIDERS = {"edge_tts", "espeak_ng", "synthetic_wav"}
 
     def _simple_mode_fact_skip(self, fact_pack: dict[str, Any]) -> bool:
         return self.settings.simple_shorts_mode and fact_pack.get("status") == "skipped"
@@ -163,6 +164,7 @@ class MonetizationPipeline(BasePipeline):
             hard_blockers.append("synthetic_visuals_disabled_by_policy")
         if render and render.duration_ms > 60_000:
             hard_blockers.append("shorts_duration_over_60s")
+        hard_blockers.extend(self.narration_publishability_blockers(narration))
         if not self.settings.simple_shorts_mode and channel_repetition_report["repetition_risk"] == "high" and "originality_confirmed" not in confirmations:
             hard_blockers.append("channel_repetition_high")
         hard_blockers.extend(self.automatic_publish_blockers(publish_readiness))
@@ -361,6 +363,16 @@ class MonetizationPipeline(BasePipeline):
 
     def _ai_generated_rights_confirmed(self, provider: str) -> bool:
         return bool(self.settings.ai_generated_commercial_rights_confirmed and provider.lower() in self.AI_GENERATED_RIGHTS_PROVIDERS)
+
+    def narration_publishability_blockers(self, narration: NarrationAsset | None) -> list[str]:
+        if not narration or self.settings.use_mock_providers:
+            return []
+        provider = str(narration.provider or "").lower()
+        metadata = dict(narration.provider_metadata or {})
+        fallback_provider = str(metadata.get("fallback_provider") or "").lower()
+        if provider in self.TECHNICAL_TTS_PROVIDERS or fallback_provider in self.TECHNICAL_TTS_PROVIDERS:
+            return ["technical_tts_provider_not_publishable"]
+        return []
 
     def build_ai_disclosure_report(self, assets: list[SceneAsset]) -> dict[str, Any]:
         synthetic_assets = [asset for asset in assets if asset.provider.lower() in {"minimax", "mock"}]

@@ -83,6 +83,14 @@ def test_subtitle_gate_blocks_markup_leakage() -> None:
     assert not result.passed
     assert "1:markup_or_ssml_leaked" in result.reasons
 
+def test_subtitle_gate_blocks_visual_wraps() -> None:
+    result = SubtitleGate().validate(
+        [{"idx": 1, "start_ms": 0, "end_ms": 1000, "text": "Essa legenda antiga ainda quebra em duas linhas"}],
+        coverage_ratio=1.0,
+    )
+    assert not result.passed
+    assert "1:subtitle_wraps_multiple_lines" in result.reasons
+
 def test_subtitle_gate_rejects_large_timing_drift() -> None:
     result = SubtitleGate().validate(
         [{"idx": 1, "start_ms": 0, "end_ms": 1000, "text": "Texto bom"}],
@@ -944,7 +952,8 @@ def test_subtitle_cue_split_preserves_timing_and_token_coverage() -> None:
     assert items[-1]["token_end"] == 22
     assert " ".join(item["text"] for item in items) == cue["text"]
     for item in items:
-        assert len(wrap_caption(item["text"], max_chars=42).splitlines()) <= 2
+        assert len(word_tokens(item["text"])) <= SUBTITLE_MAX_WORDS
+        assert len(wrap_caption(item["text"], max_chars=SUBTITLE_MAX_CHARS, max_lines=SUBTITLE_MAX_LINES).splitlines()) == 1
 
 def test_topic_plan_normalization_fills_missing_required_fields() -> None:
     request = SimpleNamespace(seed_theme="buracos negros", requested_angle=None)
@@ -1019,8 +1028,16 @@ def test_subtitle_split_enforces_word_limit_for_long_cues() -> None:
     assert len(items) > 1
     assert " ".join(item["text"] for item in items) == cue["text"]
     for item in items:
-        assert len(word_tokens(item["text"])) <= 14
-        assert len(wrap_caption(item["text"], max_chars=42).splitlines()) <= 2
+        assert len(word_tokens(item["text"])) <= SUBTITLE_MAX_WORDS
+        assert len(wrap_caption(item["text"], max_chars=SUBTITLE_MAX_CHARS, max_lines=SUBTITLE_MAX_LINES).splitlines()) == 1
+
+def test_subtitle_ass_render_disables_automatic_wrapping() -> None:
+    ass = orchestrator.asset_pipeline.subtitles.render_ass(
+        [{"idx": 1, "start_ms": 0, "end_ms": 1000, "text": "legenda curta em uma linha"}]
+    )
+
+    assert "WrapStyle: 2" in ass
+    assert "\\N" not in ass
 
 def test_subtitle_boundary_repair_moves_words_across_cues() -> None:
     items = [
@@ -1032,11 +1049,11 @@ def test_subtitle_boundary_repair_moves_words_across_cues() -> None:
 
     repaired = orchestrator.asset_pipeline.subtitles.repair_subtitle_item_boundaries(items)
 
-    assert repaired[0]["text"].endswith("para quem")
-    assert repaired[1]["text"].startswith("assiste.")
-    assert repaired[2]["text"].endswith("Por isso")
-    assert repaired[3]["text"].startswith("oceanos")
+    assert "concreto para quem" in [item["text"] for item in repaired]
+    assert "aleatorio. Por isso" in [item["text"] for item in repaired]
     assert SubtitleGate().validate(repaired, 1.0).passed
+    for item in repaired:
+        assert len(wrap_caption(item["text"], max_chars=SUBTITLE_MAX_CHARS, max_lines=SUBTITLE_MAX_LINES).splitlines()) == 1
 
 def test_subtitle_boundary_repair_can_push_weak_ending_into_next_chunk() -> None:
     items = [
@@ -1046,8 +1063,8 @@ def test_subtitle_boundary_repair_can_push_weak_ending_into_next_chunk() -> None
 
     repaired = orchestrator.asset_pipeline.subtitles.repair_subtitle_item_boundaries(items)
 
-    assert repaired[0]["text"].endswith("máximo")
-    assert repaired[1]["text"] == "para caber."
+    assert repaired[-2]["text"] == "contorcendo ao máximo"
+    assert repaired[-1]["text"] == "para caber."
     assert SubtitleGate().validate(repaired, 1.0).passed
 
 def test_subtitle_boundary_repair_can_pull_words_from_next_chunk() -> None:
@@ -1058,8 +1075,8 @@ def test_subtitle_boundary_repair_can_pull_words_from_next_chunk() -> None:
 
     repaired = orchestrator.asset_pipeline.subtitles.repair_subtitle_item_boundaries(items)
 
-    assert repaired[0]["text"] == "predadores e muda de cor em segundos."
-    assert len(repaired) == 1
+    assert repaired[0]["text"] == "predadores e muda de cor"
+    assert repaired[1]["text"] == "em segundos."
     assert SubtitleGate().validate(repaired, 1.0).passed
 
 def test_tts_duration_fit_compresses_audio_and_subtitle_timings(tmp_path: Path) -> None:
@@ -1366,6 +1383,63 @@ def test_rights_registry_auto_confirms_ai_generated_assets(monkeypatch) -> None:
     assert report["evidence_required_count"] == 0
     assert report["review_required_count"] == 0
     assert {entry["license_source"] for entry in report["entries"]} == {"YTS_AI_GENERATED_COMMERCIAL_RIGHTS_CONFIRMED"}
+
+def test_narration_publishability_blocks_technical_tts_outside_mock(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.settings, "use_mock_providers", False)
+
+    blockers = orchestrator.monetization_pipeline.narration_publishability_blockers(
+        SimpleNamespace(provider="edge_tts", provider_metadata={"fallback_used": True})
+    )
+
+    assert blockers == ["technical_tts_provider_not_publishable"]
+
+def test_narration_publishability_allows_gemini_tts(monkeypatch) -> None:
+    monkeypatch.setattr(orchestrator.settings, "use_mock_providers", False)
+
+    blockers = orchestrator.monetization_pipeline.narration_publishability_blockers(
+        SimpleNamespace(provider="gemini_tts", provider_metadata={"fallback_used": False})
+    )
+
+    assert blockers == []
+
+def test_voice_direction_uses_script_hook_and_retention_artifact(tmp_path: Path) -> None:
+    job_id = "voice-direction-job"
+    artifact_dir = Path(os.environ["YTS_DATA_DIR"]) / "artifacts" / job_id
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / "script.json").write_text(
+        json.dumps(
+            {
+                "retention_map": {
+                    "visual_hook": "Segurar o primeiro segundo.",
+                    "turn_or_payoff": "A virada aparece tarde.",
+                    "loop_close": "O final muda o começo.",
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    script = SimpleNamespace(
+        job_id=job_id,
+        title="Polvos parecem alienigenas",
+        hook="Cada braço parece pensar sozinho.",
+        body_beats=["O braço reage antes da cabeça."],
+        ending="O começo muda quando o braço decide sozinho.",
+        estimated_duration_sec=40,
+        qa_metrics={},
+    )
+    topic_plan = SimpleNamespace(canonical_topic="polvos", angle="neurobiologia", hook_promise="o braço decide antes")
+
+    direction = orchestrator.asset_pipeline._build_voice_direction(
+        script,
+        topic_plan,
+        orchestrator.asset_pipeline._read_job_json(job_id, "script.json"),
+    )
+
+    assert direction["hook"] == "Cada braço parece pensar sozinho."
+    assert direction["canonical_topic"] == "polvos"
+    assert direction["retention_map"]["visual_hook"] == "Segurar o primeiro segundo."
+    assert direction["retention_map"]["loop_close"] == "O final muda o começo."
 
 def test_scene_token_coverage_normalization_rebuilds_contiguous_spans() -> None:
     scenes = [

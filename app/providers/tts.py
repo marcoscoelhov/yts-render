@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import audioop
+import base64
 import math
+import re
 import shutil
 import subprocess
 import tempfile
@@ -22,7 +24,7 @@ from app.utils import parse_srt, word_tokens, wrap_caption
 class LocalSpeechFallbackProvider:
     voice = "pt-BR-FranciscaNeural"
 
-    def synthesize(self, text: str, audio_path: Path, srt_path: Path) -> dict[str, Any]:
+    def synthesize(self, text: str, audio_path: Path, srt_path: Path, context: dict[str, Any] | None = None) -> dict[str, Any]:
         audio_path.parent.mkdir(parents=True, exist_ok=True)
         mode = self._write_speech_audio(text, audio_path)
         duration_ms = self._measure_audio_ms(audio_path)
@@ -289,7 +291,7 @@ class EdgeTTSProvider(LocalSpeechFallbackProvider):
             },
         }
 
-    def synthesize(self, text: str, audio_path: Path, srt_path: Path) -> dict[str, Any]:
+    def synthesize(self, text: str, audio_path: Path, srt_path: Path, context: dict[str, Any] | None = None) -> dict[str, Any]:
         last_error: Exception | None = None
         for attempt in range(1, 4):
             try:
@@ -325,10 +327,10 @@ class EdgeTTSProvider(LocalSpeechFallbackProvider):
 
 
 class ElevenLabsTTSProvider(EdgeTTSProvider):
-    def synthesize(self, text: str, audio_path: Path, srt_path: Path) -> dict[str, Any]:
+    def synthesize(self, text: str, audio_path: Path, srt_path: Path, context: dict[str, Any] | None = None) -> dict[str, Any]:
         settings = get_settings()
         if not settings.elevenlabs_api_key:
-            fallback = super().synthesize(text, audio_path, srt_path)
+            fallback = super().synthesize(text, audio_path, srt_path, context)
             metadata = fallback.setdefault("provider_metadata", {})
             metadata["fallback_used"] = True
             metadata["fallback_from_provider"] = "elevenlabs"
@@ -344,7 +346,7 @@ class ElevenLabsTTSProvider(EdgeTTSProvider):
                 if attempt < 2:
                     time.sleep(1.5 * attempt)
                     continue
-        fallback = super().synthesize(text, audio_path, srt_path)
+        fallback = super().synthesize(text, audio_path, srt_path, context)
         metadata = fallback.setdefault("provider_metadata", {})
         metadata["fallback_used"] = True
         metadata["fallback_from_provider"] = "elevenlabs"
@@ -432,3 +434,164 @@ class ElevenLabsTTSProvider(EdgeTTSProvider):
             capture_output=True,
             text=True,
         )
+
+
+class GeminiTTSProvider(ElevenLabsTTSProvider):
+    def synthesize(self, text: str, audio_path: Path, srt_path: Path, context: dict[str, Any] | None = None) -> dict[str, Any]:
+        settings = get_settings()
+        api_key = settings.gemini_tts_api_key or settings.gemini_api_key
+        if not api_key:
+            fallback = super().synthesize(text, audio_path, srt_path, context)
+            self._mark_gemini_fallback(fallback, "missing YTS_GEMINI_TTS_API_KEY or YTS_GEMINI_API_KEY")
+            return fallback
+        last_error: Exception | None = None
+        for attempt in range(1, 3):
+            try:
+                return self._run_gemini(text, audio_path, srt_path, settings, api_key, context)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(1.5 * attempt)
+                    continue
+        fallback = super().synthesize(text, audio_path, srt_path, context)
+        self._mark_gemini_fallback(fallback, f"gemini_tts failed after 2 attempts: {last_error}")
+        return fallback
+
+    def _mark_gemini_fallback(self, fallback: dict[str, Any], reason: str) -> None:
+        metadata = fallback.setdefault("provider_metadata", {})
+        metadata["fallback_used"] = True
+        metadata["fallback_from_provider"] = "gemini_tts"
+        metadata["fallback_provider"] = fallback.get("provider")
+        metadata["fallback_reason"] = reason
+
+    def _run_gemini(self, text: str, audio_path: Path, srt_path: Path, settings: Any, api_key: str, context: dict[str, Any] | None) -> dict[str, Any]:
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_bytes, mime_type = self._generate_gemini_audio_bytes(text, settings, api_key, context)
+        self._write_gemini_audio(audio_bytes, mime_type, audio_path)
+        self._apply_final_loudness_normalization(audio_path)
+        duration_ms = self._measure_audio_ms(audio_path)
+        cues = self._build_cues(text, duration_ms)
+        srt_path.write_text(self._render_srt(cues), encoding="utf-8")
+        return {
+            "provider": "gemini_tts",
+            "voice": settings.gemini_tts_voice_name,
+            "audio_uri": audio_path.resolve().as_uri(),
+            "raw_subtitles_uri": srt_path.resolve().as_uri(),
+            "duration_ms": duration_ms,
+            "sample_rate_hz": 24000,
+            "channels": 1,
+            "provider_metadata": {
+                "mode": "gemini_tts",
+                "model_id": settings.gemini_tts_model,
+                "voice_name": settings.gemini_tts_voice_name,
+                "mime_type": mime_type,
+                "voice_direction_used": bool(context),
+                "voice_direction": self._metadata_voice_direction(context),
+                "fallback_used": False,
+                "loudness_normalized": True,
+                "loudness_target_lufs": -16.0,
+                "true_peak_limit_db": -1.5,
+                "envelope_normalized": False,
+            },
+        }
+
+    def _generate_gemini_audio_bytes(self, text: str, settings: Any, api_key: str, context: dict[str, Any] | None) -> tuple[bytes, str]:
+        from google import genai
+        from google.genai import types
+
+        prompt = self._build_gemini_prompt(text, settings, context)
+        client = genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=int(float(settings.gemini_tts_timeout_sec) * 1000)))
+        response = client.models.generate_content(
+            model=settings.gemini_tts_model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_modalities=["AUDIO"],
+                speech_config=types.SpeechConfig(
+                    voice_config=types.VoiceConfig(
+                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=settings.gemini_tts_voice_name)
+                    )
+                )
+            ),
+        )
+        for candidate in response.candidates or []:
+            content = getattr(candidate, "content", None)
+            for part in getattr(content, "parts", []) or []:
+                inline_data = getattr(part, "inline_data", None)
+                data = getattr(inline_data, "data", None)
+                if data:
+                    audio_bytes = base64.b64decode(data) if isinstance(data, str) else bytes(data)
+                    return audio_bytes, str(getattr(inline_data, "mime_type", "") or "audio/L16;rate=24000")
+        raise RuntimeError("gemini_tts returned no audio data")
+
+    def _build_gemini_prompt(self, text: str, settings: Any, context: dict[str, Any] | None) -> str:
+        direction = context or {}
+        retention_map = direction.get("retention_map") if isinstance(direction.get("retention_map"), dict) else {}
+        retention_lines = []
+        for key in ("visual_hook", "proof_or_tension", "escalation", "turn_or_payoff", "loop_close"):
+            value = retention_map.get(key)
+            if value:
+                retention_lines.append(f"- {key}: {value}")
+        blocks = [
+            "### PERFIL DA VOZ",
+            str(settings.gemini_tts_style_prompt),
+            "A narração deve soar humana, brasileira e editorialmente intencional, sem tom de propaganda ou leitura robotica.",
+            "",
+            "### PRIORIDADE EDITORIAL",
+            "1. O hook deve segurar atenção nos primeiros segundos com urgência controlada.",
+            "2. A retenção vem antes de dramatização: mantenha tensão crescente sem exagerar.",
+            "3. O payoff deve ganhar ênfase clara quando a virada aparecer.",
+            "4. O fechamento deve recontextualizar o começo e provocar replay mental.",
+            "5. Preserve exatamente o texto aprovado; não adicione, remova ou reescreva palavras.",
+        ]
+        if direction:
+            blocks.extend(
+                [
+                    "",
+                    "### CONTEXTO DO ROTEIRO",
+                    f"Tema: {direction.get('canonical_topic') or 'nao informado'}",
+                    f"Angulo: {direction.get('angle') or 'nao informado'}",
+                    f"Titulo: {direction.get('title') or 'nao informado'}",
+                    f"Hook: {direction.get('hook') or 'nao informado'}",
+                    f"Payoff ou fechamento: {direction.get('ending') or 'nao informado'}",
+                    f"Duracao alvo: {direction.get('estimated_duration_sec') or 'nao informada'} segundos",
+                ]
+            )
+        if retention_lines:
+            blocks.extend(["", "### MAPA DE RETENCAO", *retention_lines])
+        blocks.extend(["", "### TEXTO EXATO DA NARRACAO", text])
+        return "\n".join(blocks)
+
+    def _metadata_voice_direction(self, context: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not context:
+            return None
+        retention_map = context.get("retention_map") if isinstance(context.get("retention_map"), dict) else {}
+        return {
+            "title": context.get("title"),
+            "hook": context.get("hook"),
+            "ending": context.get("ending"),
+            "canonical_topic": context.get("canonical_topic"),
+            "retention_roles": [key for key in ("visual_hook", "proof_or_tension", "escalation", "turn_or_payoff", "loop_close") if retention_map.get(key)],
+        }
+
+    def _write_gemini_audio(self, audio_bytes: bytes, mime_type: str, output_path: Path) -> None:
+        normalized_mime = mime_type.lower()
+        if "wav" in normalized_mime:
+            temp_path = output_path.with_suffix(".gemini-source.wav")
+            try:
+                temp_path.write_bytes(audio_bytes)
+                self._normalize_elevenlabs_audio(temp_path, output_path)
+            finally:
+                temp_path.unlink(missing_ok=True)
+            return
+        sample_rate = self._sample_rate_from_mime(mime_type)
+        with wave.open(str(output_path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(audio_bytes)
+
+    def _sample_rate_from_mime(self, mime_type: str) -> int:
+        match = re.search(r"(?:rate|sample_rate)=(\d+)", mime_type, flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        return 24000

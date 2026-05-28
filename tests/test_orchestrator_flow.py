@@ -1135,6 +1135,97 @@ def test_elevenlabs_tts_generates_normalized_wav_and_local_srt(tmp_path: Path, m
     assert captured["json"]["model_id"] == "eleven_multilingual_v2"
     assert "Texto curto" in srt_path.read_text(encoding="utf-8")
 
+def test_gemini_tts_generates_wav_and_local_srt(tmp_path: Path, monkeypatch) -> None:
+    from app.providers.tts import GeminiTTSProvider
+
+    settings = SimpleNamespace(
+        gemini_api_key="gemini-key",
+        gemini_tts_api_key=None,
+        gemini_tts_model="gemini-3.1-flash-tts-preview",
+        gemini_tts_voice_name="Kore",
+        gemini_tts_style_prompt="Narre em portugues brasileiro natural.",
+        gemini_tts_timeout_sec=120.0,
+    )
+    pcm = b"\0\0" * 24_000
+
+    monkeypatch.setattr("app.providers.tts.get_settings", lambda: settings)
+    monkeypatch.setattr(GeminiTTSProvider, "_generate_gemini_audio_bytes", lambda self, text, configured, api_key, context: (pcm, "audio/L16;rate=24000"))
+    monkeypatch.setattr(GeminiTTSProvider, "_apply_final_loudness_normalization", lambda self, audio_path: None)
+
+    audio_path = tmp_path / "voice.wav"
+    srt_path = tmp_path / "voice.srt"
+    result = GeminiTTSProvider().synthesize("Texto curto em portugues brasileiro.", audio_path, srt_path)
+
+    assert result["provider"] == "gemini_tts"
+    assert result["voice"] == "Kore"
+    assert result["duration_ms"] == 1000
+    assert result["provider_metadata"]["model_id"] == "gemini-3.1-flash-tts-preview"
+    assert result["provider_metadata"]["fallback_used"] is False
+    assert "Texto curto" in srt_path.read_text(encoding="utf-8")
+    with wave.open(str(audio_path), "rb") as wav_file:
+        assert wav_file.getframerate() == 24000
+        assert wav_file.getnchannels() == 1
+
+def test_gemini_tts_prompt_prioritizes_hook_and_retention() -> None:
+    from app.providers.tts import GeminiTTSProvider
+
+    settings = SimpleNamespace(
+        gemini_tts_style_prompt="Narre em portugues brasileiro natural.",
+    )
+    prompt = GeminiTTSProvider()._build_gemini_prompt(
+        "O polvo não pensa só com a cabeça.",
+        settings,
+        {
+            "canonical_topic": "polvos",
+            "angle": "neurobiologia curiosa",
+            "title": "Polvos parecem alienigenas",
+            "hook": "O polvo não pensa só com a cabeça.",
+            "ending": "O começo vira outra coisa quando o braço decide sozinho.",
+            "estimated_duration_sec": 40,
+            "retention_map": {
+                "visual_hook": "O hook precisa parecer impossível no primeiro segundo.",
+                "turn_or_payoff": "A virada mostra o braço processando sinais.",
+                "loop_close": "O fechamento aponta de volta para o começo.",
+            },
+        },
+    )
+
+    assert "O hook deve segurar atenção" in prompt
+    assert "A retenção vem antes de dramatização" in prompt
+    assert "O payoff deve ganhar ênfase" in prompt
+    assert "O fechamento deve recontextualizar" in prompt
+    assert "visual_hook: O hook precisa parecer impossível" in prompt
+    assert "Preserve exatamente o texto aprovado" in prompt
+
+def test_gemini_tts_falls_back_to_elevenlabs_when_primary_is_not_configured(tmp_path: Path, monkeypatch) -> None:
+    from app.providers.tts import ElevenLabsTTSProvider, GeminiTTSProvider
+
+    settings = SimpleNamespace(gemini_api_key=None, gemini_tts_api_key=None)
+
+    def fake_elevenlabs_synthesize(self, text: str, audio_path: Path, srt_path: Path, context: dict[str, object] | None = None) -> dict[str, object]:
+        audio_path.write_bytes(b"elevenlabs")
+        srt_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nelevenlabs\n", encoding="utf-8")
+        return {
+            "provider": "elevenlabs",
+            "voice": "voice-ptbr",
+            "audio_uri": audio_path.resolve().as_uri(),
+            "raw_subtitles_uri": srt_path.resolve().as_uri(),
+            "duration_ms": 1000,
+            "sample_rate_hz": 24000,
+            "channels": 1,
+            "provider_metadata": {"fallback_used": False},
+        }
+
+    monkeypatch.setattr("app.providers.tts.get_settings", lambda: settings)
+    monkeypatch.setattr(ElevenLabsTTSProvider, "synthesize", fake_elevenlabs_synthesize)
+
+    result = GeminiTTSProvider().synthesize("Texto", tmp_path / "voice.wav", tmp_path / "voice.srt")
+
+    assert result["provider"] == "elevenlabs"
+    assert result["provider_metadata"]["fallback_used"] is True
+    assert result["provider_metadata"]["fallback_from_provider"] == "gemini_tts"
+    assert result["provider_metadata"]["fallback_provider"] == "elevenlabs"
+
 def test_elevenlabs_tts_falls_back_to_edge_tts_when_primary_fails(tmp_path: Path, monkeypatch) -> None:
     from app.providers.tts import EdgeTTSProvider, ElevenLabsTTSProvider
 
