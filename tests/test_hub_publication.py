@@ -1871,85 +1871,69 @@ def test_youtube_load_credentials_normalizes_aware_expiry_for_google_auth(monkey
     assert credentials.token == "token-refreshed"
     assert credentials.expiry.tzinfo is None
 
-def test_publication_dashboard_fragment_shows_ready_and_scheduled_items() -> None:
+def test_publication_dashboard_fragment_focuses_on_growth_analytics() -> None:
     client = TestClient(app)
-    approved_job_id = "publication-dashboard-approved"
     scheduled_job_id = "publication-dashboard-scheduled"
+    published_job_id = "publication-dashboard-published"
     with SessionLocal() as session:
+        _create_basic_job(
+            session,
+            job_id=scheduled_job_id,
+            status="approved_for_publish",
+            seed_theme="Morcegos",
+        )
+        session.add(
+            Script(
+                script_id="publication-dashboard-scheduled-script",
+                job_id=scheduled_job_id,
+                schema_version="1.0.0",
+                content_hash="dashboard-scheduled-script",
+                title="Morcegos enxergam com o som",
+                hook="Eles mapeiam o ar no escuro.",
+                body_beats=["O eco vira distância e forma."],
+                ending="É quase uma visão construída em tempo real.",
+                cta=None,
+                full_narration="Eles mapeiam o ar no escuro. O eco vira distância e forma. É quase uma visão construída em tempo real.",
+                estimated_duration_sec=37,
+                key_facts=[],
+                token_count=18,
+                language="pt-BR",
+                qa_metrics={},
+                prompt_version="test",
+            )
+        )
+        session.add(
+            PublicationSchedule(
+                schedule_id="publication-dashboard-scheduled-row",
+                job_id=scheduled_job_id,
+                schema_version="1.0.0",
+                content_hash="dashboard-scheduled-row",
+                scheduled_for_utc=datetime(2099, 1, 2, 17, 0, tzinfo=UTC),
+                timezone="America/Sao_Paulo",
+                youtube_visibility="private",
+                status="scheduled",
+            )
+        )
+        _create_basic_job(
+            session,
+            job_id=published_job_id,
+            status="published",
+            seed_theme="Polvos",
+        )
         session.add_all(
             [
-                Job(
-                    job_id=approved_job_id,
-                    schema_version="1.0.0",
-                    content_hash="dashboard-approved",
-                    status="approved_for_publish",
-                    niche_id="curiosidades",
-                    language="pt-BR",
-                    target_duration_sec=45,
-                    topic_request_id="publication-dashboard-approved-request",
-                    artifact_index={},
-                ),
-                TopicRequest(
-                    topic_request_id="publication-dashboard-approved-request",
-                    job_id=approved_job_id,
-                    schema_version="1.0.0",
-                    content_hash="dashboard-approved-request",
-                    niche_id="curiosidades",
-                    seed_theme="Lulas gigantes",
-                    language="pt-BR",
-                    target_duration_sec=45,
-                ),
                 Script(
-                    script_id="publication-dashboard-approved-script",
-                    job_id=approved_job_id,
+                    script_id="publication-dashboard-published-script",
+                    job_id=published_job_id,
                     schema_version="1.0.0",
-                    content_hash="dashboard-approved-script",
-                    title="Lulas gigantes somem por um motivo",
-                    hook="Elas aparecem e desaparecem do nada.",
-                    body_beats=["O habitat profundo limita encontros humanos."],
-                    ending="Por isso cada imagem delas parece impossível.",
+                    content_hash="dashboard-published-script",
+                    title="Polvos prendem atenção até o fim",
+                    hook="O polvo muda de estratégia em segundos.",
+                    body_beats=["A virada visual segura replay."],
+                    ending="Esse padrão merece novas variações.",
                     cta=None,
-                    full_narration="Elas aparecem e desaparecem do nada. O habitat profundo limita encontros humanos. Por isso cada imagem delas parece impossível.",
-                    estimated_duration_sec=39,
-                    key_facts=[],
-                    token_count=20,
-                    language="pt-BR",
-                    qa_metrics={},
-                    prompt_version="test",
-                ),
-                Job(
-                    job_id=scheduled_job_id,
-                    schema_version="1.0.0",
-                    content_hash="dashboard-scheduled",
-                    status="approved_for_publish",
-                    niche_id="curiosidades",
-                    language="pt-BR",
-                    target_duration_sec=45,
-                    topic_request_id="publication-dashboard-scheduled-request",
-                    artifact_index={},
-                ),
-                TopicRequest(
-                    topic_request_id="publication-dashboard-scheduled-request",
-                    job_id=scheduled_job_id,
-                    schema_version="1.0.0",
-                    content_hash="dashboard-scheduled-request",
-                    niche_id="curiosidades",
-                    seed_theme="Morcegos",
-                    language="pt-BR",
-                    target_duration_sec=45,
-                ),
-                Script(
-                    script_id="publication-dashboard-scheduled-script",
-                    job_id=scheduled_job_id,
-                    schema_version="1.0.0",
-                    content_hash="dashboard-scheduled-script",
-                    title="Morcegos enxergam com o som",
-                    hook="Eles mapeiam o ar no escuro.",
-                    body_beats=["O eco vira distância e forma."],
-                    ending="É quase uma visão construída em tempo real.",
-                    cta=None,
-                    full_narration="Eles mapeiam o ar no escuro. O eco vira distância e forma. É quase uma visão construída em tempo real.",
-                    estimated_duration_sec=37,
+                    full_narration="O polvo muda de estratégia em segundos. A virada visual segura replay. Esse padrão merece novas variações.",
+                    estimated_duration_sec=35,
                     key_facts=[],
                     token_count=18,
                     language="pt-BR",
@@ -1957,14 +1941,17 @@ def test_publication_dashboard_fragment_shows_ready_and_scheduled_items() -> Non
                     prompt_version="test",
                 ),
                 PublicationSchedule(
-                    schedule_id="publication-dashboard-scheduled-row",
-                    job_id=scheduled_job_id,
+                    schedule_id="publication-dashboard-published-row",
+                    job_id=published_job_id,
                     schema_version="1.0.0",
-                    content_hash="dashboard-scheduled-row",
-                    scheduled_for_utc=datetime(2099, 1, 2, 17, 0, tzinfo=UTC),
+                    content_hash="dashboard-published-row",
+                    scheduled_for_utc=datetime(2099, 5, 20, 14, 0, tzinfo=UTC),
                     timezone="America/Sao_Paulo",
-                    youtube_visibility="private",
-                    status="scheduled",
+                    youtube_visibility="public",
+                    status="published",
+                    published_at=datetime(2099, 5, 20, 14, 15, tzinfo=UTC),
+                    youtube_video_id="yt-growth-published",
+                    youtube_url="https://www.youtube.com/watch?v=yt-growth-published",
                 ),
             ]
         )
@@ -1974,9 +1961,17 @@ def test_publication_dashboard_fragment_shows_ready_and_scheduled_items() -> Non
 
     assert response.status_code == 200
     assert "Centro de Crescimento do Canal" in response.text
-    assert "Morcegos enxergam com o som" in response.text
-    assert "14:00" in response.text
-    assert "Analytics OAuth" in response.text
+    assert "Linhas editoriais por retenção" in response.text
+    assert "Base de análise" in response.text
+    assert "Polvos prendem atenção até o fim" in response.text
+    assert "Sincronizar Analytics" in response.text
+    assert "Morcegos enxergam com o som" not in response.text
+    assert "Ciclo diário" not in response.text
+    assert "Estado da integração" not in response.text
+    assert "TikTok" not in response.text
+    assert "Aprovados sem agenda" not in response.text
+    assert "Agenda ativa" not in response.text
+    assert "Para agendar" not in response.text
     assert "/automation/ready-scripts/import" not in response.text
 
 def test_home_growth_menu_links_to_separate_growth_center() -> None:

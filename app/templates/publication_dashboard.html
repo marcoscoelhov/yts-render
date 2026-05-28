@@ -1,4 +1,3 @@
-{% import "components.html" as ui %}
 {% set growth_return_to = growth_return_to|default('/publication-hub') %}
 <section id="publication-hub" class="publication-shell" hx-get="/publication-hub/fragment" hx-trigger="every 30s" hx-swap="outerHTML">
   <section class="panel publication-hero">
@@ -60,8 +59,8 @@
       <h3>Coletar dados confiáveis</h3>
       <p class="publication-note">O relatório por IA entra depois que houver snapshots suficientes. Neste corte, o centro separa Analytics de publicação e salva a base factual.</p>
       <div class="stats-grid compact">
-        <div><strong>Publicação</strong><span>{% if integration.publish_connected %}conectada{% else %}pendente{% endif %}</span></div>
-        <div><strong>Analytics</strong><span>{% if integration.analytics_connected %}conectado{% else %}reconectar OAuth{% endif %}</span></div>
+        <div><strong>Fonte de dados</strong><span>{% if integration.analytics_connected %}Analytics conectado{% else %}Analytics pendente{% endif %}</span></div>
+        <div><strong>Sem leitura</strong><span>{{ growth.jobs_missing_analytics }} vídeos</span></div>
         <div><strong>Última coleta</strong><span>{{ growth.last_snapshot_at[:16] if growth.last_snapshot_at else "-" }}</span></div>
         <div><strong>Janela</strong><span>{{ growth.window_days }} dias</span></div>
       </div>
@@ -77,174 +76,24 @@
       {% endif %}
       {% if integration.publish_mode == "api" and integration.api_enabled and integration.client_configured and not integration.analytics_connected %}
       <div class="button-row">
-        <a class="button-link" href="/youtube/connect">Reconectar OAuth</a>
+        <a class="button-link" href="/youtube/connect">Autorizar leitura de métricas</a>
       </div>
       {% endif %}
     </article>
   </section>
 
-  <section class="panel automation-panel">
-    <div class="section-heading">
-      <div>
-        <p class="eyebrow">Automação</p>
-        <h3>Ciclo diário</h3>
-      </div>
-      <form method="post" action="/automation/toggle" class="inline-form">
-        <input type="hidden" name="return_to" value="{{ growth_return_to }}">
-        <input type="hidden" name="enabled" value="{% if automation.metrics.enabled %}false{% else %}true{% endif %}">
-        <button type="submit" class="{% if automation.metrics.enabled %}ghost{% endif %}">
-          {% if automation.metrics.enabled %}Pausar{% else %}Ativar{% endif %}
-        </button>
-      </form>
-    </div>
-    <div class="stats-grid compact">
-      <div><strong>Automação</strong><span>{% if automation.metrics.enabled %}ligada{% else %}pausada{% endif %}</span></div>
-      <div><strong>Roteiros</strong><span>{{ automation.metrics.available_ready_scripts }} disponíveis</span></div>
-      <div><strong>Ciclo</strong><span>{{ automation.settings.run_time }} · {{ automation.settings.timezone }}</span></div>
-      <div><strong>Publicação</strong><span>{{ automation.settings.publish_time }} · {{ automation.settings.fill_window_days }} dias</span></div>
-    </div>
-    {% if automation.last_run %}
-    <div class="publication-list">
-      <div class="publication-item">
-        <strong>Último ciclo: {{ automation.last_run.status }}</strong>
-        <p>{{ automation.last_run.local_date }} · {{ automation.last_run.attempts_used }} tentativa{% if automation.last_run.attempts_used != 1 %}s{% endif %} · data alvo {{ automation.last_run.target_publish_date or "-" }}</p>
-        {% if automation.last_run.result_job_id %}
-        <small><a href="/jobs/{{ automation.last_run.result_job_id }}">abrir job {{ automation.last_run.result_job_id[:8] }}</a></small>
-        {% elif automation.last_run.error %}
-        <small>{{ automation.last_run.error }}</small>
-        {% elif automation.last_run.skipped_reason %}
-        <small>{{ automation.last_run.skipped_reason }}</small>
-        {% endif %}
-      </div>
-      {% for attempt in automation.last_attempts %}
-      <div class="publication-item">
-        <strong>Tentativa {{ attempt.attempt_number }} · {{ attempt.status }}</strong>
-        <p>{{ attempt.source }}{% if attempt.score is not none %} · score {{ attempt.score }}{% endif %}</p>
-        {% if attempt.job_id %}<small><a href="/jobs/{{ attempt.job_id }}">{{ attempt.job_id[:8] }}</a></small>{% endif %}
-        {% if attempt.error %}<small>{{ attempt.error }}</small>{% endif %}
-      </div>
-      {% endfor %}
-    </div>
-    {% endif %}
-    <div class="button-row">
-      <form method="post" action="/automation/run">
-        <input type="hidden" name="return_to" value="{{ growth_return_to }}">
-        <input type="hidden" name="force" value="true">
-        <button type="submit" class="ghost">Rodar ciclo agora</button>
-      </form>
-    </div>
-  </section>
-
-  <section class="publication-grid">
+  <section class="publication-grid growth-grid">
     <article class="panel publication-panel">
-      <p class="eyebrow">Estado da integração</p>
-      <h3>Canal</h3>
-      <div class="stats-grid compact">
-        <div><strong>Modo de envio</strong><span>{{ integration.publish_mode }}</span></div>
-        <div><strong>API habilitada</strong><span>{{ integration.api_enabled }}</span></div>
-        <div><strong>Publicação OAuth</strong><span>{{ integration.publish_connected }}</span></div>
-        <div><strong>Analytics OAuth</strong><span>{{ integration.analytics_connected }}</span></div>
-        <div><strong>Canal</strong><span>{{ integration.channel_id or "-" }}</span></div>
-      </div>
-      <div class="button-row">
-        {% if integration.publish_mode == "api" and integration.api_enabled and integration.client_configured %}
-        {% if integration.connected %}
-        <form method="post" action="/youtube/disconnect">
-          <button type="submit" class="ghost">Desconectar canal</button>
-        </form>
-        {% else %}
-        <a class="button-link" href="/youtube/connect">Conectar canal</a>
-        {% endif %}
-        {% endif %}
-        <a class="button-link ghost-link" href="/calendar">Abrir calendário</a>
-      </div>
-      {% if integration.missing_items %}
-      <h4>O que falta</h4>
-      <div class="publication-list">
-        {% for item in integration.missing_items %}
-        <div class="publication-item">
-          <strong>Configuração pendente</strong>
-          <p>{{ item }}</p>
-        </div>
-        {% endfor %}
-      </div>
-      {% endif %}
-    </article>
-
-    <article class="panel publication-panel">
-      <p class="eyebrow">TikTok</p>
-      <h3>Publicação cruzada</h3>
-      <div class="stats-grid compact">
-        <div><strong>Automação</strong><span>{% if tiktok_integration.enabled %}ligada{% else %}pausada{% endif %}</span></div>
-        <div><strong>Token TikTok</strong><span>{% if tiktok_integration.token_configured %}configurado{% else %}ausente{% endif %}</span></div>
-        <div><strong>Privacidade</strong><span>{{ tiktok_integration.privacy_level }}</span></div>
-        <div><strong>Backlog/dia</strong><span>{{ tiktok_integration.retropost_daily_limit }}</span></div>
-      </div>
-      <div class="publication-metrics compact">
-        <span><strong>{{ metrics.tiktok_scheduled_count }}</strong> pendentes</span>
-        <span><strong>{{ metrics.tiktok_published_count }}</strong> publicados</span>
-        <span><strong>{{ metrics.tiktok_failed_count }}</strong> falhas</span>
-      </div>
-      {% if tiktok_integration.missing_items %}
-      <div class="publication-list">
-        {% for item in tiktok_integration.missing_items %}
-        <div class="publication-item">
-          <strong>Configuração pendente</strong>
-          <p>{{ item }}</p>
-        </div>
-        {% endfor %}
-      </div>
-      {% endif %}
-    </article>
-
-    <article class="panel publication-panel">
-      <p class="eyebrow">Aprovados sem agenda</p>
-      <h3>Para agendar</h3>
-      <div class="publication-list">
-        {% for entry in ready_to_schedule %}
-        <a class="publication-item publication-link" href="/jobs/{{ entry.job_id }}">
-          <strong>{{ entry.title }}</strong>
-          <small>{{ entry.job_id[:8] }}</small>
-        </a>
-        {% else %}
-        <div class="publication-item empty">
-          <strong>Nenhum job aguardando agenda.</strong>
-        </div>
-        {% endfor %}
-      </div>
-    </article>
-
-    <article class="panel publication-panel">
-      <p class="eyebrow">Agenda ativa</p>
-      <h3>Próximos</h3>
-      <div class="publication-list">
-        {% for entry in upcoming_schedule %}
-        <a class="publication-item publication-link" href="/jobs/{{ entry.job_id }}">
-          <strong>{{ entry.title }}</strong>
-          <p>{{ entry.schedule.local_date }} às {{ entry.schedule.local_time }} · {{ entry.schedule.timezone }}</p>
-          <small>{{ schedule_status_label(entry.schedule.status) }} · {{ ui.youtube_visibility_label(entry.schedule.youtube_visibility) }}</small>
-          <div class="calendar-badges">
-            <span class="badge {{ entry.schedule.status }}">{{ schedule_status_label(entry.schedule.status) }}</span>
-          </div>
-        </a>
-        {% else %}
-        <div class="publication-item empty">
-          <strong>Nenhum upload futuro programado.</strong>
-        </div>
-        {% endfor %}
-      </div>
-    </article>
-
-    <article class="panel publication-panel">
-      <p class="eyebrow">Histórico e Analytics</p>
-      <h3>Publicados</h3>
+      <p class="eyebrow">Base de análise</p>
+      <h3>Vídeos publicados para sincronizar</h3>
+      <p class="publication-note">Esta lista alimenta o ranking e as recomendações; agenda, conexão do canal e publicação ficam nas áreas operacionais.</p>
       <div class="publication-list">
         {% for entry in recent_publications %}
         <div class="publication-item">
           <a class="publication-link" href="/jobs/{{ entry.job_id }}">
             <strong>{{ entry.title }}</strong>
-            <p>{{ entry.schedule.published_local_label or entry.schedule.local_date }}</p>
-            <small>{{ entry.schedule.youtube_url or "publicado e registrado no hub" }}</small>
+            <p>{{ entry.schedule.published_local_label or entry.schedule.local_date or "publicado no canal" }}</p>
+            <small>{{ entry.schedule.youtube_url or "snapshot pendente" }}</small>
           </a>
           {% if entry.schedule.youtube_video_id %}
           <form method="post" action="/jobs/{{ entry.job_id }}/youtube-analytics/sync" class="inline-form">
@@ -253,13 +102,11 @@
             <button type="submit" class="ghost">Sincronizar Analytics</button>
           </form>
           {% endif %}
-          <div class="calendar-badges">
-            <span class="badge {{ entry.schedule.status }}">{{ schedule_status_label(entry.schedule.status) }}</span>
-          </div>
         </div>
         {% else %}
         <div class="publication-item empty">
-          <strong>Nenhuma publicação registrada.</strong>
+          <strong>Nenhum vídeo publicado com vínculo ao hub.</strong>
+          <p>Quando houver vídeos publicados, eles entram aqui para coleta de Analytics.</p>
         </div>
         {% endfor %}
       </div>

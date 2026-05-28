@@ -37,12 +37,12 @@ Uma apresentacao do **Hub de Revisao** orientada a fila, estado e proxima acao s
 _Avoid_: formulario administrativo, landing page, dashboard decorativo
 
 **Centro de Crescimento do Canal**:
-A superficie do **Hub de Revisao** onde uma pessoa acompanha publicacao, performance, aprendizado editorial e recomendacoes para proximos **Jobs de Video**.
-_Avoid_: centro de publicacao, centro de analises, dashboard generico, tutor solto
+A superficie do **Hub de Revisao** dedicada a estatisticas, aprendizado editorial e recomendacoes para melhorar proximos **Jobs de Video**.
+_Avoid_: centro de publicacao, configuracao, agenda operacional, dashboard generico, tutor solto
 
 **Secao Operacional de Publicacao**:
-A parte do **Centro de Crescimento do Canal** que mostra conexao, agenda, aprovados sem agenda e publicacoes recentes sem dominar a leitura de crescimento.
-_Avoid_: centro de publicacao isolado, agenda como tela principal, publicacao sem performance
+A superficie operacional que mostra conexao, agenda, aprovados sem agenda e publicacoes recentes fora do **Centro de Crescimento do Canal**.
+_Avoid_: misturar configuracao com crescimento, agenda dentro do centro de crescimento, publicacao sem contexto operacional
 
 **Relatorio Automatizado de Performance**:
 Uma leitura recorrente dos resultados de **Jobs de Video** publicados para identificar o que funcionou, o que caiu e o que deve orientar proximos conteudos.
