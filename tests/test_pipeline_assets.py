@@ -139,6 +139,30 @@ def test_scene_plan_gate_matches_visual_contract_hook_terms_semantically() -> No
 
     assert result.passed
 
+def test_visual_contract_normalization_drops_forbidden_reveal_that_conflicts_with_approved_beat() -> None:
+    from app.editorial.visual_contract import normalize_visual_contract_payload
+
+    contract = normalize_visual_contract_payload(
+        {
+            "loop_policy": {
+                "forbidden_early_reveal": [
+                    "diagramas de osmose",
+                    "cidade inteira cabe numa mesa",
+                ]
+            },
+            "beat_progression": [
+                {
+                    "source_text": "O açúcar concentrado puxa água das células por osmose.",
+                    "visual_job": "Mostrar o processo de osmose em uma célula microbiana.",
+                }
+            ],
+        },
+        script={"title": "Mel", "hook": "O mel parece doce.", "ending": "A cidade cabe na mesa."},
+        schema_version="1.0.0",
+    )
+
+    assert contract["loop_policy"]["forbidden_early_reveal"] == ["cidade inteira cabe numa mesa"]
+
 def test_asset_gate_rejects_low_semantic_scene_asset() -> None:
     result = AssetGate().validate_selected(
         [
@@ -300,7 +324,7 @@ def test_estimate_subtitle_timing_drift_reports_boundary_changes() -> None:
 
     report = orchestrator.asset_pipeline.subtitles.estimate_subtitle_timing_drift(cues, items)
 
-    assert report["timing_basis"] == "raw_srt_proportional_split"
+    assert report["timing_basis"] == "raw_srt_token_timeline"
     assert report["drift_item_count"] == 2
     assert report["p95_drift_ms"] > 0
     assert report["max_drift_ms"] >= report["p95_drift_ms"]

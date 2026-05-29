@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.utils import stable_hash
@@ -74,6 +75,15 @@ def normalize_visual_contract_payload(
     hook_frame = raw.get("hook_frame") if isinstance(raw.get("hook_frame"), dict) else {}
     loop_policy = raw.get("loop_policy") if isinstance(raw.get("loop_policy"), dict) else {}
     payoff_frame = raw.get("payoff_frame") if isinstance(raw.get("payoff_frame"), dict) else {}
+    beat_progression = _normalize_beat_progression(raw.get("beat_progression") or raw.get("beats_visual"))
+    forbidden_early_reveal = _filter_conflicting_forbidden_reveals(
+        _text_list(
+            loop_policy.get("forbidden_early_reveal")
+            or loop_policy.get("must_hide_until_payoff")
+            or loop_policy.get("revelacao_proibida_antes")
+        ),
+        beat_progression,
+    )
     contract = {
         "schema_version": schema_version,
         "contract_version": VISUAL_CONTRACT_VERSION,
@@ -138,13 +148,9 @@ def normalize_visual_contract_payload(
                 or loop_policy.get("pergunta_aberta")
                 or loop_policy.get("visual_tension")
             ),
-            "forbidden_early_reveal": _text_list(
-                loop_policy.get("forbidden_early_reveal")
-                or loop_policy.get("must_hide_until_payoff")
-                or loop_policy.get("revelacao_proibida_antes")
-            ),
+            "forbidden_early_reveal": forbidden_early_reveal,
         },
-        "beat_progression": _normalize_beat_progression(raw.get("beat_progression") or raw.get("beats_visual")),
+        "beat_progression": beat_progression,
         "payoff_frame": {
             "reveal": _clean_text(payoff_frame.get("reveal") or payoff_frame.get("revelacao") or payoff_frame.get("payoff")),
             "recommended_visual_intent": _clean_text(
@@ -205,6 +211,67 @@ def _normalize_beat_progression(value: Any) -> list[dict[str, Any]]:
                 }
             )
     return beats
+
+
+def _filter_conflicting_forbidden_reveals(
+    forbidden_items: list[str],
+    beat_progression: list[dict[str, Any]],
+) -> list[str]:
+    approved_visual_text = " ".join(
+        " ".join(
+            [
+                beat.get("source_text", ""),
+                beat.get("visual_job", ""),
+                beat.get("recommended_visual_intent", ""),
+                " ".join(beat.get("must_show", [])),
+            ]
+        )
+        for beat in beat_progression
+    )
+    approved_terms = _normalized_tokens(approved_visual_text)
+    if not approved_terms:
+        return forbidden_items
+    filtered: list[str] = []
+    for item in forbidden_items:
+        item_terms = _normalized_tokens(item)
+        if not item_terms:
+            continue
+        matches = approved_terms & item_terms
+        if not _has_material_overlap(matches, item_terms):
+            filtered.append(item)
+    return filtered
+
+
+def _normalized_tokens(value: Any) -> set[str]:
+    text = _clean_text(value).lower()
+    replacements = str.maketrans(
+        {
+            "á": "a",
+            "à": "a",
+            "ã": "a",
+            "â": "a",
+            "é": "e",
+            "ê": "e",
+            "í": "i",
+            "ó": "o",
+            "ô": "o",
+            "õ": "o",
+            "ú": "u",
+            "ç": "c",
+        }
+    )
+    text = text.translate(replacements)
+    return {token for token in re.findall(r"[a-z0-9]+", text.replace("_", " ")) if len(token) >= 4}
+
+
+def _has_material_overlap(matches: set[str], item_terms: set[str]) -> bool:
+    if not matches:
+        return False
+    if any(len(term) >= 6 for term in matches):
+        return True
+    if len(item_terms) <= 2:
+        return len(matches) == len(item_terms)
+    return len(matches) >= 2
 
 
 def _retention_text(retention_map: dict[str, Any], code: str) -> str:

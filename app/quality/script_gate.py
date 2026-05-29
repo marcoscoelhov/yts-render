@@ -167,6 +167,10 @@ SUSPICIOUS_PRECISION_PATTERN = re.compile(
     r"\b(?:apenas|s[oó]|somente)\s+\d+(?:[,.]\d+)?\s*(?:centímetros|centimetros|cm|milímetros|milimetros|mm)\b",
     re.IGNORECASE,
 )
+UNSUPPORTED_PUBLIC_CLAIM_PATTERN = re.compile(
+    r"\b(?:j[aá]\s+foram?|foi|foram)\s+(?:vendid[ao]s?|divulgad[ao]s?|publicad[ao]s?)\s+como\b",
+    re.IGNORECASE,
+)
 
 PISA_UNSUPPORTED_CLAIM_MARKERS = {
     "sapatas de concreto",
@@ -538,6 +542,8 @@ class ScriptQualityGate:
         if any(marker in normalized for marker in {self._normalize(item) for item in OVERCONFIDENT_FACT_MARKERS}):
             return True
         if SUSPICIOUS_PRECISION_PATTERN.search(text):
+            return True
+        if UNSUPPORTED_PUBLIC_CLAIM_PATTERN.search(text):
             return True
         if "pisa" in normalized and any(marker in normalized for marker in {self._normalize(item) for item in PISA_UNSUPPORTED_CLAIM_MARKERS}):
             return True

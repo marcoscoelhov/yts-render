@@ -26,6 +26,11 @@ SCIENCE_TOPIC_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+NEGATED_SCIENCE_CONTEXT_PATTERN = re.compile(
+    r"\b(?:sem|nao|não)\s+(?:explica[cç][aã]o\s+)?cient[ií]fic[oa]s?\b",
+    re.IGNORECASE,
+)
+
 
 def _read_field(source: Any, field: str, default: Any = None) -> Any:
     if isinstance(source, Mapping):
@@ -45,7 +50,10 @@ def resolve_editorial_mode(topic_plan: Any | None = None, request: Any | None = 
     if override_text and STRICT_OVERRIDE_PATTERN.search(override_text):
         return "factual_strict"
     source_text = " ".join(part for part in [seed_theme, canonical_topic, angle, hook_promise] if part).strip()
-    if source_text and (HIGH_RISK_TOPIC_PATTERN.search(source_text) or SCIENCE_TOPIC_PATTERN.search(source_text)):
+    source_text_for_risk = NEGATED_SCIENCE_CONTEXT_PATTERN.sub(" ", source_text)
+    if source_text_for_risk and (
+        HIGH_RISK_TOPIC_PATTERN.search(source_text_for_risk) or SCIENCE_TOPIC_PATTERN.search(source_text_for_risk)
+    ):
         return "factual_strict"
     if isinstance(quality_metrics, Mapping):
         existing_mode = str(quality_metrics.get("editorial_mode") or "").strip()

@@ -226,6 +226,36 @@ class SubtitleDomain:
         return [item for item in repaired if str(item.get("text") or "").strip()]
 
     def estimate_subtitle_timing_drift(self, cues: list[dict[str, Any]], items: list[dict[str, Any]]) -> dict[str, Any]:
+        token_timeline = self._raw_srt_token_timeline(cues)
+        if token_timeline:
+            drifts_ms: list[int] = []
+            drift_items: list[dict[str, Any]] = []
+            for item in items:
+                token_start = int(item.get("token_start", 0))
+                token_end = int(item.get("token_end", token_start))
+                if token_start not in token_timeline or token_end not in token_timeline:
+                    continue
+                expected_start_ms, _ = token_timeline[token_start]
+                _, expected_end_ms = token_timeline[token_end]
+                actual_start_ms = int(item["start_ms"])
+                actual_end_ms = int(item["end_ms"])
+                drift_ms = max(abs(actual_start_ms - expected_start_ms), abs(actual_end_ms - expected_end_ms))
+                drifts_ms.append(drift_ms)
+                drift_items.append(
+                    {
+                        "idx": item.get("idx"),
+                        "token_start": token_start,
+                        "token_end": token_end,
+                        "drift_ms": drift_ms,
+                        "expected_start_ms": expected_start_ms,
+                        "expected_end_ms": expected_end_ms,
+                        "actual_start_ms": actual_start_ms,
+                        "actual_end_ms": actual_end_ms,
+                    }
+                )
+            if drifts_ms:
+                return self._subtitle_drift_report("raw_srt_token_timeline", drifts_ms, drift_items)
+
         cue_map = {int(cue["idx"]): cue for cue in cues if cue.get("idx") is not None}
         grouped_items: dict[int, list[dict[str, Any]]] = {}
         for item in items:
@@ -270,8 +300,36 @@ class SubtitleDomain:
                     }
                 )
         if not drifts_ms:
+            return self._subtitle_drift_report("raw_srt_proportional_split", [], [])
+        return self._subtitle_drift_report("raw_srt_proportional_split", drifts_ms, drift_items)
+
+    def _raw_srt_token_timeline(self, cues: list[dict[str, Any]]) -> dict[int, tuple[int, int]]:
+        timeline: dict[int, tuple[int, int]] = {}
+        cursor = 0
+        for cue in cues:
+            cue_words = word_tokens(str(cue.get("text") or ""))
+            if not cue_words:
+                continue
+            cue_start_ms = int(cue["start_ms"])
+            cue_end_ms = int(cue["end_ms"])
+            cue_duration_ms = max(cue_end_ms - cue_start_ms, len(cue_words))
+            total_words = len(cue_words)
+            for offset in range(total_words):
+                start_ms = cue_start_ms + round(offset / total_words * cue_duration_ms)
+                end_ms = cue_start_ms + round((offset + 1) / total_words * cue_duration_ms)
+                timeline[cursor + offset] = (start_ms, max(end_ms, start_ms + 1))
+            cursor += total_words
+        return timeline
+
+    def _subtitle_drift_report(
+        self,
+        timing_basis: str,
+        drifts_ms: list[int],
+        drift_items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if not drifts_ms:
             return {
-                "timing_basis": "raw_srt_proportional_split",
+                "timing_basis": timing_basis,
                 "drift_item_count": 0,
                 "p95_drift_ms": 0,
                 "max_drift_ms": 0,
@@ -281,7 +339,7 @@ class SubtitleDomain:
         percentile_index = max(0, math.ceil(len(sorted_drifts) * 0.95) - 1)
         worst_items = sorted(drift_items, key=lambda item: int(item["drift_ms"]), reverse=True)[:5]
         return {
-            "timing_basis": "raw_srt_proportional_split",
+            "timing_basis": timing_basis,
             "drift_item_count": len(drifts_ms),
             "p95_drift_ms": int(sorted_drifts[percentile_index]),
             "max_drift_ms": int(sorted_drifts[-1]),

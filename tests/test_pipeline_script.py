@@ -612,6 +612,40 @@ def test_script_gate_rejects_overconfident_or_unsupported_pisa_claims() -> None:
     assert not result.passed
     assert "overconfident_or_unsupported_factual_claim" in result.reasons
 
+def test_script_gate_rejects_unverified_sold_as_real_public_claim() -> None:
+    script = {
+        "title": "Dioramas parecem cidades reais",
+        "hook": "Cidades completas em miniatura enganam seu olho.",
+        "body_beats": [
+            "Cada janela tem luz interna e ruas minúsculas.",
+            "A mão no quadro revela a escala no final.",
+        ],
+        "ending": "Fotografias desses dioramas já foram vendidas como imagens de cidades verdadeiras.",
+        "cta": None,
+        "full_narration": (
+            "Cidades completas em miniatura enganam seu olho. "
+            "Cada janela tem luz interna e ruas minúsculas. "
+            "A mão no quadro revela a escala no final. "
+            "Fotografias desses dioramas já foram vendidas como imagens de cidades verdadeiras."
+        ),
+        "estimated_duration_sec": 35,
+        "key_facts": [],
+        "token_count": 42,
+        "language": "pt-BR",
+        "qa_metrics": {
+            "hook_score": 0.8,
+            "clarity_score": 0.9,
+            "information_density_score": 0.8,
+            "repetition_score": 0.1,
+            "ending_strength_score": 0.8,
+        },
+    }
+
+    result = ScriptQualityGate().validate(script, target_duration_sec=35)
+
+    assert not result.passed
+    assert "overconfident_or_unsupported_factual_claim" in result.reasons
+
 def test_fact_pack_rejects_verified_source_for_wrong_primary_topic(monkeypatch) -> None:
     pipeline = orchestrator.script_pipeline
     monkeypatch.setattr(pipeline.settings, "use_mock_providers", False)
@@ -670,6 +704,23 @@ def test_script_pipeline_defaults_non_scientific_curiosidades_to_viral_mode() ->
         quality_metrics={},
     )
     request = SimpleNamespace(seed_theme="lugares abandonados curiosos", notes=None, requested_angle=None)
+
+    assert pipeline._editorial_mode(topic_plan, request) == "viral_curiosidades"
+    assert pipeline._topic_requires_verified_fact_pack(topic_plan, request) is False
+
+def test_script_pipeline_does_not_promote_negated_science_angle_to_factual_mode() -> None:
+    pipeline = orchestrator.script_pipeline
+    topic_plan = SimpleNamespace(
+        canonical_topic="Dioramas hiper-realistas que parecem cidades reais",
+        angle="visual cinematográfico sem explicação científica",
+        hook_promise="mostrar uma cidade falsa que engana o olho humano",
+        quality_metrics={},
+    )
+    request = SimpleNamespace(
+        seed_theme="Dioramas: cidades falsas que parecem reais",
+        notes=None,
+        requested_angle="visual cinematográfico sem explicação científica",
+    )
 
     assert pipeline._editorial_mode(topic_plan, request) == "viral_curiosidades"
     assert pipeline._topic_requires_verified_fact_pack(topic_plan, request) is False
